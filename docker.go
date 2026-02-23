@@ -16,6 +16,7 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -114,7 +115,9 @@ func hashDir(h io.Writer, dir string) error {
 	}
 	sort.Strings(paths)
 	for _, rel := range paths {
-		_, _ = io.WriteString(h, rel)
+		// Use forward slashes so the hash matches embeddedContextSHA on all
+		// platforms (fs.WalkDir on embed.FS always uses forward slashes).
+		_, _ = io.WriteString(h, filepath.ToSlash(rel))
 		data, err := os.ReadFile(filepath.Join(dir, rel))
 		if err != nil {
 			return err
@@ -357,7 +360,7 @@ func appendCacheLayers(dockerfilePath string, caches []CacheMount, home string, 
 	const base = "/home/user"
 	seen := map[string]bool{}
 	for _, a := range active {
-		for dir := filepath.Dir(a.cm.ContainerPath); dir != base && dir != "." && dir != "/"; dir = filepath.Dir(dir) {
+		for dir := path.Dir(a.cm.ContainerPath); dir != base && dir != "." && dir != "/"; dir = path.Dir(dir) {
 			seen[dir] = true
 		}
 	}
@@ -541,11 +544,11 @@ func formatCount(n int64) string {
 
 // resolveHostPath expands a leading "~/" to home; absolute paths are returned
 // unchanged.
-func resolveHostPath(path, home string) string {
-	if strings.HasPrefix(path, "~/") {
-		return filepath.Join(home, path[2:])
+func resolveHostPath(p, home string) string {
+	if strings.HasPrefix(p, "~/") {
+		return path.Join(home, p[2:])
 	}
-	return path
+	return p
 }
 
 // printCacheInfo walks each cache directory in parallel and writes one summary
