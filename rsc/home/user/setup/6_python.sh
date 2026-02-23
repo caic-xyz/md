@@ -9,6 +9,12 @@ curl -LsSf https://astral.sh/uv/install.sh | sh -s -- --quiet
 # shellcheck disable=SC1091
 . "$HOME/.local/bin/env" 2>/dev/null || true
 
+# Install pip in user mode.
+curl -sSL https://bootstrap.pypa.io/get-pip.py | python3 - --user --quiet
+
+# Install virtualenv and pyyaml (claude sometimes spontaneously uses them)
+"$HOME/.local/bin/pip" install --user --quiet virtualenv pyyaml
+
 # Install Python development tools
 uv tool install --quiet black
 uv tool install --quiet pylint
