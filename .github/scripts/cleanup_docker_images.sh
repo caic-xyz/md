@@ -33,7 +33,7 @@ REPO="${GITHUB_REPOSITORY#*/}"
 
 echo "Starting cleanup for image package: $OWNER/$REPO"
 
-CUTOFF_DATE=$(date -d '30 days ago' +%s)
+CUTOFF_DATE=$(date -d '7 days ago' +%s)
 CUTOFF_DATE_FMT=$(date -d @"$CUTOFF_DATE")
 echo "Cutoff date: $CUTOFF_DATE_FMT"
 
