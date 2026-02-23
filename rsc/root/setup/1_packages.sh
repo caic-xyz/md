@@ -13,10 +13,12 @@ echo "- apt-get install"
 apt-get install -qq -y --no-install-recommends \
 	bash-completion \
 	binutils \
+	bison \
 	brotli \
 	bubblewrap \
 	build-essential \
 	ca-certificates \
+	ccache \
 	chromium \
 	chromium-sandbox \
 	clang \
@@ -24,10 +26,13 @@ apt-get install -qq -y --no-install-recommends \
 	cpu-checker \
 	curl \
 	dbus-x11 \
+	dfu-util \
 	extrepo \
 	ffmpeg \
 	file \
+	flex \
 	git \
+	gperf \
 	gpg \
 	gradle \
 	imagemagick \
@@ -36,9 +41,11 @@ apt-get install -qq -y --no-install-recommends \
 	kmod \
 	less \
 	libc6-dev \
+	libffi-dev \
 	libgl1 \
 	librsvg2-bin \
 	libssl-dev \
+	libusb-1.0-0 \
 	libvirt-clients \
 	libvirt-daemon \
 	libvirt-daemon-system \
@@ -46,11 +53,13 @@ apt-get install -qq -y --no-install-recommends \
 	locales \
 	lsof \
 	net-tools \
+	ninja-build \
 	openjdk-21-jdk-headless \
 	openssh-server \
 	pkg-config \
 	python-is-python3 \
 	python3 \
+	python3-pip \
 	python3-venv \
 	python3-yaml \
 	qemu-kvm \
