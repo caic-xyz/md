@@ -81,6 +81,9 @@ apt-get install -qq -y --no-install-recommends \
 	xxd \
 	zstd >/dev/null
 
+# Remove PEP 668 marker — pip install --user is safe and this is a container.
+rm -f /usr/lib/python3.*/EXTERNALLY-MANAGED
+
 sed -i 's/^# - /- /g' /etc/extrepo/config.yaml
 if ! grep -q '^en_US.UTF-8 UTF-8' /etc/locale.gen; then
 	sed -i 's/^# *en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen || echo 'en_US.UTF-8 UTF-8' >>/etc/locale.gen
