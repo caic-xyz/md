@@ -18,6 +18,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"time"
@@ -91,6 +92,8 @@ func mainImpl() error {
 		return cmdVNC(ctx, args)
 	case "build-image":
 		return cmdBuildImage(ctx, args)
+	case "version":
+		return cmdVersion(args)
 	case "help", "-h", "-help", "--help":
 		usage()
 		return nil
@@ -116,6 +119,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  diff        Show differences between base and current changes")
 	fmt.Fprintln(os.Stderr, "  vnc         Open VNC connection to the container")
 	fmt.Fprintln(os.Stderr, "  build-image Build the base Docker image locally")
+	fmt.Fprintln(os.Stderr, "  version     Print version information")
 }
 
 func newClient() (*md.Client, error) {
@@ -554,6 +558,46 @@ func cmdBuildImage(ctx context.Context, args []string) error {
 		return err
 	}
 	return c.BuildImage(ctx, *serialSetup)
+}
+
+func cmdVersion(args []string) error {
+	fs := flag.NewFlagSet("version", flag.ExitOnError)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() > 0 {
+		return fmt.Errorf("version: unexpected arguments: %s", strings.Join(fs.Args(), " "))
+	}
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		_, err := fmt.Println("md (unknown version; no build info)")
+		return err
+	}
+	settings := make(map[string]string, len(info.Settings))
+	for _, s := range info.Settings {
+		settings[s.Key] = s.Value
+	}
+	version := info.Main.Version
+	if version == "" || version == "(devel)" {
+		// No module version stamped; build from VCS info.
+		rev := settings["vcs.revision"]
+		if rev == "" {
+			_, err := fmt.Println("md (unknown version; no VCS info)")
+			return err
+		}
+		if len(rev) > 12 {
+			rev = rev[:12]
+		}
+		version = rev
+		if settings["vcs.modified"] == "true" {
+			version += "-dirty"
+		}
+		if t := settings["vcs.time"]; t != "" {
+			version += " " + t
+		}
+	}
+	_, err := fmt.Printf("md %s\n", version)
+	return err
 }
 
 func noArgs(cmd string, args []string) error {
