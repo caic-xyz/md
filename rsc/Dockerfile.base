@@ -10,7 +10,7 @@
 
 # We don't need it to be stuck on old images so just fetch whatever is current latest.
 FROM docker.io/debian:stable AS final
-LABEL org.opencontainers.image.source=https://github.com/maruel/md \
+LABEL org.opencontainers.image.source=https://github.com/caic-xyz/md \
       org.opencontainers.image.licenses=Apache-2.0
 # FROM ghcr.io/linuxcontainers/debian-slim:latest
 

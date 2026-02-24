@@ -55,7 +55,7 @@ md kill
 ## Installation
 
 ```bash
-go install github.com/maruel/md/cmd/md@latest
+go install github.com/caic-xyz/md/cmd/md@latest
 ```
 
 **Recommended:** Also install [git-maruel](https://github.com/maruel/git-maruel) for the `git squash` and `git rb` helpers.

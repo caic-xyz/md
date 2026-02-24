@@ -1,5 +1,5 @@
 # shellcheck shell=bash
-# Source: https://github.com/maruel/md
+# Source: https://github.com/caic-xyz/md
 
 alias amp="$(command -v amp 2>/dev/null || echo amp) --dangerously-allow-all"
 alias claude="$(command -v claude 2>/dev/null || echo claude) --dangerously-skip-permissions --allow-dangerously-skip-permissions --permission-mode dontAsk"
