@@ -7,7 +7,7 @@ package main
 import (
 	"testing"
 
-	"github.com/maruel/md"
+	"github.com/caic-xyz/md"
 )
 
 func TestResolveCaches(t *testing.T) {

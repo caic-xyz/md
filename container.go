@@ -18,9 +18,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/caic-xyz/md/gitutil"
 	"github.com/maruel/genai"
 	"github.com/maruel/genai/providers"
-	"github.com/maruel/md/gitutil"
 	"golang.org/x/term"
 )
 

@@ -22,8 +22,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/maruel/md"
-	"github.com/maruel/md/gitutil"
+	"github.com/caic-xyz/md"
+	"github.com/caic-xyz/md/gitutil"
 )
 
 func main() {

@@ -195,7 +195,7 @@ func (c *Client) BuildImage(ctx context.Context, serialSetup bool) (retErr error
 	} else {
 		_, _ = fmt.Fprintln(c.W, "WARNING: GITHUB_TOKEN not found. Some tools (neovim, rust-analyzer, etc) might fail to install or hit rate limits.")
 		_, _ = fmt.Fprintln(c.W, "Please set GITHUB_TOKEN to avoid issues:")
-		_, _ = fmt.Fprintln(c.W, "  https://github.com/settings/personal-access-tokens/new?name=md-build-image&description=Token%20to%20help%20generating%20local%20docker%20images%20for%20https://github.com/maruel/md")
+		_, _ = fmt.Fprintln(c.W, "  https://github.com/settings/personal-access-tokens/new?name=md-build-image&description=Token%20to%20help%20generating%20local%20docker%20images%20for%20https://github.com/caic-xyz/md")
 		_, _ = fmt.Fprintln(c.W, "  export GITHUB_TOKEN=...")
 	}
 	cmd = append(cmd, buildCtx)

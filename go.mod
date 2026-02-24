@@ -1,4 +1,4 @@
-module github.com/maruel/md
+module github.com/caic-xyz/md
 
 go 1.25.7
 
