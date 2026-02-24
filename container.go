@@ -41,12 +41,12 @@ func runCmd(ctx context.Context, dir string, args []string, capture bool) (strin
 }
 
 // DefaultBaseImage is the base image used when none is specified.
-const DefaultBaseImage = "ghcr.io/maruel/md"
+const DefaultBaseImage = "ghcr.io/caic-xyz/md"
 
 // StartOpts configures container startup.
 type StartOpts struct {
 	// BaseImage is the full Docker image reference (e.g.
-	// "ghcr.io/maruel/md:v1.0" or "myregistry/custom:tag"). When empty,
+	// "ghcr.io/caic-xyz/md:v0.7.1" or "myregistry/custom:tag"). When empty,
 	// DefaultBaseImage is used.
 	BaseImage string
 	// Display enables X11/VNC virtual display (port 5901).

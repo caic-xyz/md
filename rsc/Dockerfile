@@ -4,7 +4,7 @@
 # source code is governed by an Apache License, Version 2.0 that can be found
 # in the LICENSE file.
 
-ARG BASE_IMAGE=ghcr.io/maruel/md
+ARG BASE_IMAGE=ghcr.io/caic-xyz/md
 FROM ${BASE_IMAGE}
 
 ARG BASE_IMAGE
