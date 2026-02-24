@@ -60,7 +60,7 @@ go install github.com/caic-xyz/md/cmd/md@latest
 
 **Recommended:** Also install [git-maruel](https://github.com/maruel/git-maruel) for the `git squash` and `git rb` helpers.
 
-### Harnesses
+## Harnesses
 
 See [HARNESSES.md](HARNESSES.md) for coding harness (claude code, codex, etc) specifics.
 
