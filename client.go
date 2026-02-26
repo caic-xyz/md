@@ -203,6 +203,10 @@ func (c *Client) BuildImage(ctx context.Context, serialSetup bool) (retErr error
 		return err
 	}
 	_, _ = fmt.Fprintln(c.W, "- Base image built as 'md-local'.")
+	// Clean up BuildKit cache (--mount=type=cache volumes from Dockerfile.base).
+	// These are only useful during the build itself; pruning avoids leaving
+	// orphaned resources on disk.
+	_, _ = runCmd(ctx, "", []string{"docker", "builder", "prune", "-f"}, true)
 	return nil
 }
 
