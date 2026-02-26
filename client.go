@@ -206,7 +206,9 @@ func (c *Client) BuildImage(ctx context.Context, serialSetup bool) (retErr error
 	// Clean up BuildKit cache (--mount=type=cache volumes from Dockerfile.base).
 	// These are only useful during the build itself; pruning avoids leaving
 	// orphaned resources on disk.
-	_, _ = runCmd(ctx, "", []string{"docker", "builder", "prune", "-f"}, true)
+	if _, err := runCmd(ctx, "", []string{"docker", "builder", "prune", "-f"}, true); err != nil {
+		return fmt.Errorf("pruning build cache: %w", err)
+	}
 	return nil
 }
 
