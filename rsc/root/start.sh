@@ -4,12 +4,17 @@ set -eu
 # Generate dynamic motd with hostname
 echo "Connected to $(hostname)" >/etc/motd
 
-# If /dev/kvm exists, update the kvm group GID to match the host
+# If /dev/kvm exists, update the kvm group GID to match the host.
+# In rootless Docker, device GIDs map to the overflow GID (65534) and groupmod
+# would fail because that GID is already taken by nogroup. Skip in that case.
 if [ -e /dev/kvm ]; then
 	host_kvm_gid=$(stat -c %g /dev/kvm)
 	current_kvm_gid=$(getent group kvm | cut -d: -f3)
 	if [ "$host_kvm_gid" != "$current_kvm_gid" ]; then
-		groupmod -g "$host_kvm_gid" kvm
+		existing=$(getent group "$host_kvm_gid" | cut -d: -f1)
+		if [ -z "$existing" ]; then
+			groupmod -g "$host_kvm_gid" kvm
+		fi
 	fi
 fi
 
@@ -73,13 +78,17 @@ if [ -n "${MD_TAILSCALE:-}" ]; then
 	fi
 fi
 
-# If /dev/bus/usb exists, update the plugdev group GID to match the host
+# If /dev/bus/usb exists, update the plugdev group GID to match the host.
+# Same rootless Docker guard as above for the kvm group.
 if [ -d /dev/bus/usb ]; then
 	host_plugdev_gid=$(stat -c %g /dev/bus/usb/001/* 2>/dev/null | grep -v '^0$' | head -1)
 	if [ -n "$host_plugdev_gid" ]; then
 		current_plugdev_gid=$(getent group plugdev | cut -d: -f3)
 		if [ "$host_plugdev_gid" != "$current_plugdev_gid" ]; then
-			groupmod -g "$host_plugdev_gid" plugdev
+			existing=$(getent group "$host_plugdev_gid" | cut -d: -f1)
+			if [ -z "$existing" ]; then
+				groupmod -g "$host_plugdev_gid" plugdev
+			fi
 		fi
 	fi
 fi
