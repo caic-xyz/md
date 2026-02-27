@@ -115,7 +115,7 @@ func (c *Client) Prepare() error {
 	}
 
 	// Ensure ~/.ssh/config includes config.d/*.conf.
-	if err := ensureSSHConfigInclude(filepath.Join(c.Home, ".ssh")); err != nil {
+	if err := ensureSSHConfigInclude(c.W, filepath.Join(c.Home, ".ssh")); err != nil {
 		return err
 	}
 
