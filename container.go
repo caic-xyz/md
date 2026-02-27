@@ -215,7 +215,7 @@ func (c *Container) Run(ctx context.Context, baseImage string, command []string,
 	}
 
 	cmdStr := strings.Join(command, " ")
-	_, err := runCmd(ctx, "", []string{"ssh", tmp.Name, "cd ~/src/" + shellQuote(c.RepoName) + " && " + cmdStr}, false)
+	_, err := runCmd(ctx, "", c.SSHCommand(tmp.Name, "cd ~/src/"+shellQuote(c.RepoName)+" && "+cmdStr), false)
 	exitCode := 0
 	if err != nil {
 		var exitErr *exec.ExitError
@@ -303,15 +303,15 @@ func (c *Container) Push(ctx context.Context) error {
 	repo := shellQuote(c.RepoName)
 	branch := shellQuote(c.Branch)
 	// Commit any pending changes in the container.
-	_, _ = runCmd(ctx, "", []string{"ssh", c.Name, "cd ~/src/" + repo + " && git add . && (git diff --quiet HEAD -- . || git commit -q -m 'Backup before push')"}, true)
-	containerCommit, _ := runCmd(ctx, "", []string{"ssh", c.Name, "cd ~/src/" + repo + " && git rev-parse HEAD"}, true)
+	_, _ = runCmd(ctx, "", c.SSHCommand(c.Name, "cd ~/src/"+repo+" && git add . && (git diff --quiet HEAD -- . || git commit -q -m 'Backup before push')"), true)
+	containerCommit, _ := runCmd(ctx, "", c.SSHCommand(c.Name, "cd ~/src/"+repo+" && git rev-parse HEAD"), true)
 	backupBranch := "backup-" + time.Now().Format("20060102-150405")
-	_, _ = runCmd(ctx, "", []string{"ssh", c.Name, "cd ~/src/" + repo + " && git branch -f " + backupBranch + " " + containerCommit}, true)
+	_, _ = runCmd(ctx, "", c.SSHCommand(c.Name, "cd ~/src/"+repo+" && git branch -f "+backupBranch+" "+containerCommit), true)
 	_, _ = fmt.Fprintf(c.W, "- Previous state saved as git branch: %s\n", backupBranch)
 	if _, err := runCmd(ctx, c.GitRoot, []string{"git", "push", "-q", "-f", "--tags", c.Name, c.Branch + ":base"}, false); err != nil {
 		return err
 	}
-	if _, err := runCmd(ctx, "", []string{"ssh", c.Name, "cd ~/src/" + repo + " && git switch -q -C " + branch + " base"}, false); err != nil {
+	if _, err := runCmd(ctx, "", c.SSHCommand(c.Name, "cd ~/src/"+repo+" && git switch -q -C "+branch+" base"), false); err != nil {
 		return err
 	}
 	// Update the local remote-tracking ref so it reflects the pushed state.
@@ -336,14 +336,14 @@ func (c *Container) Fetch(ctx context.Context, provider, model string) error {
 	}
 	repo := shellQuote(c.RepoName)
 	// Check if there are uncommitted changes in the container.
-	if _, err := runCmd(ctx, "", []string{"ssh", c.Name, "cd ~/src/" + repo + " && git add . && git diff --quiet HEAD -- ."}, true); err != nil {
+	if _, err := runCmd(ctx, "", c.SSHCommand(c.Name, "cd ~/src/"+repo+" && git add . && git diff --quiet HEAD -- ."), true); err != nil {
 		commitMsg := "Pull from md"
 		if provider != "" {
 			if p, err := newProvider(ctx, provider, model); err != nil {
 				slog.WarnContext(ctx, "failed to initialize provider", "err", err)
 			} else {
-				metadata := gatherGitMetadata(ctx, c.Name, repo)
-				diff := gatherGitDiff(ctx, c.Name, repo)
+				metadata := c.gatherGitMetadata(ctx, c.Name, repo)
+				diff := c.gatherGitDiff(ctx, c.Name, repo)
 				if msg, err := gitutil.GenerateCommitMsg(ctx, p, metadata, diff, nil); err != nil {
 					slog.WarnContext(ctx, "failed to generate commit message", "err", err)
 				} else if msg != "" {
@@ -355,7 +355,7 @@ func (c *Container) Fetch(ctx context.Context, provider, model string) error {
 		gitUserEmail, _ := gitutil.RunGit(ctx, c.GitRoot, "config", "user.email")
 		gitAuthor := shellQuote(gitUserName + " <" + gitUserEmail + ">")
 		commitCmd := "cd ~/src/" + repo + " && echo " + shellQuote(commitMsg) + " | git commit -a -q --author " + gitAuthor + " -F -"
-		if _, err := runCmd(ctx, "", []string{"ssh", c.Name, commitCmd}, false); err != nil {
+		if _, err := runCmd(ctx, "", c.SSHCommand(c.Name, commitCmd), false); err != nil {
 			return fmt.Errorf("committing in container: %w", err)
 		}
 	}
@@ -417,8 +417,8 @@ func (c *Container) Diff(ctx context.Context, stdout, stderr io.Writer, extraArg
 	for i, a := range extraArgs {
 		quotedArgs[i] = shellQuote(a)
 	}
-	sshArgs := []string{"ssh", "-q"}
-	cmd := exec.CommandContext(ctx, "ssh") // args set below
+	sshArgs := c.SSHCommand("-q")
+	cmd := exec.CommandContext(ctx, sshArgs[0])
 	if f, ok := stdout.(*os.File); ok && term.IsTerminal(int(f.Fd())) {
 		sshArgs = append(sshArgs, "-t")
 		cmd.Stdin = os.Stdin
@@ -624,16 +624,16 @@ func newProvider(ctx context.Context, provider, model string) (genai.Provider, e
 
 // gatherGitMetadata runs SSH commands to collect branch, stat, and log from
 // the container. This data is always small.
-func gatherGitMetadata(ctx context.Context, containerName, repo string) string {
+func (c *Client) gatherGitMetadata(ctx context.Context, containerName, repo string) string {
 	cmd := "cd ~/src/" + repo + " && echo '=== Branch ===' && git rev-parse --abbrev-ref HEAD && echo && echo '=== Files Changed ===' && git diff --stat --cached base -- . && echo && echo '=== Recent Commits ===' && git log -5 base -- ."
-	out, _ := runCmd(ctx, "", []string{"ssh", containerName, cmd}, true)
+	out, _ := runCmd(ctx, "", c.SSHCommand(containerName, cmd), true)
 	return out
 }
 
 // gatherGitDiff runs SSH to get the full patience diff from the container.
-func gatherGitDiff(ctx context.Context, containerName, repo string) string {
+func (c *Client) gatherGitDiff(ctx context.Context, containerName, repo string) string {
 	cmd := "cd ~/src/" + repo + " && git diff --patience -U10 --cached base -- ."
-	out, _ := runCmd(ctx, "", []string{"ssh", containerName, cmd}, true)
+	out, _ := runCmd(ctx, "", c.SSHCommand(containerName, cmd), true)
 	return out
 }
 

@@ -262,7 +262,8 @@ func cmdStart(ctx context.Context, args []string) error {
 		printStartSummary(ct, result)
 	}
 	if !*noSSH {
-		cmd := exec.CommandContext(ctx, "ssh", ct.Name)
+		sshArgs := ct.SSHCommand(ct.Name)
+		cmd := exec.CommandContext(ctx, sshArgs[0], sshArgs[1:]...)
 		cmd.Stdin = os.Stdin
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr

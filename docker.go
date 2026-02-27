@@ -757,7 +757,7 @@ func runContainer(ctx context.Context, c *Container, opts *StartOpts, tailscaleE
 	start := time.Now()
 	var lastOutput string
 	for {
-		out, err := runCmd(ctx, "", []string{"ssh", "-o", "ConnectTimeout=2", c.Name, "exit"}, true)
+		out, err := runCmd(ctx, "", c.SSHCommand("-o", "ConnectTimeout=2", c.Name, "exit"), true)
 		if err == nil {
 			break
 		}
@@ -772,13 +772,13 @@ func runContainer(ctx context.Context, c *Container, opts *StartOpts, tailscaleE
 	branch := shellQuote(c.Branch)
 
 	// Initialize git repo in container.
-	if _, err := runCmd(ctx, "", []string{"ssh", c.Name, "git init -q ~/src/" + repo}, false); err != nil {
+	if _, err := runCmd(ctx, "", c.SSHCommand(c.Name, "git init -q ~/src/"+repo), false); err != nil {
 		return nil, err
 	}
 	if _, err := runCmd(ctx, c.GitRoot, []string{"git", "push", "-q", "--tags", c.Name, c.Branch + ":refs/heads/" + c.Branch}, false); err != nil {
 		return nil, err
 	}
-	if _, err := runCmd(ctx, "", []string{"ssh", c.Name, "cd ~/src/" + repo + " && git switch -q " + branch + " && git branch -f base " + branch + " && git switch -q base && git switch -q " + branch}, false); err != nil {
+	if _, err := runCmd(ctx, "", c.SSHCommand(c.Name, "cd ~/src/"+repo+" && git switch -q "+branch+" && git branch -f base "+branch+" && git switch -q base && git switch -q "+branch), false); err != nil {
 		return nil, err
 	}
 
@@ -789,7 +789,7 @@ func runContainer(ctx context.Context, c *Container, opts *StartOpts, tailscaleE
 	originURL, err := runCmd(ctx, c.GitRoot, []string{"git", "remote", "get-url", c.DefaultRemote}, true)
 	if err == nil && originURL != "" {
 		httpsURL := convertGitURLToHTTPS(originURL)
-		_, _ = runCmd(ctx, "", []string{"ssh", c.Name, "cd ~/src/" + repo + " && git remote add origin " + shellQuote(httpsURL)}, true)
+		_, _ = runCmd(ctx, "", c.SSHCommand(c.Name, "cd ~/src/"+repo+" && git remote add origin "+shellQuote(httpsURL)), true)
 		if !opts.Quiet {
 			_, _ = fmt.Fprintf(c.W, "- Set container origin to %s\n", httpsURL)
 		}
@@ -805,12 +805,13 @@ func runContainer(ctx context.Context, c *Container, opts *StartOpts, tailscaleE
 		if !opts.Quiet {
 			_, _ = fmt.Fprintln(c.W, "- sending .env into container ...")
 		}
-		_, _ = runCmd(ctx, "", []string{"scp", ".env", c.Name + ":/home/user/.env"}, false)
+		_, _ = runCmd(ctx, "", c.SCPCommand(".env", c.Name+":/home/user/.env"), false)
 	}
 
 	// Wait for Tailscale auth URL if needed.
 	if opts.Tailscale && opts.TailscaleAuthKey == "" {
-		cmd := exec.CommandContext(ctx, "ssh", c.Name, "tail -f /tmp/tailscale_auth_url")
+		tailArgs := c.SSHCommand(c.Name, "tail -f /tmp/tailscale_auth_url")
+		cmd := exec.CommandContext(ctx, tailArgs[0], tailArgs[1:]...)
 		stdout, err := cmd.StdoutPipe()
 		if err == nil {
 			if err := cmd.Start(); err == nil {

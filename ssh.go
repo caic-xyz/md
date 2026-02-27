@@ -82,31 +82,32 @@ func writeKnownHosts(knownHostsPath, port, hostPubKey string) error {
 
 // ensureSSHConfigInclude ensures ~/.ssh/config contains an Include directive
 // for config.d/*.conf. When the config file doesn't exist, it is created.
-// When it exists but the directive is missing, the user is prompted with
-// instructions to add it manually.
-func ensureSSHConfigInclude(w io.Writer, sshDir string) error {
+// When it exists but the directive is missing, a warning is printed and the
+// function returns true so the caller can compensate with -o Include on the
+// command line.
+func ensureSSHConfigInclude(w io.Writer, sshDir string) (missing bool, err error) {
 	configPath := filepath.Join(sshDir, "config")
 	needle := "Include config.d/*.conf"
 	data, err := os.ReadFile(configPath)
 	if err != nil && !os.IsNotExist(err) {
-		return err
+		return false, err
 	}
 	// Check whether the Include is already present.
 	for line := range strings.SplitSeq(string(data), "\n") {
 		if strings.TrimSpace(line) == needle {
-			return nil
+			return false, nil
 		}
 	}
 	if len(data) == 0 {
 		// No config file (or empty): safe to create.
 		content := "# Load all configuration files in config.d/.\n" + needle + "\n"
-		return os.WriteFile(configPath, []byte(content), 0o600)
+		return false, os.WriteFile(configPath, []byte(content), 0o600)
 	}
-	// Existing config without the directive: warn rather than silently modifying.
+	// Existing config without the directive: warn and compensate via CLI flags.
 	_, _ = fmt.Fprintf(w, "WARNING: %s is missing the Include directive for per-container SSH configs.\n", configPath)
-	_, _ = fmt.Fprintf(w, "Please add the following line at the top of %s:\n", configPath)
-	_, _ = fmt.Fprintf(w, "  %s\n", needle)
-	return nil
+	_, _ = fmt.Fprintf(w, "  Consider adding the following line at the top of %s:\n", configPath)
+	_, _ = fmt.Fprintf(w, "    %s\n", needle)
+	return true, nil
 }
 
 // removeSSHConfig removes SSH config and known_hosts files for a container.

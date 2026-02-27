@@ -53,6 +53,10 @@ type Client struct {
 	// keysDir is the directory containing SSH host keys and authorized_keys
 	// (~/.config/md/), used as a named Docker build context.
 	keysDir string
+	// sshArgs is the base SSH command, set by Prepare(). It includes
+	// "-o Include=~/.ssh/config.d/*.conf" when the user's ~/.ssh/config
+	// lacks the Include directive.
+	sshArgs []string
 }
 
 // New creates a Client with global MD tool config.
@@ -115,8 +119,14 @@ func (c *Client) Prepare() error {
 	}
 
 	// Ensure ~/.ssh/config includes config.d/*.conf.
-	if err := ensureSSHConfigInclude(c.W, filepath.Join(c.Home, ".ssh")); err != nil {
+	sshDir := filepath.Join(c.Home, ".ssh")
+	missing, err := ensureSSHConfigInclude(c.W, sshDir)
+	if err != nil {
 		return err
+	}
+	c.sshArgs = []string{"ssh"}
+	if missing {
+		c.sshArgs = append(c.sshArgs, "-o", "Include="+filepath.Join(sshDir, "config.d", "*.conf"))
 	}
 
 	// Ensure ~/.claude.json symlink.
@@ -148,6 +158,25 @@ func (c *Client) Prepare() error {
 		return err
 	}
 	return nil
+}
+
+// SSHCommand returns the base SSH command args. Extra arguments (flags,
+// hostname, command) should be appended by the caller. The returned slice is a
+// fresh copy safe to modify.
+func (c *Client) SSHCommand(extraArgs ...string) []string {
+	args := make([]string, len(c.sshArgs), len(c.sshArgs)+len(extraArgs))
+	copy(args, c.sshArgs)
+	return append(args, extraArgs...)
+}
+
+// SCPCommand returns the base SCP command args with the same Include
+// workaround as [SSHCommand]. Extra arguments should be appended by the caller.
+func (c *Client) SCPCommand(extraArgs ...string) []string {
+	// sshArgs[0] is "ssh"; skip it, copy only the -o flags.
+	args := make([]string, 1, 1+len(c.sshArgs)-1+len(extraArgs))
+	args[0] = "scp"
+	args = append(args, c.sshArgs[1:]...)
+	return append(args, extraArgs...)
 }
 
 // List returns running md containers sorted by name.
