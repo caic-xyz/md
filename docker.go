@@ -700,7 +700,7 @@ func runContainer(ctx context.Context, c *Container, opts *StartOpts, tailscaleE
 	result := &StartResult{}
 
 	// Get SSH port and creation time.
-	port, err := runCmd(ctx, "", []string{"docker", "inspect", "--format", `{{(index .NetworkSettings.Ports "22/tcp" 0).HostPort}}`, c.Name}, true)
+	port, err := getHostPort(ctx, c.Name, "22/tcp")
 	if err != nil {
 		return nil, fmt.Errorf("getting SSH port: %w", err)
 	}
@@ -720,7 +720,7 @@ func runContainer(ctx context.Context, c *Container, opts *StartOpts, tailscaleE
 
 	// Get VNC port if display enabled.
 	if opts.Display {
-		vncPort, _ := runCmd(ctx, "", []string{"docker", "inspect", "--format", `{{(index .NetworkSettings.Ports "5901/tcp" 0).HostPort}}`, c.Name}, true)
+		vncPort, _ := getHostPort(ctx, c.Name, "5901/tcp")
 		result.VNCPort = vncPort
 		if vncPort != "" && !opts.Quiet {
 			_, _ = fmt.Fprintf(c.W, "- Found VNC port %s (display :1)\n", vncPort)

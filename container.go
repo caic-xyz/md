@@ -437,14 +437,29 @@ func (c *Container) GetHostPort(ctx context.Context, containerPort string) (stri
 	if _, err := runCmd(ctx, "", []string{"docker", "inspect", c.Name}, true); err != nil {
 		return "", fmt.Errorf("container %s is not running", c.Name)
 	}
-	port, err := runCmd(ctx, "", []string{"docker", "inspect", "--format", `{{(index .NetworkSettings.Ports "` + containerPort + `" 0).HostPort}}`, c.Name}, true)
+	return getHostPort(ctx, c.Name, containerPort)
+}
+
+// getHostPort extracts the host port for containerPort from a running
+// container. It uses JSON output instead of Go templates to work around
+// Docker 27's "index of untyped nil" bug when port bindings are nil.
+func getHostPort(ctx context.Context, container, containerPort string) (string, error) {
+	raw, err := runCmd(ctx, "", []string{"docker", "inspect", "--format", "{{json .NetworkSettings.Ports}}", container}, true)
 	if err != nil {
 		return "", err
 	}
-	if port == "" {
+	var ports map[string][]struct {
+		HostIP   string `json:"HostIp"`
+		HostPort string `json:"HostPort"`
+	}
+	if err := json.Unmarshal([]byte(raw), &ports); err != nil {
+		return "", fmt.Errorf("parsing port map: %w", err)
+	}
+	bindings := ports[containerPort]
+	if len(bindings) == 0 {
 		return "", nil
 	}
-	return port, nil
+	return bindings[0].HostPort, nil
 }
 
 // tailscaleStatus is the subset of `tailscale status --json` we care about.
