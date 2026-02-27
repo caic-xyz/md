@@ -5,6 +5,8 @@
 package md
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -74,6 +76,45 @@ func TestWellKnownCaches(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestRuntime(t *testing.T) {
+	t.Run("new_defaults_to_docker", func(t *testing.T) {
+		c, err := New()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.Runtime == "" {
+			t.Error("New() should set Runtime")
+		}
+	})
+	t.Run("explicit", func(t *testing.T) {
+		c := &Client{Runtime: "podman"}
+		if c.Runtime != "podman" {
+			t.Errorf("Runtime = %q, want %q", c.Runtime, "podman")
+		}
+	})
+}
+
+func TestDetectRuntime(t *testing.T) {
+	t.Run("fallback_to_docker", func(t *testing.T) {
+		// Use empty PATH to test fallback when neither docker nor podman is found.
+		t.Setenv("PATH", t.TempDir())
+		if got := detectRuntime(); got != "docker" {
+			t.Errorf("detectRuntime() = %q, want %q (fallback)", got, "docker")
+		}
+	})
+	t.Run("finds_podman_when_no_docker", func(t *testing.T) {
+		dir := t.TempDir()
+		podmanPath := filepath.Join(dir, "podman")
+		if err := os.WriteFile(podmanPath, []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("PATH", dir)
+		if got := detectRuntime(); got != "podman" {
+			t.Errorf("detectRuntime() = %q, want %q", got, "podman")
+		}
+	})
 }
 
 func TestRscFS(t *testing.T) {

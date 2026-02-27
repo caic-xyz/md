@@ -128,7 +128,7 @@ type StartResult struct {
 // Start creates and starts a container.
 func (c *Container) Start(ctx context.Context, opts *StartOpts) (_ *StartResult, retErr error) {
 	// Check if container already exists.
-	if _, err := runCmd(ctx, "", []string{"docker", "inspect", c.Name}, true); err == nil {
+	if _, err := runCmd(ctx, "", []string{c.Runtime, "inspect", c.Name}, true); err == nil {
 		return nil, fmt.Errorf("container %s already exists. SSH in with 'ssh %s' or clean it up via 'md kill' first",
 			c.Name, c.Name)
 	}
@@ -151,7 +151,7 @@ func (c *Container) Start(ctx context.Context, opts *StartOpts) (_ *StartResult,
 	if baseImage == "" {
 		baseImage = DefaultBaseImage + ":latest"
 	}
-	if !imageBuildNeeded(ctx, c.ImageName, baseImage, c.keysDir, c.Home, opts.Caches) {
+	if !imageBuildNeeded(ctx, c.Runtime, c.ImageName, baseImage, c.keysDir, c.Home, opts.Caches) {
 		if !opts.Quiet {
 			_, _ = fmt.Fprintf(c.W, "- Docker image %s is up to date, skipping build.\n", c.ImageName)
 		}
@@ -164,7 +164,7 @@ func (c *Container) Start(ctx context.Context, opts *StartOpts) (_ *StartResult,
 			return nil, err
 		}
 		defer func() { retErr = errors.Join(retErr, os.RemoveAll(buildCtx)) }()
-		if err := buildCustomizedImage(ctx, c.W, buildCtx, c.keysDir, c.ImageName, baseImage, c.Home, opts.Caches, agentContainerPaths(), opts.Quiet); err != nil {
+		if err := buildCustomizedImage(ctx, c.Runtime, c.W, buildCtx, c.keysDir, c.ImageName, baseImage, c.Home, opts.Caches, agentContainerPaths(), opts.Quiet); err != nil {
 			return nil, err
 		}
 	}
@@ -198,13 +198,13 @@ func (c *Container) Run(ctx context.Context, baseImage string, command []string,
 	if baseImage == "" {
 		baseImage = DefaultBaseImage + ":latest"
 	}
-	if imageBuildNeeded(ctx, c.ImageName, baseImage, c.keysDir, c.Home, caches) {
+	if imageBuildNeeded(ctx, c.Runtime, c.ImageName, baseImage, c.keysDir, c.Home, caches) {
 		buildCtx, err := prepareBuildContext()
 		if err != nil {
 			return 1, err
 		}
 		defer func() { retErr = errors.Join(retErr, os.RemoveAll(buildCtx)) }()
-		if err := buildCustomizedImage(ctx, c.W, buildCtx, c.keysDir, c.ImageName, baseImage, c.Home, caches, agentContainerPaths(), true); err != nil {
+		if err := buildCustomizedImage(ctx, c.Runtime, c.W, buildCtx, c.keysDir, c.ImageName, baseImage, c.Home, caches, agentContainerPaths(), true); err != nil {
 			return 1, err
 		}
 	}
@@ -231,7 +231,8 @@ func (c *Container) Run(ctx context.Context, baseImage string, command []string,
 
 // Kill stops and removes the container.
 func (c *Container) Kill(ctx context.Context) error {
-	_, containerErr := runCmd(ctx, "", []string{"docker", "inspect", c.Name}, true)
+	rt := c.Runtime
+	_, containerErr := runCmd(ctx, "", []string{rt, "inspect", c.Name}, true)
 	containerExists := containerErr == nil
 	_, remoteErr := gitutil.RunGit(ctx, c.GitRoot, "remote", "get-url", c.Name)
 	remoteExists := remoteErr == nil
@@ -249,13 +250,13 @@ func (c *Container) Kill(ctx context.Context) error {
 	// Clean up non-ephemeral Tailscale node.
 	if containerExists {
 		if !c.Tailscale {
-			tsLabel, _ := runCmd(ctx, "", []string{"docker", "inspect", "--format", `{{index .Config.Labels "md.tailscale"}}`, c.Name}, true)
+			tsLabel, _ := runCmd(ctx, "", []string{rt, "inspect", "--format", `{{index .Config.Labels "md.tailscale"}}`, c.Name}, true)
 			c.Tailscale = tsLabel == "1"
 		}
 		if c.Tailscale {
-			ephLabel, _ := runCmd(ctx, "", []string{"docker", "inspect", "--format", `{{index .Config.Labels "md.tailscale_ephemeral"}}`, c.Name}, true)
+			ephLabel, _ := runCmd(ctx, "", []string{rt, "inspect", "--format", `{{index .Config.Labels "md.tailscale_ephemeral"}}`, c.Name}, true)
 			if ephLabel != "1" {
-				statusJSON, err := runCmd(ctx, "", []string{"docker", "exec", c.Name, "tailscale", "status", "--json"}, true)
+				statusJSON, err := runCmd(ctx, "", []string{rt, "exec", c.Name, "tailscale", "status", "--json"}, true)
 				if err == nil {
 					var status tailscaleStatus
 					if json.Unmarshal([]byte(statusJSON), &status) == nil && status.Self.ID != "" {
@@ -277,7 +278,7 @@ func (c *Container) Kill(ctx context.Context) error {
 		}
 	}
 	if containerExists {
-		if _, err := runCmd(ctx, "", []string{"docker", "rm", "-f", "-v", c.Name}, true); err != nil {
+		if _, err := runCmd(ctx, "", []string{rt, "rm", "-f", "-v", c.Name}, true); err != nil {
 			retErr = err
 		}
 	}
@@ -434,17 +435,18 @@ func (c *Container) Diff(ctx context.Context, stdout, stderr io.Writer, extraArg
 // GetHostPort returns the host port mapped to a container port (e.g.
 // "5901/tcp"). Returns empty string if the port is not mapped.
 func (c *Container) GetHostPort(ctx context.Context, containerPort string) (string, error) {
-	if _, err := runCmd(ctx, "", []string{"docker", "inspect", c.Name}, true); err != nil {
+	rt := c.Runtime
+	if _, err := runCmd(ctx, "", []string{rt, "inspect", c.Name}, true); err != nil {
 		return "", fmt.Errorf("container %s is not running", c.Name)
 	}
-	return getHostPort(ctx, c.Name, containerPort)
+	return getHostPort(ctx, rt, c.Name, containerPort)
 }
 
 // getHostPort extracts the host port for containerPort from a running
 // container. It uses JSON output instead of Go templates to work around
 // Docker 27's "index of untyped nil" bug when port bindings are nil.
-func getHostPort(ctx context.Context, container, containerPort string) (string, error) {
-	raw, err := runCmd(ctx, "", []string{"docker", "inspect", "--format", "{{json .NetworkSettings.Ports}}", container}, true)
+func getHostPort(ctx context.Context, rt, container, containerPort string) (string, error) {
+	raw, err := runCmd(ctx, "", []string{rt, "inspect", "--format", "{{json .NetworkSettings.Ports}}", container}, true)
 	if err != nil {
 		return "", err
 	}
@@ -475,7 +477,7 @@ func (c *Container) TailscaleFQDN(ctx context.Context) string {
 	if !c.Tailscale || c.State != "running" {
 		return ""
 	}
-	statusJSON, err := runCmd(ctx, "", []string{"docker", "exec", c.Name, "tailscale", "status", "--json"}, true)
+	statusJSON, err := runCmd(ctx, "", []string{c.Runtime, "exec", c.Name, "tailscale", "status", "--json"}, true)
 	if err != nil {
 		return ""
 	}
@@ -494,8 +496,24 @@ type containerJSON struct {
 	Labels    string `json:"Labels"`
 }
 
-// unmarshalContainer parses docker ps JSON output, converting the CreatedAt
-// timestamp string into a time.Time and extracting md.* labels.
+// parseCreatedAt parses a container creation timestamp. Docker uses
+// "2006-01-02 15:04:05 -0700 MST"; Podman uses ISO 8601 (RFC 3339).
+func parseCreatedAt(s string) (time.Time, error) {
+	for _, layout := range []string{
+		"2006-01-02 15:04:05 -0700 MST",           // Docker
+		time.RFC3339Nano,                          // Podman
+		time.RFC3339,                              // Podman (no fractional seconds)
+		"2006-01-02 15:04:05.999999999 -0700 MST", // Docker with nanoseconds
+	} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("cannot parse CreatedAt %q", s)
+}
+
+// unmarshalContainer parses docker/podman ps JSON output, converting the
+// CreatedAt timestamp string into a time.Time and extracting md.* labels.
 // The returned Container has a nil Client; callers must set it.
 func unmarshalContainer(data []byte) (Container, error) {
 	var raw containerJSON
@@ -507,10 +525,9 @@ func unmarshalContainer(data []byte) (Container, error) {
 		State: raw.State,
 	}
 	if raw.CreatedAt != "" {
-		// Docker uses "2006-01-02 15:04:05 -0700 MST" format.
-		t, err := time.Parse("2006-01-02 15:04:05 -0700 MST", raw.CreatedAt)
+		t, err := parseCreatedAt(raw.CreatedAt)
 		if err != nil {
-			return Container{}, fmt.Errorf("parsing CreatedAt %q: %w", raw.CreatedAt, err)
+			return Container{}, err
 		}
 		ct.CreatedAt = t
 	}
@@ -575,7 +592,7 @@ func (c *Container) SyncDefaultBranch(ctx context.Context) error {
 }
 
 func (c *Container) checkContainerState(ctx context.Context) error {
-	_, containerErr := runCmd(ctx, "", []string{"docker", "inspect", c.Name}, true)
+	_, containerErr := runCmd(ctx, "", []string{c.Runtime, "inspect", c.Name}, true)
 	containerExists := containerErr == nil
 	_, remoteErr := gitutil.RunGit(ctx, c.GitRoot, "remote", "get-url", c.Name)
 	remoteExists := remoteErr == nil
@@ -606,7 +623,7 @@ func (c *Container) checkContainerState(ctx context.Context) error {
 func (c *Container) cleanup(ctx context.Context) {
 	removeSSHConfig(filepath.Join(c.Home, ".ssh", "config.d"), c.Name)
 	_, _ = gitutil.RunGit(ctx, c.GitRoot, "remote", "remove", c.Name)
-	_, _ = runCmd(ctx, "", []string{"docker", "rm", "-f", "-v", c.Name}, true)
+	_, _ = runCmd(ctx, "", []string{c.Runtime, "rm", "-f", "-v", c.Name}, true)
 }
 
 // newProvider creates a genai.Provider for the given provider name and model.

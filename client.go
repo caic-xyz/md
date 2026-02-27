@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -37,8 +38,9 @@ type Client struct {
 	HostKeyPath string // ~/.config/md/ssh_host_ed25519_key (generated)
 	UserKeyPath string // ~/.ssh/md
 
-	// Docker.
+	// Container runtime.
 	ImageName string
+	Runtime   string // "docker" or "podman"; auto-detected by New().
 
 	// Tokens.
 	GithubToken string // GitHub API token for Docker build secrets.
@@ -74,9 +76,22 @@ func New() (*Client, error) {
 		HostKeyPath:   filepath.Join(home, ".config", "md", "ssh_host_ed25519_key"),
 		UserKeyPath:   filepath.Join(home, ".ssh", "md"),
 		ImageName:     "md-user",
+		Runtime:       detectRuntime(),
 	}
 	c.keysDir = filepath.Join(c.XDGConfigHome, "md")
 	return c, nil
+}
+
+// detectRuntime returns the container runtime to use.
+// Checks for docker, then podman in PATH.
+func detectRuntime() string {
+	if _, err := exec.LookPath("docker"); err == nil {
+		return "docker"
+	}
+	if _, err := exec.LookPath("podman"); err == nil {
+		return "podman"
+	}
+	return "docker"
 }
 
 // Container returns a Container handle for the given git root and branch.
@@ -181,7 +196,7 @@ func (c *Client) SCPCommand(extraArgs ...string) []string {
 
 // List returns running md containers sorted by name.
 func (c *Client) List(ctx context.Context) ([]*Container, error) {
-	out, err := runCmd(ctx, "", []string{"docker", "ps", "--all", "--no-trunc", "--format", "{{json .}}"}, true)
+	out, err := runCmd(ctx, "", []string{c.Runtime, "ps", "--all", "--no-trunc", "--format", "{{json .}}"}, true)
 	if err != nil {
 		return nil, err
 	}
@@ -216,7 +231,7 @@ func (c *Client) BuildImage(ctx context.Context, serialSetup bool) (retErr error
 	defer func() { retErr = errors.Join(retErr, os.RemoveAll(buildCtx)) }()
 
 	cmd := []string{
-		"docker", "build",
+		c.Runtime, "build",
 		"--platform", "linux/" + arch,
 		"-f", filepath.Join(buildCtx, "Dockerfile.base"),
 		"-t", "md-local",
@@ -240,8 +255,8 @@ func (c *Client) BuildImage(ctx context.Context, serialSetup bool) (retErr error
 	// Clean up BuildKit cache (--mount=type=cache volumes from Dockerfile.base).
 	// These are only useful during the build itself; pruning avoids leaving
 	// orphaned resources on disk.
-	if _, err := runCmd(ctx, "", []string{"docker", "builder", "prune", "-f"}, true); err != nil {
-		return fmt.Errorf("pruning build cache: %w", err)
+	if _, err := runCmd(ctx, "", []string{c.Runtime, "builder", "prune", "-f"}, true); err != nil {
+		_, _ = fmt.Fprintf(c.W, "- Warning: pruning build cache: %v\n", err)
 	}
 	return nil
 }

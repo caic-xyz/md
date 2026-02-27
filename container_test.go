@@ -83,6 +83,39 @@ func TestUnmarshalContainer(t *testing.T) {
 			t.Errorf("expected empty label fields, got GitRoot=%q RepoName=%q Branch=%q", ct.GitRoot, ct.RepoName, ct.Branch)
 		}
 	})
+	t.Run("podman_rfc3339", func(t *testing.T) {
+		raw := `{"Names":"md-repo-main","State":"running","CreatedAt":"2025-06-15T10:30:00.123456789Z"}`
+		ct, err := unmarshalContainer([]byte(raw))
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantTime := time.Date(2025, 6, 15, 10, 30, 0, 123456789, time.UTC)
+		if !ct.CreatedAt.Equal(wantTime) {
+			t.Errorf("CreatedAt = %v, want %v", ct.CreatedAt, wantTime)
+		}
+	})
+	t.Run("podman_rfc3339_no_frac", func(t *testing.T) {
+		raw := `{"Names":"md-repo-main","State":"running","CreatedAt":"2025-06-15T10:30:00Z"}`
+		ct, err := unmarshalContainer([]byte(raw))
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantTime := time.Date(2025, 6, 15, 10, 30, 0, 0, time.UTC)
+		if !ct.CreatedAt.Equal(wantTime) {
+			t.Errorf("CreatedAt = %v, want %v", ct.CreatedAt, wantTime)
+		}
+	})
+	t.Run("podman_rfc3339_offset", func(t *testing.T) {
+		raw := `{"Names":"md-repo-main","State":"running","CreatedAt":"2025-06-15T10:30:00+02:00"}`
+		ct, err := unmarshalContainer([]byte(raw))
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantTime := time.Date(2025, 6, 15, 10, 30, 0, 0, time.FixedZone("", 2*60*60))
+		if !ct.CreatedAt.Equal(wantTime) {
+			t.Errorf("CreatedAt = %v, want %v", ct.CreatedAt, wantTime)
+		}
+	})
 	t.Run("bad_created_at", func(t *testing.T) {
 		raw := `{"Names":"x","State":"running","CreatedAt":"not-a-date"}`
 		_, err := unmarshalContainer([]byte(raw))
@@ -90,4 +123,28 @@ func TestUnmarshalContainer(t *testing.T) {
 			t.Fatal("expected error for bad CreatedAt")
 		}
 	})
+}
+
+func TestParseCreatedAt(t *testing.T) {
+	tests := []struct {
+		name    string
+		in      string
+		wantErr bool
+	}{
+		{"docker", "2025-06-15 10:30:00 +0000 UTC", false},
+		{"docker_with_tz", "2025-06-15 10:30:00 -0700 MST", false},
+		{"podman_rfc3339nano", "2025-06-15T10:30:00.123456789Z", false},
+		{"podman_rfc3339", "2025-06-15T10:30:00Z", false},
+		{"podman_rfc3339_offset", "2025-06-15T10:30:00+02:00", false},
+		{"invalid", "not-a-date", true},
+		{"empty", "", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := parseCreatedAt(tt.in)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("parseCreatedAt(%q) error = %v, wantErr %v", tt.in, err, tt.wantErr)
+			}
+		})
+	}
 }

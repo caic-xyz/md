@@ -127,12 +127,12 @@ func hashDir(h io.Writer, dir string) error {
 	return nil
 }
 
-func dockerInspectFormat(ctx context.Context, name, format string) (string, error) {
-	return runCmd(ctx, "", []string{"docker", "image", "inspect", name, "--format", format}, true)
+func dockerInspectFormat(ctx context.Context, rt, name, format string) (string, error) {
+	return runCmd(ctx, "", []string{rt, "image", "inspect", name, "--format", format}, true)
 }
 
-func getImageVersionLabel(ctx context.Context, imageName string) string {
-	out, err := dockerInspectFormat(ctx, imageName, `{{index .Config.Labels "org.opencontainers.image.version"}}`)
+func getImageVersionLabel(ctx context.Context, rt, imageName string) string {
+	out, err := dockerInspectFormat(ctx, rt, imageName, `{{index .Config.Labels "org.opencontainers.image.version"}}`)
 	if err != nil || out == "" || out == "<no value>" {
 		return ""
 	}
@@ -141,8 +141,13 @@ func getImageVersionLabel(ctx context.Context, imageName string) string {
 
 // getRemoteConfigDigest queries the registry for the config digest of the
 // given image for the specified architecture without downloading layers.
-func getRemoteConfigDigest(ctx context.Context, image, arch string) (string, error) {
-	out, err := runCmd(ctx, "", []string{"docker", "manifest", "inspect", "-v", image}, true)
+// For Docker it returns the config digest; for Podman it returns the
+// per-architecture manifest digest (compare against {{.Digest}}).
+func getRemoteConfigDigest(ctx context.Context, rt, image, arch string) (string, error) {
+	if rt == "podman" {
+		return getRemoteDigestPodman(ctx, rt, image, arch)
+	}
+	out, err := runCmd(ctx, "", []string{rt, "manifest", "inspect", "-v", image}, true)
 	if err != nil {
 		return "", err
 	}
@@ -192,6 +197,39 @@ func getRemoteConfigDigest(ctx context.Context, image, arch string) (string, err
 		if d := configDigest(&entries[0]); d != "" {
 			return d, nil
 		}
+	}
+	return "", fmt.Errorf("no manifest for linux/%s in %s", arch, image)
+}
+
+// getRemoteDigestPodman queries the registry via Podman's manifest inspect
+// (which lacks Docker's -v flag) and returns the per-architecture manifest
+// digest from the OCI image index.
+func getRemoteDigestPodman(ctx context.Context, rt, image, arch string) (string, error) {
+	out, err := runCmd(ctx, "", []string{rt, "manifest", "inspect", image}, true)
+	if err != nil {
+		return "", err
+	}
+	var index struct {
+		Manifests []struct {
+			Digest   string `json:"digest"`
+			Platform struct {
+				Architecture string `json:"architecture"`
+				OS           string `json:"os"`
+			} `json:"platform"`
+		} `json:"manifests"`
+	}
+	if err := json.Unmarshal([]byte(out), &index); err != nil {
+		return "", fmt.Errorf("parsing manifest inspect output: %w", err)
+	}
+	for _, m := range index.Manifests {
+		if m.Platform.Architecture == arch && m.Platform.OS == "linux" {
+			if m.Digest != "" {
+				return m.Digest, nil
+			}
+		}
+	}
+	if len(index.Manifests) == 1 && index.Manifests[0].Digest != "" {
+		return index.Manifests[0].Digest, nil
 	}
 	return "", fmt.Errorf("no manifest for linux/%s in %s", arch, image)
 }
@@ -258,22 +296,22 @@ func cacheSpecKey(caches []CacheMount) string {
 // home is used to resolve "~/" in cache HostPaths so only caches whose host
 // directory currently exists are compared (matching what appendCacheLayers
 // would actually inject).
-func imageBuildNeeded(ctx context.Context, imageName, baseImage, keysDir, home string, caches []CacheMount) bool {
+func imageBuildNeeded(ctx context.Context, rt, imageName, baseImage, keysDir, home string, caches []CacheMount) bool {
 	// Quick check: does the customized image have labels at all?
-	currentDigest, err := dockerInspectFormat(ctx, imageName, `{{index .Config.Labels "md.base_digest"}}`)
+	currentDigest, err := dockerInspectFormat(ctx, rt, imageName, `{{index .Config.Labels "md.base_digest"}}`)
 	if err != nil || currentDigest == "" || currentDigest == "<no value>" {
 		return true
 	}
-	currentContext, err := dockerInspectFormat(ctx, imageName, `{{index .Config.Labels "md.context_sha"}}`)
+	currentContext, err := dockerInspectFormat(ctx, rt, imageName, `{{index .Config.Labels "md.context_sha"}}`)
 	if err != nil || currentContext == "" || currentContext == "<no value>" {
 		return true
 	}
 
 	// Get the base image digest.
 	var baseDigest string
-	if d, err := dockerInspectFormat(ctx, baseImage, "{{index .RepoDigests 0}}"); err == nil && d != "" {
+	if d, err := dockerInspectFormat(ctx, rt, baseImage, "{{index .RepoDigests 0}}"); err == nil && d != "" {
 		baseDigest = d
-	} else if id, err := dockerInspectFormat(ctx, baseImage, "{{.Id}}"); err == nil {
+	} else if id, err := dockerInspectFormat(ctx, rt, baseImage, "{{.Id}}"); err == nil {
 		baseDigest = id
 	} else {
 		return true
@@ -285,9 +323,15 @@ func imageBuildNeeded(ctx context.Context, imageName, baseImage, keysDir, home s
 	// For remote images, verify the local base is up to date with the registry.
 	isLocal := !strings.Contains(baseImage, "/") && !strings.Contains(baseImage, ":")
 	if !isLocal {
-		localID, _ := dockerInspectFormat(ctx, baseImage, "{{.Id}}")
-		remoteDigest, err := getRemoteConfigDigest(ctx, baseImage, runtime.GOARCH)
-		if err != nil || remoteDigest != localID {
+		// Docker: compare config digest ({{.Id}}) with remote config digest.
+		// Podman: compare manifest digest ({{.Digest}}) with remote manifest digest.
+		localFmt := "{{.Id}}"
+		if rt == "podman" {
+			localFmt = "{{.Digest}}"
+		}
+		localRef, _ := dockerInspectFormat(ctx, rt, baseImage, localFmt)
+		remoteDigest, err := getRemoteConfigDigest(ctx, rt, baseImage, runtime.GOARCH)
+		if err != nil || remoteDigest != localRef {
 			return true
 		}
 	}
@@ -310,7 +354,7 @@ func imageBuildNeeded(ctx context.Context, imageName, baseImage, keysDir, home s
 			activeCaches = append(activeCaches, c)
 		}
 	}
-	currentKey, err := dockerInspectFormat(ctx, imageName, `{{index .Config.Labels "md.cache_key"}}`)
+	currentKey, err := dockerInspectFormat(ctx, rt, imageName, `{{index .Config.Labels "md.cache_key"}}`)
 	if err != nil || currentKey == "<no value>" {
 		currentKey = ""
 	}
@@ -404,12 +448,12 @@ func appendCacheLayers(dockerfilePath string, caches []CacheMount, home string, 
 // as a named build context "md-keys". home is the user's home directory used
 // to resolve "~/" in cache HostPaths. mountPaths lists container-side -v mount
 // targets to pre-create with user ownership.
-func buildCustomizedImage(ctx context.Context, w io.Writer, buildCtxDir, keysDir, imageName, baseImage, home string, caches []CacheMount, mountPaths []string, quiet bool) error {
+func buildCustomizedImage(ctx context.Context, rt string, w io.Writer, buildCtxDir, keysDir, imageName, baseImage, home string, caches []CacheMount, mountPaths []string, quiet bool) error {
 	arch := runtime.GOARCH
 	// Local-only images (no "/" or ":" in name) are never pulled from a registry.
 	isLocal := !strings.Contains(baseImage, "/") && !strings.Contains(baseImage, ":")
 	if isLocal {
-		if _, err := runCmd(ctx, "", []string{"docker", "image", "inspect", "--format", "{{.Id}}", baseImage}, true); err != nil {
+		if _, err := runCmd(ctx, "", []string{rt, "image", "inspect", "--format", "{{.Id}}", baseImage}, true); err != nil {
 			return fmt.Errorf("local image %s not found; build it first with 'md build-image'", baseImage)
 		}
 		if !quiet {
@@ -417,9 +461,15 @@ func buildCustomizedImage(ctx context.Context, w io.Writer, buildCtxDir, keysDir
 		}
 	} else {
 		// Check if local image is already up to date with remote.
+		// Docker: compare config digest ({{.Id}}) with remote config digest.
+		// Podman: compare manifest digest ({{.Digest}}) with remote manifest digest.
 		needsPull := true
-		if localID, err := runCmd(ctx, "", []string{"docker", "image", "inspect", "--format", "{{.Id}}", baseImage}, true); err == nil && localID != "" {
-			if remoteDigest, err := getRemoteConfigDigest(ctx, baseImage, arch); err == nil && remoteDigest == localID {
+		localFmt := "{{.Id}}"
+		if rt == "podman" {
+			localFmt = "{{.Digest}}"
+		}
+		if localRef, err := runCmd(ctx, "", []string{rt, "image", "inspect", "--format", localFmt, baseImage}, true); err == nil && localRef != "" {
+			if remoteDigest, err := getRemoteConfigDigest(ctx, rt, baseImage, arch); err == nil && remoteDigest == localRef {
 				needsPull = false
 			}
 		}
@@ -427,12 +477,12 @@ func buildCustomizedImage(ctx context.Context, w io.Writer, buildCtxDir, keysDir
 			if !quiet {
 				_, _ = fmt.Fprintf(w, "- Pulling base image %s ...\n", baseImage)
 			}
-			args := []string{"docker", "pull", "--platform", "linux/" + arch, baseImage}
+			args := []string{rt, "pull", "--platform", "linux/" + arch, baseImage}
 			if _, err := runCmd(ctx, "", args, quiet); err != nil {
 				return fmt.Errorf("pulling base image: %w", err)
 			}
 			if !quiet {
-				if v := getImageVersionLabel(ctx, baseImage); strings.HasPrefix(v, "v") {
+				if v := getImageVersionLabel(ctx, rt, baseImage); strings.HasPrefix(v, "v") {
 					_, _ = fmt.Fprintf(w, "  Version: %s\n", v)
 				}
 			}
@@ -443,9 +493,9 @@ func buildCustomizedImage(ctx context.Context, w io.Writer, buildCtxDir, keysDir
 
 	// Get base image digest. For locally-built images (no registry), RepoDigests
 	// is empty; fall back to the image ID so the label is never stored as "".
-	baseDigest, err := runCmd(ctx, "", []string{"docker", "image", "inspect", "--format", "{{index .RepoDigests 0}}", baseImage}, true)
+	baseDigest, err := runCmd(ctx, "", []string{rt, "image", "inspect", "--format", "{{index .RepoDigests 0}}", baseImage}, true)
 	if err != nil || baseDigest == "" {
-		baseDigest, _ = runCmd(ctx, "", []string{"docker", "image", "inspect", "--format", "{{.Id}}", baseImage}, true)
+		baseDigest, _ = runCmd(ctx, "", []string{rt, "image", "inspect", "--format", "{{.Id}}", baseImage}, true)
 	}
 
 	// Compute context SHA from both the build context and keys directory.
@@ -466,10 +516,10 @@ func buildCustomizedImage(ctx context.Context, w io.Writer, buildCtxDir, keysDir
 	}
 
 	if !quiet {
-		_, _ = fmt.Fprintf(w, "- Building Docker image %s from %s ...\n", imageName, baseImage)
+		_, _ = fmt.Fprintf(w, "- Building container image %s from %s ...\n", imageName, baseImage)
 	}
 	buildCmd := []string{
-		"docker", "build",
+		rt, "build",
 		"--build-context", "md-keys=" + keysDir,
 		"-f", filepath.Join(buildCtxDir, "Dockerfile"),
 		"--platform", "linux/" + arch,
@@ -485,7 +535,7 @@ func buildCustomizedImage(ctx context.Context, w io.Writer, buildCtxDir, keysDir
 	buildCmd = append(buildCmd, cacheArgs...)
 	buildCmd = append(buildCmd, buildCtxDir)
 	if _, err := runCmd(ctx, "", buildCmd, false); err != nil {
-		return fmt.Errorf("building Docker image: %w", err)
+		return fmt.Errorf("building container image: %w", err)
 	}
 	return nil
 }
@@ -593,8 +643,9 @@ func printCacheInfo(w io.Writer, caches []CacheMount, home string) {
 // tailscaleEphemeral indicates the Tailscale node was auto-keyed and should be
 // treated as ephemeral (cleaned up on kill without API deletion).
 func runContainer(ctx context.Context, c *Container, opts *StartOpts, tailscaleEphemeral bool) (*StartResult, error) {
+	rt := c.Runtime
 	var dockerArgs []string
-	dockerArgs = append(dockerArgs, "docker", "run", "-d",
+	dockerArgs = append(dockerArgs, rt, "run", "-d",
 		"--name", c.Name, "--hostname", c.Name,
 		"-p", "127.0.0.1:0:22")
 
@@ -700,7 +751,7 @@ func runContainer(ctx context.Context, c *Container, opts *StartOpts, tailscaleE
 	result := &StartResult{}
 
 	// Get SSH port and creation time.
-	port, err := getHostPort(ctx, c.Name, "22/tcp")
+	port, err := getHostPort(ctx, rt, c.Name, "22/tcp")
 	if err != nil {
 		return nil, fmt.Errorf("getting SSH port: %w", err)
 	}
@@ -708,7 +759,7 @@ func runContainer(ctx context.Context, c *Container, opts *StartOpts, tailscaleE
 	if !opts.Quiet {
 		_, _ = fmt.Fprintf(c.W, "- Found ssh port %s\n", port)
 	}
-	createdStr, err := runCmd(ctx, "", []string{"docker", "inspect", "--format", "{{.Created}}", c.Name}, true)
+	createdStr, err := runCmd(ctx, "", []string{rt, "inspect", "--format", "{{.Created}}", c.Name}, true)
 	if err != nil {
 		return nil, fmt.Errorf("getting container creation time: %w", err)
 	}
@@ -720,7 +771,7 @@ func runContainer(ctx context.Context, c *Container, opts *StartOpts, tailscaleE
 
 	// Get VNC port if display enabled.
 	if opts.Display {
-		vncPort, _ := getHostPort(ctx, c.Name, "5901/tcp")
+		vncPort, _ := getHostPort(ctx, rt, c.Name, "5901/tcp")
 		result.VNCPort = vncPort
 		if vncPort != "" && !opts.Quiet {
 			_, _ = fmt.Fprintf(c.W, "- Found VNC port %s (display :1)\n", vncPort)

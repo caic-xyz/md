@@ -27,6 +27,9 @@ import (
 	"github.com/caic-xyz/md/gitutil"
 )
 
+// runtimeOverride is set by --runtime and applied in newClient/cmdList.
+var runtimeOverride string
+
 func main() {
 	if err := mainImpl(); err != nil {
 		var ec *exitCodeError
@@ -58,9 +61,11 @@ func mainImpl() error {
 	// Pre-parse to support flags before the subcommand (e.g. "md -v start").
 	pre := flag.NewFlagSet("md", flag.ContinueOnError)
 	preVerbose := addVerboseFlag(pre)
+	preRuntime := pre.String("runtime", "", "Container runtime: docker or podman (default: auto-detect)")
 	// Ignore errors: unknown flags here are subcommand flags, parsed later.
 	_ = pre.Parse(os.Args[1:])
 	initLogging(*preVerbose)
+	runtimeOverride = *preRuntime
 	remaining := pre.Args()
 
 	if len(remaining) == 0 {
@@ -107,7 +112,8 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "md (my devenv): local development environment with git clone")
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "Global flags:")
-	fmt.Fprintln(os.Stderr, "  -v, -verbose  Enable debug logging")
+	fmt.Fprintln(os.Stderr, "  -v, -verbose       Enable debug logging")
+	fmt.Fprintln(os.Stderr, "  --runtime <name>   Container runtime: docker or podman (default: auto-detect)")
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "Commands:")
 	fmt.Fprintln(os.Stderr, "  start       Pull base image, rebuild if needed, start container, open shell")
@@ -126,6 +132,9 @@ func newClient() (*md.Client, error) {
 	c, err := md.New()
 	if err != nil {
 		return nil, err
+	}
+	if runtimeOverride != "" {
+		c.Runtime = runtimeOverride
 	}
 	c.GithubToken = os.Getenv("GITHUB_TOKEN")
 	c.TailscaleAPIKey = os.Getenv("TAILSCALE_API_KEY")
@@ -354,6 +363,9 @@ func cmdList(ctx context.Context, args []string) error {
 	c, err := md.New()
 	if err != nil {
 		return err
+	}
+	if runtimeOverride != "" {
+		c.Runtime = runtimeOverride
 	}
 	containers, err := c.List(ctx)
 	if err != nil {
