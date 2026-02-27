@@ -5,6 +5,7 @@
 package md
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/pem"
@@ -12,6 +13,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -77,6 +79,36 @@ func writeSSHConfig(configDir, containerName, port, identityFile, knownHostsFile
 func writeKnownHosts(knownHostsPath, port, hostPubKey string) error {
 	content := fmt.Sprintf("[127.0.0.1]:%s %s\n", port, hostPubKey)
 	return os.WriteFile(knownHostsPath, []byte(content), 0o644)
+}
+
+// ensureSSHConfigInclude ensures ~/.ssh/config contains an Include directive
+// for config.d/*.conf. If the directive is missing, it is prepended to the
+// file. The config file is created if it doesn't exist.
+func ensureSSHConfigInclude(sshDir string) error {
+	configPath := filepath.Join(sshDir, "config")
+	needle := "Include config.d/*.conf"
+	data, err := os.ReadFile(configPath)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	// Check whether the Include is already present.
+	for line := range strings.SplitSeq(string(data), "\n") {
+		// Normalize whitespace for a resilient match.
+		if strings.TrimSpace(line) == needle {
+			return nil
+		}
+	}
+	// Prepend the Include directive. It must appear before any Host/Match
+	// blocks to be effective.
+	var buf bytes.Buffer
+	buf.WriteString("# Load all configuration files in config.d/.\n")
+	buf.WriteString(needle)
+	buf.WriteByte('\n')
+	if len(data) > 0 {
+		buf.WriteByte('\n')
+		buf.Write(data)
+	}
+	return os.WriteFile(configPath, buf.Bytes(), 0o600)
 }
 
 // removeSSHConfig removes SSH config and known_hosts files for a container.

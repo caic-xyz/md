@@ -114,6 +114,11 @@ func (c *Client) Prepare() error {
 		}
 	}
 
+	// Ensure ~/.ssh/config includes config.d/*.conf.
+	if err := ensureSSHConfigInclude(filepath.Join(c.Home, ".ssh")); err != nil {
+		return err
+	}
+
 	// Ensure ~/.claude.json symlink.
 	claudeJSON := filepath.Join(c.Home, ".claude.json")
 	target := filepath.Join(c.Home, ".claude", "claude.json")
