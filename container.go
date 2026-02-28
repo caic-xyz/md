@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -430,6 +431,117 @@ func (c *Container) Diff(ctx context.Context, stdout, stderr io.Writer, extraArg
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	return cmd.Run()
+}
+
+// ContainerStats holds runtime resource usage for a container.
+type ContainerStats struct {
+	// CPUPerc is the CPU usage as a percentage (e.g. 1.23).
+	CPUPerc float64 `json:"cpu_perc"`
+	// MemUsed is memory currently used in bytes.
+	MemUsed uint64 `json:"mem_used"`
+	// MemLimit is the memory limit in bytes.
+	MemLimit uint64 `json:"mem_limit"`
+	// MemPerc is the memory usage as a percentage (e.g. 2.0).
+	MemPerc float64 `json:"mem_perc"`
+	// PIDs is the number of running processes.
+	PIDs int `json:"pids"`
+}
+
+// Stats returns the current CPU and memory usage for the container.
+func (c *Container) Stats(ctx context.Context) (*ContainerStats, error) {
+	out, err := runCmd(ctx, "", []string{
+		c.Runtime, "stats", "--no-stream", "--no-trunc",
+		"--format", "{{json .}}", c.Name,
+	}, true)
+	if err != nil {
+		return nil, fmt.Errorf("container %s is not running", c.Name)
+	}
+	var raw struct {
+		CPUPerc  string `json:"CPUPerc"`
+		MemUsage string `json:"MemUsage"`
+		MemPerc  string `json:"MemPerc"`
+		PIDs     string `json:"PIDs"`
+	}
+	if err := json.Unmarshal([]byte(out), &raw); err != nil {
+		return nil, fmt.Errorf("parsing stats: %w", err)
+	}
+	cpuPerc, err := parsePercent(raw.CPUPerc)
+	if err != nil {
+		return nil, fmt.Errorf("parsing CPU%%: %w", err)
+	}
+	memPerc, err := parsePercent(raw.MemPerc)
+	if err != nil {
+		return nil, fmt.Errorf("parsing mem%%: %w", err)
+	}
+	memUsed, memLimit, err := parseMemUsage(raw.MemUsage)
+	if err != nil {
+		return nil, fmt.Errorf("parsing mem usage: %w", err)
+	}
+	pids, err := strconv.Atoi(raw.PIDs)
+	if err != nil {
+		return nil, fmt.Errorf("parsing PIDs: %w", err)
+	}
+	return &ContainerStats{
+		CPUPerc:  cpuPerc,
+		MemUsed:  memUsed,
+		MemLimit: memLimit,
+		MemPerc:  memPerc,
+		PIDs:     pids,
+	}, nil
+}
+
+// parsePercent parses a percentage string like "1.23%" into 1.23.
+func parsePercent(s string) (float64, error) {
+	s = strings.TrimSpace(s)
+	s = strings.TrimSuffix(s, "%")
+	return strconv.ParseFloat(s, 64)
+}
+
+// parseMemUsage parses "150MiB / 7.5GiB" into (used, limit) in bytes.
+func parseMemUsage(s string) (uint64, uint64, error) {
+	parts := strings.SplitN(s, "/", 2)
+	if len(parts) != 2 {
+		return 0, 0, fmt.Errorf("expected 'used / limit', got %q", s)
+	}
+	used, err := parseByteSize(strings.TrimSpace(parts[0]))
+	if err != nil {
+		return 0, 0, err
+	}
+	limit, err := parseByteSize(strings.TrimSpace(parts[1]))
+	if err != nil {
+		return 0, 0, err
+	}
+	return used, limit, nil
+}
+
+// byteUnits maps suffixes used by docker/podman stats to multipliers.
+var byteUnits = []struct {
+	suffix string
+	mult   uint64
+}{
+	{"KiB", 1 << 10},
+	{"MiB", 1 << 20},
+	{"GiB", 1 << 30},
+	{"TiB", 1 << 40},
+	{"kB", 1000},
+	{"MB", 1000 * 1000},
+	{"GB", 1000 * 1000 * 1000},
+	{"TB", 1000 * 1000 * 1000 * 1000},
+	{"B", 1},
+}
+
+// parseByteSize parses a size string like "150MiB" or "7.5GiB" into bytes.
+func parseByteSize(s string) (uint64, error) {
+	for _, u := range byteUnits {
+		if numStr, ok := strings.CutSuffix(s, u.suffix); ok {
+			f, err := strconv.ParseFloat(strings.TrimSpace(numStr), 64)
+			if err != nil {
+				return 0, fmt.Errorf("parsing %q: %w", s, err)
+			}
+			return uint64(f * float64(u.mult)), nil
+		}
+	}
+	return 0, fmt.Errorf("unknown unit in %q", s)
 }
 
 // GetHostPort returns the host port mapped to a container port (e.g.
