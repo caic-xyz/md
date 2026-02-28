@@ -45,7 +45,7 @@ func ensureEd25519Key(w io.Writer, path, comment string) error {
 		return fmt.Errorf("creating SSH public key: %w", err)
 	}
 	pubLine := string(ssh.MarshalAuthorizedKey(sshPub))
-	return os.WriteFile(path+".pub", []byte(pubLine), 0o644)
+	return os.WriteFile(path+".pub", []byte(pubLine), 0o600)
 }
 
 // ensurePublicKey regenerates the .pub file from the private key if missing.
@@ -63,7 +63,7 @@ func ensurePublicKey(privPath string) error {
 		return fmt.Errorf("parsing private key %s: %w", privPath, err)
 	}
 	pubLine := string(ssh.MarshalAuthorizedKey(signer.PublicKey()))
-	return os.WriteFile(pubPath, []byte(pubLine), 0o644)
+	return os.WriteFile(pubPath, []byte(pubLine), 0o600)
 }
 
 // writeSSHConfig writes the SSH config file for a container.
@@ -71,13 +71,13 @@ func writeSSHConfig(configDir, containerName, port, identityFile, knownHostsFile
 	confPath := filepath.Join(configDir, containerName+".conf")
 	content := fmt.Sprintf("Host %s\n  HostName 127.0.0.1\n  Port %s\n  User user\n  IdentityFile %s\n  IdentitiesOnly yes\n  UserKnownHostsFile %s\n  StrictHostKeyChecking yes\n",
 		containerName, port, identityFile, knownHostsFile)
-	return os.WriteFile(confPath, []byte(content), 0o644)
+	return os.WriteFile(confPath, []byte(content), 0o600)
 }
 
 // writeKnownHosts writes the known hosts file for a container.
 func writeKnownHosts(knownHostsPath, port, hostPubKey string) error {
 	content := fmt.Sprintf("[127.0.0.1]:%s %s\n", port, hostPubKey)
-	return os.WriteFile(knownHostsPath, []byte(content), 0o644)
+	return os.WriteFile(knownHostsPath, []byte(content), 0o600)
 }
 
 // ensureSSHConfigInclude ensures ~/.ssh/config contains an Include directive
