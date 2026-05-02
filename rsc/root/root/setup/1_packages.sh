@@ -105,7 +105,7 @@ apt-get install -qq -y --no-install-recommends \
 
 # Configure R to use OpenBLAS via the alternatives system
 ARCH=$(dpkg-architecture -qDEB_HOST_MULTIARCH)
-update-alternatives --set "libblas.so.3-${ARCH}" "/usr/lib/${ARCH}/libopenblas.so.0"
+update-alternatives --set "libblas.so.3-${ARCH}" "/usr/lib/${ARCH}/openblas-pthread/libblas.so.3"
 
 # Remove PEP 668 marker — pip install --user is safe and this is a container.
 rm -f /usr/lib/python3.*/EXTERNALLY-MANAGED
