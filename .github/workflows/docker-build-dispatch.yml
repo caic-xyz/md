@@ -1,0 +1,38 @@
+# Copyright 2026 Marc-Antoine Ruel. All Rights Reserved. Use of this
+# source code is governed by the Apache v2 license that can be found in the
+# LICENSE file.
+
+name: Dispatch image builds
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - rsc/root/**
+      - rsc/user/**
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-slim
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Detect changed paths and dispatch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! git diff --quiet "${{ github.event.before }}" "${{ github.event.after }}" -- rsc/root/; then
+            echo "Root changed: dispatching root build (workflow_run will chain to user)."
+            gh workflow run docker-build-root.yml --ref "${{ github.ref }}"
+          elif ! git diff --quiet "${{ github.event.before }}" "${{ github.event.after }}" -- rsc/user/; then
+            echo "Only user changed: dispatching user build directly."
+            gh workflow run docker-build-user.yml --ref "${{ github.ref }}"
+          else
+            echo "No relevant changes."
+          fi

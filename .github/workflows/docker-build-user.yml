@@ -5,10 +5,6 @@
 name: Build user base image
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - rsc/user/**
   schedule:
     # Every Sunday at midnight UTC.
     - cron: '0 0 * * 0'

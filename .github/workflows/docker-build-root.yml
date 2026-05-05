@@ -5,10 +5,6 @@
 name: Build root base image
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - rsc/root/**
   schedule:
     # First Saturday of each month at 22:00 UTC (before Sunday's weekly release).
     - cron: '0 22 1-7 * 6'
