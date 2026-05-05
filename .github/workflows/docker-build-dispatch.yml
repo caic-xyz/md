@@ -28,7 +28,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           if ! git diff --quiet "${{ github.event.before }}" "${{ github.event.after }}" -- rsc/root/; then
-            echo "Root changed: dispatching root build (workflow_run will chain to user)."
+            echo "Root changed: dispatching root build (root will chain to user)."
             gh workflow run docker-build-root.yml --ref "${{ github.ref }}"
           elif ! git diff --quiet "${{ github.event.before }}" "${{ github.event.after }}" -- rsc/user/; then
             echo "Only user changed: dispatching user build directly."

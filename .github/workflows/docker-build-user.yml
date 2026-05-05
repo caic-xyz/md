@@ -10,10 +10,6 @@ on:
     - cron: '0 0 * * 0'
   pull_request:
   workflow_dispatch:
-  workflow_run:
-    workflows: ["Build root base image"]
-    types: [completed]
-    branches: [main]
 
 permissions:
   actions: read
@@ -24,8 +20,6 @@ permissions:
 
 jobs:
   setup:
-    # Skip if triggered by a failed root image build.
-    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-24.04
     outputs:
       build-date: ${{ steps.date.outputs.value }}
@@ -71,7 +65,7 @@ jobs:
           tags: |
             type=sha
             type=raw,value=${{ needs.setup.outputs.build-date }}
-            type=raw,value=latest,enable=${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_run' }}
+            type=raw,value=latest,enable=${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
           labels: |
             org.opencontainers.image.version=${{ needs.setup.outputs.build-date }}
       - name: Prepare reports directory
@@ -138,7 +132,7 @@ jobs:
           tags: |
             type=sha
             type=raw,value=${{ needs.setup.outputs.build-date }}
-            type=raw,value=latest,enable=${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_run' }}
+            type=raw,value=latest,enable=${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
           labels: |
             org.opencontainers.image.version=${{ needs.setup.outputs.build-date }}
       - uses: docker/login-action@v4
