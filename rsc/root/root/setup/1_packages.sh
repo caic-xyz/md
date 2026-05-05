@@ -97,6 +97,7 @@ apt-get install -qq -y --no-install-recommends \
 	tokei \
 	uidmap \
 	unzip \
+	w3m \
 	wget \
 	whois \
 	xfce4 \
@@ -104,6 +105,10 @@ apt-get install -qq -y --no-install-recommends \
 	xvfb \
 	xxd \
 	zstd >/dev/null
+
+# Register chromium as www-browser (the Debian virtual package for a web browser).
+# Chromium Provides: www-browser but its postinst only sets up x-www-browser and gnome-www-browser.
+update-alternatives --install /usr/bin/www-browser www-browser /usr/bin/chromium 40
 
 # Configure R to use OpenBLAS via the alternatives system
 ARCH=$(dpkg-architecture -qDEB_HOST_MULTIARCH)
