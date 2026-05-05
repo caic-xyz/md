@@ -119,6 +119,8 @@ jobs:
     needs: [setup, docker-build]
     if: ${{ github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-24.04
+    permissions:
+      actions: write
     steps:
       - uses: actions/checkout@v6
       - uses: docker/metadata-action@v6
@@ -155,15 +157,7 @@ jobs:
           subject-name: ${{ steps.push.outputs.image }}
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
-
-  trigger-user-build:
-    needs: [merge-manifests]
-    if: ${{ github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch' }}
-    runs-on: ubuntu-slim
-    permissions:
-      actions: write
-    steps:
-      - name: Dispatch user build
+      - name: Trigger user image build
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh workflow run docker-build-user.yml --ref "${{ github.ref_name }}"
