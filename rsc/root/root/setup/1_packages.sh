@@ -12,6 +12,7 @@ apt-get upgrade -qq -y >/dev/null
 echo "- apt-get install"
 apt-get install -qq -y --no-install-recommends \
 	bash-completion \
+	breeze-cursor-theme \
 	bind9-dnsutils \
 	binutils \
 	bison \

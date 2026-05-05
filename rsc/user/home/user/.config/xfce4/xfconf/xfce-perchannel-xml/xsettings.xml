@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<channel name="xsettings" version="1.0">
+  <property name="Gtk" type="empty">
+    <property name="CursorThemeName" type="string" value="breeze_cursors"/>
+    <property name="CursorThemeSize" type="int" value="24"/>
+  </property>
+</channel>
