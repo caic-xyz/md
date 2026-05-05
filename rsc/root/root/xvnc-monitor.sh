@@ -13,7 +13,7 @@ log() {
 
 start_xvnc() {
 	rm -f /tmp/.X1-lock /tmp/.X11-unix/X1 2>/dev/null || true
-	Xvnc "$DISPLAY" -geometry 1920x1080 -depth 24 -SecurityTypes None -rfbport 5901 &
+	Xvnc "$DISPLAY" -geometry 1920x1080 -randr 7680x4320 -depth 24 -SecurityTypes None -rfbport 5901 &
 	echo $!
 }
 
