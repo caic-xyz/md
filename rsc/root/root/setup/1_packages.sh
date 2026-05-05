@@ -13,6 +13,7 @@ echo "- apt-get install"
 apt-get install -qq -y --no-install-recommends \
 	bash-completion \
 	breeze-cursor-theme \
+	xfwm4-theme-breeze \
 	bind9-dnsutils \
 	binutils \
 	bison \
