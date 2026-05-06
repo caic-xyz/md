@@ -38,7 +38,7 @@ chmod 644 "$DISPLAY_FILE"
 # Also append to /etc/environment for non-login shells (SSH commands).
 # /etc/profile.d is only sourced by login shells. /etc/environment is
 # read by PAM's pam_env.so for every SSH session regardless of login status.
-echo "DISPLAY=$DISPLAY" >> /etc/environment
+echo "DISPLAY=$DISPLAY" >>/etc/environment
 
 # Start XFCE
 log "Starting XFCE session as user..."
