@@ -32,6 +32,7 @@ apt-get install -qq -y --no-install-recommends \
 	dfu-util \
 	extrepo \
 	ffmpeg \
+	fonts-noto-color-emoji \
 	file \
 	flex \
 	fuse-overlayfs \
