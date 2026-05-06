@@ -175,7 +175,7 @@ type containerFlags struct {
 func addContainerFlags(fs *flag.FlagSet, image bool) *containerFlags {
 	cf := &containerFlags{}
 	if image {
-		cf.image = fs.String("image", "", "Full base Docker image (default: "+md.DefaultBaseImage+":latest)")
+		cf.image = fs.String("image", "", "Full base Docker image; md build-image generates md-user-local (default: "+md.DefaultBaseImage+":latest)")
 		cf.tag = fs.String("tag", "", "Tag for the default base image ("+md.DefaultBaseImage+":<tag>)")
 	}
 	cf.branch = fs.String("branch", "", "Branch to use (default: current branch)")
