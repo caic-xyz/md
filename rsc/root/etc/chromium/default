@@ -1,4 +1,0 @@
-# Chromium environment variables and options (sourced by chromium wrapper)
-# Set default command-line flags for Chromium
-
-CHROMIUM_FLAGS="--no-default-browser-check --no-first-run"

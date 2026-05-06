@@ -1,0 +1,7 @@
+#!/bin/bash
+# Wrapper for google-chrome-stable that adds --no-first-run.
+# This suppresses the first-run onboarding (analytics consent, default
+# browser prompt, "Make Chrome your own", search engine choice screen).
+# Calls through to the original wrapper which sets up the required
+# environment (CHROME_WRAPPER, CHROME_VERSION_EXTRA, stdio sanitization).
+exec /opt/google/chrome/google-chrome --no-first-run "$@"

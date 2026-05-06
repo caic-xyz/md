@@ -24,5 +24,6 @@ apt-get install -qq -y --no-install-recommends "${PACKAGES[@]}" >/dev/null
 if [[ "$ARCH" == "amd64" ]]; then
 	# Register google-chrome as www-browser at the same priority it uses
 	# for x-www-browser (200), so it overrides chromium's lower priority (40).
-	update-alternatives --install /usr/bin/www-browser www-browser /usr/bin/google-chrome-stable 200
+	# Use our wrapper (which adds --no-first-run) rather than the stock symlink.
+	update-alternatives --install /usr/bin/www-browser www-browser /usr/local/bin/google-chrome-stable 200
 fi

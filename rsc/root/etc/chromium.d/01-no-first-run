@@ -1,0 +1,4 @@
+# Skip first-run wizards (onboarding, analytics, default browser prompts).
+# The chromium wrapper sources all files in /etc/chromium.d/ and passes
+# CHROMIUM_FLAGS as command-line arguments to the chromium binary.
+export CHROMIUM_FLAGS="$CHROMIUM_FLAGS --no-first-run"
