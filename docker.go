@@ -70,9 +70,9 @@ func extractEmbeddedTree(prefix, tmpPattern string) (dir string, retErr error) {
 		if err != nil {
 			return err
 		}
-		// Preserve executable bits for shell scripts.
+		// Preserve executable bits for scripts (by extension, shebang, or bin-directory location).
 		mode := os.FileMode(0o644)
-		if strings.HasSuffix(path, ".sh") || strings.HasSuffix(path, "xstartup") {
+		if isExecutable(path, data) {
 			mode = 0o755
 		}
 		return os.WriteFile(target, data, mode)
@@ -81,6 +81,12 @@ func extractEmbeddedTree(prefix, tmpPattern string) (dir string, retErr error) {
 		return "", fmt.Errorf("extracting %s: %w", prefix, err)
 	}
 	return tmp, nil
+}
+
+// isExecutable reports whether a file from the embedded rsc filesystem should
+// be written with execute permission. Matches files starting with a #! shebang.
+func isExecutable(path string, data []byte) bool {
+	return bytes.HasPrefix(data, []byte("#!"))
 }
 
 // prepareBuildContext writes the embedded rsc/user/ tree to a temp directory.

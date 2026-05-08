@@ -5,6 +5,7 @@
 package md
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -419,6 +420,70 @@ func TestGenerateDockerfile(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestIsExecutable(t *testing.T) {
+	// Walk the embedded rsc filesystem and verify that the executable-bit
+	// heuristic (suffix .sh/xstartup, path contains /bin/, or shebang #!)
+	// covers the files we expect to be executable.
+	execFiles := []string{}
+	err := fs.WalkDir(rscFS, ".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		data, err := rscFS.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if isExecutable(path, data) {
+			execFiles = append(execFiles, path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	slices.Sort(execFiles)
+
+	// Verify expected executable files are present.
+	wantExec := []string{
+		"rsc/root/root/setup/1_packages.sh",
+		"rsc/root/root/setup/2_neovim.sh",
+		"rsc/root/root/setup/3_extrepo.sh",
+		"rsc/root/root/setup/4_create_user.sh",
+		"rsc/root/root/setup/5_kvm.sh",
+		"rsc/root/root/setup/6_radare2.sh",
+		"rsc/root/root/setup/7_podman.sh",
+		"rsc/root/root/start.sh",
+		"rsc/root/root/vnc-start.sh",
+		"rsc/root/root/xfce-monitor.sh",
+		"rsc/root/root/xvnc-monitor.sh",
+		"rsc/root/usr/local/bin/git-credential-github",
+		"rsc/root/usr/local/bin/google-chrome-stable",
+		"rsc/root/usr/local/bin/measure_exec.sh",
+		"rsc/user/home/user/setup/1_go.sh",
+		"rsc/user/home/user/setup/2_nodejs.sh",
+		"rsc/user/home/user/setup/3_bun.sh",
+		"rsc/user/home/user/setup/4_android.sh",
+		"rsc/user/home/user/setup/5_rust.sh",
+		"rsc/user/home/user/setup/6_python.sh",
+		"rsc/user/home/user/setup/7_llm_tools.sh",
+		"rsc/user/home/user/setup/bashrc_cleanup.sh",
+		"rsc/user/home/user/setup/generate_version_report.sh",
+		"rsc/user/home/user/.vnc/xstartup",
+	}
+	slices.Sort(wantExec)
+	if slices.Compare(execFiles, wantExec) != 0 {
+		t.Errorf("executable files not as expected")
+		t.Logf("Executable files: %d", len(execFiles))
+		for _, f := range execFiles {
+			t.Logf("  %s", f)
+		}
+		t.Logf("Expected files: %d", len(wantExec))
+		for _, f := range wantExec {
+			t.Logf("  %s", f)
+		}
+	}
 }
 
 func TestConvertGitURLToHTTPS(t *testing.T) {

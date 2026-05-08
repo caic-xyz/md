@@ -25,6 +25,8 @@
 	colorMoved = dimmed-zebra
 [pull]
 	rebase = true
+[credential "https://github.com"]
+	helper = /usr/local/bin/git-credential-github
 [alias]
 	br = branch
 	ci = commit
