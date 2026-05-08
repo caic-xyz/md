@@ -72,7 +72,7 @@ func extractEmbeddedTree(prefix, tmpPattern string) (dir string, retErr error) {
 		}
 		// Preserve executable bits for scripts (by extension, shebang, or bin-directory location).
 		mode := os.FileMode(0o644)
-		if isExecutable(path, data) {
+		if isExecutable(data) {
 			mode = 0o755
 		}
 		return os.WriteFile(target, data, mode)
@@ -85,7 +85,7 @@ func extractEmbeddedTree(prefix, tmpPattern string) (dir string, retErr error) {
 
 // isExecutable reports whether a file from the embedded rsc filesystem should
 // be written with execute permission. Matches files starting with a #! shebang.
-func isExecutable(path string, data []byte) bool {
+func isExecutable(data []byte) bool {
 	return bytes.HasPrefix(data, []byte("#!"))
 }
 

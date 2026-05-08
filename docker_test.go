@@ -435,7 +435,7 @@ func TestIsExecutable(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		if isExecutable(path, data) {
+		if isExecutable(data) {
 			execFiles = append(execFiles, path)
 		}
 		return nil
