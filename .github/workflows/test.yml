@@ -121,8 +121,8 @@ jobs:
       - name: "Check: no executable was committed (ubuntu)"
         if: always() && matrix.os == 'ubuntu-latest'
         run: |
-          if find . -type f -not -path './.git/*' -not -path './cache/*' -not -path './py/venv/*' -not -name '*.sh' -not -name '*.py' -not -name '*.desktop' -not -path './rsc/root/opt/bin/*' -not -path './rsc/user/home/user/.vnc/xstartup' -perm /111 | grep -e . ; then
-            echo 'Do not commit executables beside shell scripts'
+          if find . -type f -not -path './.git/*' -not -path './cache/*' -not -path './py/venv/*' -not -name '*.desktop' -perm /111 -exec sh -c 'test "$(head -c2 "$1")" != "#!"' _ {} \; -print | grep -e . ; then
+            echo 'Do not commit executables that are not scripts (missing #! shebang)'
             false
           fi
       - name: "Check: addlicense; all sources have a license header (ubuntu)"
