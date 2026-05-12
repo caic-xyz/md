@@ -28,7 +28,7 @@ corepack enable pnpm
 pnpm add -g \
 	@google/gemini-cli \
 	@kilocode/cli \
-	@mariozechner/pi-coding-agent \
+	@earendil-works/pi-coding-agent \
 	@openai/codex \
 	@qwen-code/qwen-code \
 	chrome-devtools-mcp \
