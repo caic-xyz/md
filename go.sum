@@ -14,8 +14,8 @@ github.com/klauspost/compress v1.18.4 h1:RPhnKRAQ4Fh8zU2FY/6ZFDwTVTxgJ/EMydqSTzE
 github.com/klauspost/compress v1.18.4/go.mod h1:R0h/fSBs8DE4ENlcrlib3PsXS61voFxhIs2DeRhCvJ4=
 github.com/mailru/easyjson v0.9.2 h1:dX8U45hQsZpxd80nLvDGihsQ/OxlvTkVUXH2r/8cb2M=
 github.com/mailru/easyjson v0.9.2/go.mod h1:1+xMtQp2MRNVL/V1bOzuP3aP8VNwRW55fQUto+XFtTU=
-github.com/maruel/genai v0.5.0 h1:jgx+H58GmWBPwq0fzNUUthsYL8RQwU3laICF4pJsMpY=
-github.com/maruel/genai v0.5.0/go.mod h1:Rei9NjfM3vCiNU2TvltOoLvvqzGd6YssvnWIZ+U054c=
+github.com/maruel/genai v0.5.2 h1:pLDgRFZzGkbzxcq3ylsJMNaEi6QNWI1M8nFCx6yKP84=
+github.com/maruel/genai v0.5.2/go.mod h1:Rei9NjfM3vCiNU2TvltOoLvvqzGd6YssvnWIZ+U054c=
 github.com/maruel/httpjson v0.5.0 h1:fUkECNt2G2rSi9rzklMVcElsiucUj8LoKhKqaUvlaYA=
 github.com/maruel/httpjson v0.5.0/go.mod h1:Rbue+VwOe1TC6doGXddW8EWg2fW4Je6RhCo7iPuNpTo=
 github.com/maruel/roundtrippers v0.5.0 h1:0ot2VEWg2KbrHMh67/ysw5P9HQBhMdST4QZfR7QKFBo=
