@@ -18,7 +18,7 @@ Notable executables available in the container:
 - Embedded: flex, bison, gperf, dfu-util, libusb-1.0-0
 - Languages: go, python3, java, R, rust (cargo, rustc)
 - Languages (web): node (v24), npm, npx, pnpm, bun, typescript, bun, eslint, tsx
-- AI Tools: claude, gemini, codex, kilo, qwen-code, opencode, amp, pi
+- AI Tools: claude, gemini, codex, kilo, qwen-code, opencode, amp, pi, agent-browser
 - Containers: podman (rootless)
 - Virtualization: qemu-kvm, libvirt-clients
 - Media: ffmpeg, imagemagick

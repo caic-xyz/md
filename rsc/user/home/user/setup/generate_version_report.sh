@@ -97,6 +97,7 @@
 	check_version "Bun" "bun" "--version"
 	check_version "pnpm" "pnpm" "--version"
 	check_version "prettier" "prettier" "--version"
+	check_version "agent-browser" "agent-browser" "--version"
 	check_version "ESLint" "eslint" "--version"
 	check_version "tsx" "tsx" "--version"
 
