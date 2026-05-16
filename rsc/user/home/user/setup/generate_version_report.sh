@@ -120,6 +120,7 @@
 
 	# Network Tools
 	check_version "nmap" "nmap" "--version"
+	check_version "tcpdump" "tcpdump" "--version"
 	check_version "Tailscale" "tailscale" "version"
 
 	# GitHub

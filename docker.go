@@ -805,10 +805,18 @@ func launchContainer(ctx context.Context, stdout, stderr io.Writer, c *Container
 		dockerArgs = append(dockerArgs, "--userns=keep-id", "--user", "0:0")
 	}
 
+	// NET_ADMIN and NET_RAW are always granted:
+	// - tcpdump uses AF_PACKET sockets which require NET_RAW.
+	// - Tailscale manipulates the network interface (TUN device creation,
+	//   route table changes) which requires NET_ADMIN.
+	// Both are scoped to the container's network namespace.
+	dockerArgs = append(dockerArgs,
+		"--cap-add=NET_ADMIN", "--cap-add=NET_RAW")
+
 	// Tailscale.
 	if opts.Tailscale {
 		dockerArgs = append(dockerArgs,
-			"--cap-add=NET_ADMIN", "--cap-add=NET_RAW", "--cap-add=MKNOD",
+			"--cap-add=MKNOD",
 			"-e", "MD_TAILSCALE=1")
 		if opts.TailscaleAuthKey != "" {
 			dockerArgs = append(dockerArgs, "-e", "TAILSCALE_AUTHKEY="+opts.TailscaleAuthKey)
