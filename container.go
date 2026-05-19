@@ -1324,11 +1324,15 @@ func (c *Container) pushSubmodules(ctx context.Context, stdout, stderr io.Writer
 			return fmt.Errorf("init submodule %s: %w", relPath, err)
 		}
 		// Push all refs from host bare module repo to container.
+		// Force core.bare=true so git doesn't try to chdir into the
+		// submodule worktree. The worktree may not exist when the
+		// submodule was initialized (git submodule init, which creates
+		// the module dir) but never updated or was later deinited.
 		containerURL := "user@" + c.Name + ":" + containerModuleDir
-		if _, err := gitutil.RunGit(ctx, hostModuleDir, "push", "-q", containerURL, "--all"); err != nil {
+		if _, err := gitutil.RunGit(ctx, hostModuleDir, "-c", "core.bare=true", "push", "-q", containerURL, "--all"); err != nil {
 			return fmt.Errorf("push submodule refs %s: %w", relPath, err)
 		}
-		if _, err := gitutil.RunGit(ctx, hostModuleDir, "push", "-q", containerURL, "--tags"); err != nil {
+		if _, err := gitutil.RunGit(ctx, hostModuleDir, "-c", "core.bare=true", "push", "-q", containerURL, "--tags"); err != nil {
 			return fmt.Errorf("push submodule tags %s: %w", relPath, err)
 		}
 	}
