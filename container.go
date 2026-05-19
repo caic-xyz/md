@@ -1324,15 +1324,16 @@ func (c *Container) pushSubmodules(ctx context.Context, stdout, stderr io.Writer
 			return fmt.Errorf("init submodule %s: %w", relPath, err)
 		}
 		// Push all refs from host bare module repo to container.
-		// Force core.bare=true so git doesn't try to chdir into the
-		// submodule worktree. The worktree may not exist when the
-		// submodule was initialized (git submodule init, which creates
-		// the module dir) but never updated or was later deinited.
+		// Use GIT_DIR env var instead of --git-dir because --git-dir
+		// still reads core.worktree from the repo config and tries
+		// to chdir there, which fails when the submodule worktree
+		// was never checked out (init but not update, or deinited).
+		// GIT_DIR fully decouples git from any worktree.
 		containerURL := "user@" + c.Name + ":" + containerModuleDir
-		if _, err := gitutil.RunGit(ctx, hostModuleDir, "-c", "core.bare=true", "push", "-q", containerURL, "--all"); err != nil {
+		if err := runGitDir(ctx, hostGitRoot, hostModuleDir, "push", "-q", containerURL, "--all"); err != nil {
 			return fmt.Errorf("push submodule refs %s: %w", relPath, err)
 		}
-		if _, err := gitutil.RunGit(ctx, hostModuleDir, "-c", "core.bare=true", "push", "-q", containerURL, "--tags"); err != nil {
+		if err := runGitDir(ctx, hostGitRoot, hostModuleDir, "push", "-q", containerURL, "--tags"); err != nil {
 			return fmt.Errorf("push submodule tags %s: %w", relPath, err)
 		}
 	}
@@ -1347,34 +1348,61 @@ func (c *Container) pushSubmodules(ctx context.Context, stdout, stderr io.Writer
 	// directory (not a bare repo) and miss the actual submodule. We detect bare
 	// repos by the presence of HEAD + objects/ + refs/ and recurse into
 	// non-bare directories to handle these intermediate path components.
-	script := "cd " + shellQuote(containerRepoPath) + ` && __md_sm_visit() {
-  local base="$1" dir="$2"
-  if [ -f "$dir/HEAD" ] && [ -d "$dir/objects" ] && [ -d "$dir/refs" ]; then
-    local n val
-    n="${dir#"$base/"}"
-    val=$(git config --file .gitmodules "submodule.$n.path" 2>/dev/null) || val="$n"
-    git submodule init -q -- "$val"
-    git config "submodule.$n.url" "$dir"
-    git -c advice.detachedHead=false submodule update --no-fetch -q -- "$val"
-    [ -d "$val" ] && (cd "$val" && __md_sm_fix)
-    return
-  fi
-  local entry
-  for entry in "$dir"/*/; do
-    [ -d "$entry" ] || continue
-    __md_sm_visit "$base" "$entry"
-  done
-}
-__md_sm_fix() {
-  local gd entry
+	// Script driven by .gitmodules (canonical declaration), sourcing data
+	// from .git/modules/ (pushed from host). Each failure mode prints a
+	// prefixed message so the user can diagnose missing host-side
+	// submodule init, clone conflicts, or partial checkouts.
+	script := "cd " + shellQuote(containerRepoPath) + ` && __md_sm_fix() {
+  local gd line name val names
   gd=$(git rev-parse --git-dir)
   [ -d "$gd/modules" ] || return 0
-  for entry in "$gd/modules"/*/; do
-    [ -d "$entry" ] || continue
-    __md_sm_visit "$gd/modules" "$entry"
+
+  # Collect submodules declared in .gitmodules whose data exists locally.
+  names=()
+  while IFS= read -r line; do
+    name="${line#submodule.}"
+    name="${name%.path}"
+    if [ ! -d "$gd/modules/$name" ]; then
+      echo "md: submodule '$name': not initialized on host (no .git/modules/$name)" >&2
+      continue
+    fi
+    names+=("$name")
+  done < <(git config --file .gitmodules --name-only --get-regexp '^submodule\..*\.path$')
+  [ "${#names[@]}" -gt 0 ] || return 0
+
+  # Phase 1: init and point URL to local module dir.
+  for name in "${names[@]}"; do
+    val=$(git config --file .gitmodules "submodule.$name.path")
+    if ! git submodule init -q -- "$val"; then
+      echo "md: submodule '$name': init failed" >&2
+    fi
+    git config "submodule.$name.url" "$gd/modules/$name" ||
+      echo "md: submodule '$name': url override failed" >&2
+  done
+
+  # Phase 2: remove stale directories left by previous failed checkouts,
+  # then let git submodule update clone + checkout from local data.
+  for name in "${names[@]}"; do
+    val=$(git config --file .gitmodules "submodule.$name.path")
+    [ -f "$val/.git" ] && continue
+    [ -d "$val" ] && rm -rf "$val"
+  done
+
+  # Phase 3: clone from local module dirs and checkout (instant, no network).
+  git -c advice.detachedHead=false submodule update ||
+    echo "md: some submodules failed to update (check messages above)" >&2
+
+  # Phase 4: recurse into checked-out submodules.
+  for name in "${names[@]}"; do
+    val=$(git config --file .gitmodules "submodule.$name.path")
+    if [ -d "$val" ]; then
+      (cd "$val" && __md_sm_fix) ||
+        echo "md: submodule '$name': nested update failed" >&2
+    fi
+    true
   done
 }
-export -f __md_sm_visit __md_sm_fix && __md_sm_fix`
+export -f __md_sm_fix && __md_sm_fix`
 	if err := runCmdOut(ctx, "", c.SSHCommand(c.Name, script), stdout, stderr); err != nil {
 		return fmt.Errorf("submodule update: %w", err)
 	}
@@ -1590,4 +1618,21 @@ func parseIOPair(s string) (uint64, uint64, error) {
 		return 0, 0, err
 	}
 	return a, b, nil
+}
+
+// runGitDir runs a git command with GIT_DIR and GIT_WORK_TREE
+// explicitly set, fully decoupling git from the repository config
+// (core.worktree). dir is the working directory and also used as
+// GIT_WORK_TREE so git never tries to chdir to a non-existent
+// submodule worktree.
+func runGitDir(ctx context.Context, dir, gitDir string, args ...string) error {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GIT_DIR="+gitDir, "GIT_WORK_TREE="+dir, "LANG=C")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if _, err := cmd.Output(); err != nil {
+		return fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, stderr.String())
+	}
+	return nil
 }
