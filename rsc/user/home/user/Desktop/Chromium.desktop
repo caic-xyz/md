@@ -3,7 +3,7 @@ Version=1.0
 Type=Application
 Name=Chromium Debug 9222
 Comment=Chromium with remote debugging on port 9222
-Exec=chromium --remote-debugging-port=9222 --user-data-dir=/home/user/.chromium-debug
+Exec=chromium --remote-debugging-port=9222 --no-first-run --no-default-browser-check
 Icon=chromium
 Terminal=false
 Categories=Network;WebBrowser;
