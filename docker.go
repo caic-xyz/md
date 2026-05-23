@@ -867,6 +867,7 @@ func launchContainer(ctx context.Context, stdout, stderr io.Writer, c *Container
 		if err != nil {
 			return fmt.Errorf("generating sudo password: %w", err)
 		}
+		c.sudoPassword = sudoPassword
 		dockerArgs = append(dockerArgs,
 			"--label", "md.sudo=1",
 			"--label", "md.sudo-password="+sudoPassword,

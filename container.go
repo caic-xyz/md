@@ -136,6 +136,10 @@ type Container struct {
 	// Sudo indicates root access via sudo is enabled.
 	// Label: md.sudo
 	Sudo bool
+	// sudoPassword is the random password set by Launch, cached
+	// so SudoPassword() doesn't need to docker inspect. Empty for
+	// containers loaded from docker list (fall back to label).
+	sudoPassword string
 
 	// SSHPort is the host port mapped to the container's SSH port.
 	// Set by Launch; available immediately after Launch returns.
@@ -1193,16 +1197,22 @@ func getHostPort(ctx context.Context, rt, container, containerPort string) (int3
 }
 
 // SudoPassword retrieves the random sudo password set at container startup,
-// or "" if no password was configured (e.g. ephemeral md run containers, or
-// containers started with an older md). The password is stored as a Docker
-// container label, never inside the container filesystem.
+// or "" if no password was configured.
+//
+// For containers created by Launch, the password is cached in-memory.
+// For containers loaded from List (e.g. md sudo-password), it falls back
+// to reading the md.sudo-password Docker label.
 func (c *Container) SudoPassword(ctx context.Context) (string, error) {
+	if c.sudoPassword != "" {
+		return c.sudoPassword, nil
+	}
 	out, err := runCmd(ctx, "", []string{c.Runtime, "inspect", "--format",
 		`{{index .Config.Labels "md.sudo-password"}}`, c.Name})
 	if err != nil {
 		return "", err
 	}
-	return strings.TrimSpace(out), nil
+	c.sudoPassword = strings.TrimSpace(out)
+	return c.sudoPassword, nil
 }
 
 // TailscaleFQDN returns the Tailscale FQDN for the container, or "" if unavailable.
