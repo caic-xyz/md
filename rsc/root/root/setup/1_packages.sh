@@ -93,6 +93,7 @@ apt-get install -qq -y --no-install-recommends \
 	shellcheck \
 	slirp4netns \
 	sqlite3 \
+	sudo \
 	tcpdump \
 	strace \
 	tigervnc-standalone-server \

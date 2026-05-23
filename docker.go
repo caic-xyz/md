@@ -862,6 +862,12 @@ func launchContainer(ctx context.Context, stdout, stderr io.Writer, c *Container
 	}
 
 	// Set md metadata labels.
+	sudoPassword, err := generatePassword()
+	if err != nil {
+		return fmt.Errorf("generating sudo password: %w", err)
+	}
+	dockerArgs = append(dockerArgs, "--label", "md.sudo-password="+sudoPassword,
+		"-e", "MD_SUDO_PASSWORD="+sudoPassword)
 	if reposJSON, err := json.Marshal(c.Repos); err == nil {
 		// Base64-encode so commas in JSON don't corrupt the comma-separated
 		// label parsing in unmarshalContainer.

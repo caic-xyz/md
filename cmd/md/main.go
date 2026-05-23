@@ -88,34 +88,36 @@ func mainImpl() error {
 	cmd := remaining[0]
 	args := remaining[1:]
 	switch cmd {
-	case "start":
-		return cmdStart(ctx, args)
-	case "run":
-		return cmdRun(ctx, args)
-	case "list":
-		return cmdList(ctx, args)
-	case "ssh":
-		return cmdSSH(args)
-	case "purge", "kill":
-		return cmdPurge(ctx, args)
-	case "stop":
-		return cmdStop(ctx, args)
-	case "push":
-		return cmdPush(ctx, args)
-	case "pull":
-		return cmdPull(ctx, args)
+	case "build-image":
+		return cmdBuildImage(ctx, args)
 	case "diff":
 		return cmdDiff(ctx, args)
 	case "fork":
 		return cmdFork(ctx, args)
-	case "vnc":
-		return cmdVNC(ctx, args)
-	case "build-image":
-		return cmdBuildImage(ctx, args)
+	case "list":
+		return cmdList(ctx, args)
 	case "prune":
 		return cmdPrune(ctx, args)
+	case "pull":
+		return cmdPull(ctx, args)
+	case "purge", "kill":
+		return cmdPurge(ctx, args)
+	case "push":
+		return cmdPush(ctx, args)
+	case "run":
+		return cmdRun(ctx, args)
+	case "ssh":
+		return cmdSSH(args)
+	case "start":
+		return cmdStart(ctx, args)
+	case "stop":
+		return cmdStop(ctx, args)
+	case "sudo-password":
+		return cmdSudoPassword(ctx, args)
 	case "version":
 		return cmdVersion(args)
+	case "vnc":
+		return cmdVNC(ctx, args)
 	case "help", "-h", "-help", "--help":
 		usage()
 		return nil
@@ -133,19 +135,21 @@ func usage() {
 		"  --runtime <name>   Container runtime: docker or podman (default: auto-detect)\n"+
 		"\n"+
 		"Commands:\n"+
-		"  start       Pull base image, rebuild if needed, start container, open shell\n"+
-		"  run <cmd>   Start a temporary container, run a command, then clean up\n"+
-		"  list        List running md containers\n"+
-		"  stop        Stop the container (preserves filesystem for later revival)\n"+
-		"  purge       Stop and remove the container permanently\n"+
-		"  push        Force-push current repo state into the running container\n"+
-		"  pull        Pull changes from container back to local branch\n"+
-		"  diff        Show differences between base and current changes\n"+
-		"  fork        Snapshot container and create a new one on forked branches\n"+
-		"  vnc         Open VNC connection to the container\n"+
-		"  build-image Build the base Docker image locally\n"+
-		"  prune       Remove unused md-specialized-* and md-fork-* images\n"+
-		"  version     Print version information\n")
+		"  build-image   Build the base Docker image locally\n"+
+		"  diff          Show differences between base and current changes\n"+
+		"  fork          Snapshot container and create a new one on forked branches\n"+
+		"  list          List running md containers\n"+
+		"  prune         Remove unused md-specialized-* and md-fork-* images\n"+
+		"  pull          Pull changes from container back to local branch\n"+
+		"  purge         Stop and remove the container permanently\n"+
+		"  push          Force-push current repo state into the running container\n"+
+		"  run <cmd>     Start a temporary container, run a command, then clean up\n"+
+		"  ssh           (see 'ssh md-<repo>-<branch>')\n"+
+		"  start         Pull base image, rebuild if needed, start container, open shell\n"+
+		"  stop          Stop the container (preserves filesystem for later revival)\n"+
+		"  sudo-password Print the container's random sudo password\n"+
+		"  version       Print version information\n"+
+		"  vnc           Open VNC connection to the container\n")
 }
 
 func newClient() (*md.Client, error) {
@@ -1007,6 +1011,43 @@ func cmdVNC(ctx context.Context, args []string) error {
 	default:
 		return fmt.Errorf("unsupported platform: %s", runtime.GOOS)
 	}
+}
+
+func cmdSudoPassword(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("sudo-password", flag.ExitOnError)
+	verbose := addVerboseFlag(fs)
+	cf := addContainerFlags(fs, false)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	initLogging(*verbose)
+	if err := checkArgs(fs, 1); err != nil {
+		return err
+	}
+	// Accept a container name as positional arg, otherwise auto-detect.
+	var ct *md.Container
+	if name := fs.Arg(0); name != "" {
+		c, err := newClient()
+		if err != nil {
+			return err
+		}
+		ct = &md.Container{Client: c, Name: name}
+	} else {
+		var err error
+		ct, _, err = findContainerAndRepo(ctx, cf)
+		if err != nil {
+			return err
+		}
+	}
+	password, err := ct.SudoPassword(ctx)
+	if err != nil {
+		return fmt.Errorf("retrieving sudo password from %s: %w", ct.Name, err)
+	}
+	if password == "" {
+		return fmt.Errorf("no sudo password found for %s", ct.Name)
+	}
+	fmt.Println(password)
+	return nil
 }
 
 func cmdBuildImage(ctx context.Context, args []string) error {

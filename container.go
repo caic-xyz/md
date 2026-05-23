@@ -15,6 +15,7 @@ import (
 	"io"
 	"log/slog"
 	"maps"
+	"math/big"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1174,6 +1175,19 @@ func getHostPort(ctx context.Context, rt, container, containerPort string) (int3
 	return int32(port), nil
 }
 
+// SudoPassword retrieves the random sudo password set at container startup,
+// or "" if no password was configured (e.g. ephemeral md run containers, or
+// containers started with an older md). The password is stored as a Docker
+// container label, never inside the container filesystem.
+func (c *Container) SudoPassword(ctx context.Context) (string, error) {
+	out, err := runCmd(ctx, "", []string{c.Runtime, "inspect", "--format",
+		`{{index .Config.Labels "md.sudo-password"}}`, c.Name})
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
+}
+
 // TailscaleFQDN returns the Tailscale FQDN for the container, or "" if unavailable.
 func (c *Container) TailscaleFQDN(ctx context.Context) string {
 	if !c.Tailscale || c.State != "running" {
@@ -1473,6 +1487,28 @@ func runCmdOut(ctx context.Context, dir string, args []string, stdout, stderr io
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	return cmd.Run()
+}
+
+// generatePassword creates a random 20-character alphanumeric password
+// suitable for the container sudo account.
+func generatePassword() (string, error) {
+	const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+	const pwdLen = 20
+	// ceil(pwdLen * log2(62) / 8) = 15 bytes of entropy.
+	var raw [15]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", fmt.Errorf("generating sudo password: %w", err)
+	}
+	// Convert random bytes to base-62 — perfectly unbiased, no rejection.
+	n := new(big.Int).SetBytes(raw[:])
+	var pwd [pwdLen]byte
+	var rem big.Int
+	base := big.NewInt(62)
+	for i := len(pwd) - 1; i >= 0; i-- {
+		n.DivMod(n, base, &rem)
+		pwd[i] = chars[rem.Int64()]
+	}
+	return string(pwd[:]), nil
 }
 
 // shellQuote returns a shell-escaped version of s, safe for embedding in a

@@ -6,6 +6,13 @@ set -eu
 # Generate dynamic motd with hostname
 echo "Connected to $(hostname)" >/etc/motd
 
+# If md start provided a sudo password via env var, grant sudo access.
+if [ -n "${MD_SUDO_PASSWORD:-}" ]; then
+	usermod -aG sudo user
+	echo "user:$MD_SUDO_PASSWORD" | chpasswd
+	unset MD_SUDO_PASSWORD
+fi
+
 # If /dev/kvm exists, update the kvm group GID to match the host.
 # In rootless Docker, device GIDs map to the overflow GID (65534) and groupmod
 # would fail because that GID is already taken by nogroup. Skip in that case.
