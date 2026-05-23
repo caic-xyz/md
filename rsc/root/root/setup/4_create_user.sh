@@ -4,4 +4,4 @@ set -euo pipefail
 echo "- $0"
 
 # Create user "user"
-useradd -ms /bin/bash -G plugdev user
+useradd -ms /bin/bash user

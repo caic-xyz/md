@@ -98,9 +98,10 @@ if [ -n "${MD_TAILSCALE:-}" ]; then
 	fi
 fi
 
-# If /dev/bus/usb exists, update the plugdev group GID to match the host.
+# If /dev/bus/usb exists, grant plugdev access and match host GID.
 # Same rootless Docker guard as above for the kvm group.
 if [ -d /dev/bus/usb ]; then
+	usermod -aG plugdev user
 	host_plugdev_gid=$(stat -c %g /dev/bus/usb/001/* 2>/dev/null | grep -v '^0$' | head -1)
 	if [ -n "$host_plugdev_gid" ]; then
 		current_plugdev_gid=$(getent group plugdev | cut -d: -f3)
