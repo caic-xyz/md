@@ -36,6 +36,7 @@ apt-get install -qq -y --no-install-recommends \
 	file \
 	flex \
 	fuse-overlayfs \
+	g++-arm-linux-gnueabihf \
 	git \
 	gperf \
 	gpg \
@@ -71,6 +72,7 @@ apt-get install -qq -y --no-install-recommends \
 	lldb \
 	locales \
 	lsof \
+	meson \
 	net-tools \
 	ninja-build \
 	nmap \
