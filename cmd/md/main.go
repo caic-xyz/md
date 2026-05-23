@@ -369,6 +369,7 @@ func cmdStart(ctx context.Context, args []string) error {
 	fs.BoolVar(display, "d", false, "Enable X11/VNC display")
 	tailscale := fs.Bool("tailscale", false, "Enable Tailscale networking")
 	usb := fs.Bool("usb", false, "Pass through USB devices (/dev/bus/usb)")
+	sudoFlag := fs.Bool("sudo", false, "Enable root access via sudo (random per-container password)")
 	cf := addContainerFlags(fs, true)
 	extraRepos := &stringSlice{}
 	fs.Var(extraRepos, "extra-repo", "Additional git repository path[:branch] to map; may be repeated")
@@ -421,6 +422,7 @@ func cmdStart(ctx context.Context, args []string) error {
 		Display:          *display,
 		Tailscale:        *tailscale,
 		USB:              *usb,
+		Sudo:             *sudoFlag,
 		TailscaleAuthKey: os.Getenv("TAILSCALE_AUTHKEY"),
 		Caches:           caches,
 		Labels:           labels.values,

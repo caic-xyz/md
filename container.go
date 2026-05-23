@@ -69,6 +69,10 @@ type StartOpts struct {
 	TailscaleAuthKey string
 	// USB enables USB device passthrough (Linux only).
 	USB bool
+	// Sudo enables password-based sudo for the user account. A random
+	// password is generated per container and stored as a container label;
+	// retrieve it with `md sudo-password`. Defaults to false.
+	Sudo bool
 	// Caches lists host directories to COPY into the image at build time.
 	// Use well-known names from [WellKnownCaches] or construct [CacheMount]
 	// values directly. Paths that do not exist on the host are silently skipped.
