@@ -440,7 +440,7 @@ func cmdStart(ctx context.Context, args []string) error {
 		return err
 	}
 	if !*quiet {
-		if err = printContainerSummary(ctx, ct, result, "- Created "+ct.Name); err != nil {
+		if err := printContainerSummary(ctx, ct, result, "- Created "+ct.Name); err != nil {
 			return err
 		}
 	}
@@ -962,7 +962,7 @@ func cmdFork(ctx context.Context, args []string) error {
 		return err
 	}
 	if !*quiet {
-		if err = printContainerSummary(ctx, fork, nil, fmt.Sprintf("- Forked %s → %s", sourceCt.Name, fork.Name)); err != nil {
+		if err := printContainerSummary(ctx, fork, nil, fmt.Sprintf("- Forked %s → %s", sourceCt.Name, fork.Name)); err != nil {
 			return err
 		}
 	}
