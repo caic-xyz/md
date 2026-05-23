@@ -440,7 +440,9 @@ func cmdStart(ctx context.Context, args []string) error {
 		return err
 	}
 	if !*quiet {
-		printStartSummary(ct, result)
+		if err = printContainerSummary(ctx, ct, result, "- Cool facts:"); err != nil {
+			return err
+		}
 	}
 	if !*noSSH {
 		sshArgs := ct.SSHCommand(ct.Name)
@@ -453,28 +455,41 @@ func cmdStart(ctx context.Context, args []string) error {
 	return nil
 }
 
-func printStartSummary(ct *md.Container, r *md.StartResult) {
-	fmt.Println("- Cool facts:")
-	fmt.Println("  > Remote access:")
-	fmt.Printf("  >  SSH: `ssh %s`\n", ct.Name)
-	if ct.VNCPort != 0 {
-		fmt.Printf("  >  VNC: connect to localhost:%d with a VNC client or: `md vnc`\n", ct.VNCPort)
-	} else {
-		fmt.Println("  >  Next time pass --display to have a virtual display")
-	}
-	if r.TailscaleFQDN != "" {
-		fmt.Printf("  >  Tailscale FQDN: %s\n", r.TailscaleFQDN)
-	}
-	if r.TailscaleAuthURL != "" {
-		fmt.Printf("  >  Tailscale auth: %s\n", r.TailscaleAuthURL)
+func printContainerSummary(ctx context.Context, ct *md.Container, r *md.StartResult, header string) error {
+	fmt.Println(header)
+	// Tailscale info only available after Connect (start, not fork).
+	if r != nil {
+		if r.TailscaleFQDN != "" {
+			fmt.Printf("  >  Tailscale FQDN: %s\n", r.TailscaleFQDN)
+		}
+		if r.TailscaleAuthURL != "" {
+			fmt.Printf("  >  Tailscale auth: %s\n", r.TailscaleAuthURL)
+		}
 	}
 	if len(ct.Repos) > 0 {
-		fmt.Printf("  > Host branch '%s' is mapped in the container as 'base'\n", ct.Repos[0].Branch)
-		fmt.Println("  > See changes (in container): `git diff base`")
-		fmt.Println("  > See changes    (on host)  : `md diff`")
+		for _, r := range ct.Repos {
+			fmt.Printf("  > Repo %s on branch '%s'\n", r.Name(), r.Branch)
+		}
+		if r != nil {
+			fmt.Printf("  > Host branch '%s' is mapped in the container as 'base'\n", ct.Repos[0].Branch)
+		}
+		fmt.Println("  > See changes (in container): git diff base")
+		fmt.Println("  > See changes (on host)     : md diff")
 	}
-	fmt.Println("  > Stop container (on host)  : `md stop`")
-	fmt.Println("  > Purge container (on host) : `md purge`")
+	fmt.Println("  > Stop container            : md stop")
+	fmt.Println("  > Purge container           : md purge")
+	fmt.Printf("  > SSH                       : ssh %s\n", ct.Name)
+	if ct.VNCPort != 0 {
+		fmt.Printf("  > VNC to localhost:%-5d or : md vnc\n", ct.VNCPort)
+	}
+	if ct.Sudo {
+		if pw, err := ct.SudoPassword(ctx); err != nil {
+			return err
+		} else {
+			fmt.Printf("  > Sudo password             : %s\n", pw)
+		}
+	}
+	return nil
 }
 
 func cmdRun(ctx context.Context, args []string) error {
@@ -867,6 +882,7 @@ func cmdFork(ctx context.Context, args []string) error {
 	display := fs.Bool("display", false, "Enable X11/VNC display")
 	tailscale := fs.Bool("tailscale", false, "Enable Tailscale networking")
 	usb := fs.Bool("usb", false, "Pass through USB devices (/dev/bus/usb)")
+	sudoFlag := fs.Bool("sudo", false, "Enable root access via sudo (random per-container password)")
 	quiet := fs.Bool("q", false, "Suppress informational messages")
 	noSSH := fs.Bool("no-ssh", false, "Don't SSH into the forked container after starting")
 	github := fs.Bool("github", false, "Inject GitHub token into container")
@@ -933,6 +949,7 @@ func cmdFork(ctx context.Context, args []string) error {
 		Display:      *display,
 		Tailscale:    *tailscale,
 		USB:          *usb,
+		Sudo:         *sudoFlag,
 		Labels:       labels.values,
 		Quiet:        *quiet,
 		AgentPaths:   slices.Collect(maps.Values(md.HarnessMounts)),
@@ -945,14 +962,9 @@ func cmdFork(ctx context.Context, args []string) error {
 		return err
 	}
 	if !*quiet {
-		fmt.Printf("- Forked %s → %s\n", sourceCt.Name, fork.Name)
-		fmt.Println("- Cool facts:")
-		fmt.Printf("  > SSH: `ssh %s`\n", fork.Name)
-		for _, r := range fork.Repos {
-			fmt.Printf("  > Repo %s on branch '%s'\n", r.Name(), r.Branch)
+		if err = printContainerSummary(ctx, fork, nil, fmt.Sprintf("- Forked %s → %s", sourceCt.Name, fork.Name)); err != nil {
+			return err
 		}
-		fmt.Println("  > Stop container (on host)  : `md stop`")
-		fmt.Println("  > Purge container (on host) : `md purge`")
 	}
 	if !*noSSH {
 		sshArgs := fork.SSHCommand(fork.Name)

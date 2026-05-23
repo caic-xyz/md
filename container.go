@@ -133,6 +133,9 @@ type Container struct {
 	// USB indicates the container was started with USB passthrough.
 	// Label: md.usb
 	USB bool
+	// Sudo indicates root access via sudo is enabled.
+	// Label: md.sudo
+	Sudo bool
 
 	// SSHPort is the host port mapped to the container's SSH port.
 	// Set by Launch; available immediately after Launch returns.
@@ -248,6 +251,9 @@ func (c *Container) Launch(ctx context.Context, stdout, stderr io.Writer, opts *
 	if err != nil {
 		return err
 	}
+	c.Display = opts.Display
+	c.USB = opts.USB
+	c.Sudo = opts.Sudo
 	return launchContainer(ctx, stdout, stderr, c, opts, imageName)
 }
 
@@ -693,6 +699,9 @@ type ForkOpts struct {
 	// USB enables USB device passthrough on the forked container.
 	// When false, inherits the source container's setting.
 	USB bool
+	// Sudo enables root access via sudo on the forked container.
+	// When false, inherits the source container's setting.
+	Sudo bool
 	// Labels are additional Docker labels (key=value) applied to the forked container.
 	Labels []string
 	// Quiet suppresses informational output.
@@ -834,6 +843,7 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 		Display:      c.Display || opts.Display,
 		Tailscale:    c.Tailscale || opts.Tailscale,
 		USB:          c.USB || opts.USB,
+		Sudo:         c.Sudo || opts.Sudo,
 		MaxCPUs:      opts.MaxCPUs,
 		ExtraRunArgs: opts.ExtraRunArgs,
 	}
@@ -843,6 +853,9 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 	if err := launchContainer(ctx, stdout, stderr, fork, startOpts, snapshotImage); err != nil {
 		return nil, err
 	}
+	fork.Display = startOpts.Display
+	fork.USB = startOpts.USB
+	fork.Sudo = startOpts.Sudo
 
 	// Wait for SSH and set up repos.
 	addr := fmt.Sprintf("localhost:%d", fork.SSHPort)
@@ -1594,6 +1607,8 @@ func unmarshalContainer(data []byte) (Container, error) {
 			ct.Tailscale = v == "1"
 		case "md.usb":
 			ct.USB = v == "1"
+		case "md.sudo":
+			ct.Sudo = v == "1"
 		}
 	}
 	return ct, nil
