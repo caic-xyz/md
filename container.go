@@ -261,7 +261,7 @@ func (c *Container) Launch(ctx context.Context, stdout, stderr io.Writer, opts *
 // startup. Must be called after Launch. Container.Repos must have
 // branches set before this call.
 func (c *Container) Connect(ctx context.Context, stdout, stderr io.Writer, opts *StartOpts) (*StartResult, error) {
-	result, err := connectContainer(ctx, stdout, stderr, c, opts)
+	result, err := provisionContainer(ctx, stdout, stderr, c, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -307,7 +307,7 @@ func (c *Container) Run(ctx context.Context, stdout, stderr io.Writer, baseImage
 		tmp.cleanup(ctx)
 		return 1, err
 	}
-	if _, err := connectContainer(ctx, stdout, stderr, tmp, &opts); err != nil {
+	if _, err := provisionContainer(ctx, stdout, stderr, tmp, &opts); err != nil {
 		tmp.cleanup(ctx)
 		return 1, err
 	}

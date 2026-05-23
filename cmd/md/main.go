@@ -440,7 +440,7 @@ func cmdStart(ctx context.Context, args []string) error {
 		return err
 	}
 	if !*quiet {
-		if err = printContainerSummary(ctx, ct, result, "- Cool facts:"); err != nil {
+		if err = printContainerSummary(ctx, ct, result, "- Created "+ct.Name); err != nil {
 			return err
 		}
 	}

@@ -955,9 +955,6 @@ func launchContainer(ctx context.Context, stdout, stderr io.Writer, c *Container
 	// Set up git remotes for all repos before waiting for SSH, so they are
 	// ready to push as soon as the connection is established.
 	if len(c.Repos) > 0 {
-		if !opts.Quiet {
-			_, _ = fmt.Fprintln(stdout, "- git clone into container ...")
-		}
 		for _, r := range c.Repos {
 			rName := r.Name()
 			_, _ = runCmd(ctx, r.GitRoot, []string{"git", "remote", "rm", c.Name})
@@ -989,66 +986,29 @@ func waitForTCP(ctx context.Context, addr string, deadline time.Time) error {
 	}
 }
 
-// connectContainer waits for SSH, pushes repos into the container, and
-// handles .env and Tailscale auth. Must be called after launchContainer.
+// provisionContainer waits for SSH, pushes repos and submodules, sends .env,
+// and waits for Tailscale auth. Must be called after launchContainer.
 //
 // The task branch and default branch are pushed in parallel to reduce latency.
-func connectContainer(ctx context.Context, stdout, stderr io.Writer, c *Container, opts *StartOpts) (*StartResult, error) {
+func provisionContainer(ctx context.Context, stdout, stderr io.Writer, c *Container, opts *StartOpts) (*StartResult, error) {
 	result := &StartResult{}
 
-	// Phase 1: wait for TCP port to accept connections.
+	// Phase 1: wait for SSH to accept connections.
 	addr := fmt.Sprintf("localhost:%d", c.SSHPort)
 	deadline := time.Now().Add(30 * time.Second)
 	if err := waitForTCP(ctx, addr, deadline); err != nil {
 		return nil, err
 	}
-
-	// Send .env into the container via ssh+stdin — this is the first SSH
-	// operation and doubles as the handshake readiness check. Using ssh
-	// instead of scp gives reliable exit code 255 on connection errors.
-	// If no .env exists locally the container still gets an empty file.
-	var envContent []byte
-	for _, r := range c.Repos {
-		data, err := os.ReadFile(filepath.Join(r.GitRoot, ".env"))
-		if err != nil {
-			continue
-		}
-		if len(envContent) > 0 && envContent[len(envContent)-1] != '\n' {
-			envContent = append(envContent, '\n')
-		}
-		envContent = append(envContent, data...)
-	}
-	if len(envContent) > 0 && !opts.Quiet {
-		_, _ = fmt.Fprintln(stdout, "- sending .env into container ...")
-	}
-	if len(opts.ExtraEnv) > 0 {
-		if len(envContent) > 0 && envContent[len(envContent)-1] != '\n' {
-			envContent = append(envContent, '\n')
-		}
-		for _, kv := range opts.ExtraEnv {
-			envContent = append(envContent, []byte(kv+"\n")...)
-		}
-		if !opts.Quiet {
-			_, _ = fmt.Fprintln(stdout, "- injecting extra env vars into container ...")
-		}
-	}
-	sshEnvArgs := c.SSHCommand(c.Name, "cat > /home/user/.env")
-	for {
-		cmd := exec.CommandContext(ctx, sshEnvArgs[0], sshEnvArgs[1:]...)
-		cmd.Stdin = bytes.NewReader(envContent)
-		out, err := cmd.CombinedOutput()
-		if err == nil {
-			break
-		}
-		var exitErr *exec.ExitError
-		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 255 || time.Now().After(deadline) {
-			return nil, fmt.Errorf("copying .env: %w\n%s", err, out)
-		}
+	if err := waitForSSH(ctx, c, deadline); err != nil {
+		return nil, err
 	}
 
-	// Push all repos into the container in parallel. Each repo pushes to a
-	// distinct path (~/src/<name>) so there are no cross-repo conflicts.
+	// Phase 2: push all repos into the container in parallel, including
+	// submodules. Each repo pushes to a distinct path (~/src/<name>).
 	if len(c.Repos) > 0 {
+		if !opts.Quiet {
+			_, _ = fmt.Fprintln(stdout, "- git clone into container ...")
+		}
 		eg, egCtx := errgroup.WithContext(ctx)
 		for repoIdx := range c.Repos {
 			eg.Go(func() error {
@@ -1109,6 +1069,12 @@ func connectContainer(ctx context.Context, stdout, stderr io.Writer, c *Containe
 		}
 	}
 
+	// Phase 3: send .env into the container, combining per-repo .env files
+	// and extra environment variables from opts.
+	if err := sendEnv(ctx, stdout, c, opts); err != nil {
+		return nil, err
+	}
+
 	// Wait for Tailscale auth URL if needed.
 	if opts.Tailscale && opts.TailscaleAuthKey == "" {
 		tailArgs := c.SSHCommand(c.Name, "tail -f /tmp/tailscale_auth_url")
@@ -1129,6 +1095,44 @@ func connectContainer(ctx context.Context, stdout, stderr io.Writer, c *Containe
 	}
 
 	return result, nil
+}
+
+// sendEnv combines per-repo .env files and extra environment variables from
+// opts, then copies them into the container at /home/user/.env.
+func sendEnv(ctx context.Context, stdout io.Writer, c *Container, opts *StartOpts) error {
+	var envContent []byte
+	for _, r := range c.Repos {
+		data, err := os.ReadFile(filepath.Join(r.GitRoot, ".env"))
+		if err != nil {
+			continue
+		}
+		if len(envContent) > 0 && envContent[len(envContent)-1] != '\n' {
+			envContent = append(envContent, '\n')
+		}
+		envContent = append(envContent, data...)
+	}
+	if len(opts.ExtraEnv) > 0 {
+		if len(envContent) > 0 && envContent[len(envContent)-1] != '\n' {
+			envContent = append(envContent, '\n')
+		}
+		for _, kv := range opts.ExtraEnv {
+			envContent = append(envContent, []byte(kv+"\n")...)
+		}
+		if !opts.Quiet {
+			_, _ = fmt.Fprintln(stdout, "- injecting extra env vars into container ...")
+		}
+	}
+	if len(envContent) > 0 && !opts.Quiet {
+		_, _ = fmt.Fprintln(stdout, "- sending .env into container ...")
+	}
+	sshEnvArgs := c.SSHCommand(c.Name, "cat > /home/user/.env")
+	cmd := exec.CommandContext(ctx, sshEnvArgs[0], sshEnvArgs[1:]...)
+	cmd.Stdin = bytes.NewReader(envContent)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("copying .env: %w\n%s", err, out)
+	}
+	return nil
 }
 
 // convertGitURLToHTTPS converts a git URL to HTTPS format.
