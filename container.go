@@ -1565,8 +1565,8 @@ type containerJSON struct {
 
 // containerInspectJSON is the subset of `docker inspect` output we parse.
 type containerInspectJSON struct {
-	Name    string `json:"Name"`
-	State   struct {
+	Name  string `json:"Name"`
+	State struct {
 		Status string `json:"Status"`
 	} `json:"State"`
 	Created string `json:"Created"`
