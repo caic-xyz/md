@@ -681,16 +681,11 @@ func cmdStop(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		containers, err := c.List(ctx)
+		ct, err := c.Get(ctx, name)
 		if err != nil {
-			return err
+			return fmt.Errorf("no container named %s", name)
 		}
-		for _, ct := range containers {
-			if ct.Name == name {
-				return ct.Stop(ctx)
-			}
-		}
-		return fmt.Errorf("no container named %s", name)
+		return ct.Stop(ctx)
 	}
 	ct, _, err := findContainerAndRepo(ctx, cf)
 	if err != nil {
@@ -717,16 +712,11 @@ func cmdPurge(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		containers, err := c.List(ctx)
+		ct, err := c.Get(ctx, name)
 		if err != nil {
-			return err
+			return fmt.Errorf("no container named %s", name)
 		}
-		for _, ct := range containers {
-			if ct.Name == name {
-				return ct.Purge(ctx, os.Stdout, os.Stderr)
-			}
-		}
-		return fmt.Errorf("no container named %s", name)
+		return ct.Purge(ctx, os.Stdout, os.Stderr)
 	}
 	ct, _, err := findContainerAndRepo(ctx, cf)
 	if err != nil {
@@ -912,17 +902,8 @@ func cmdFork(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		containers, err := c.List(ctx)
+		sourceCt, err = c.Get(ctx, *source)
 		if err != nil {
-			return err
-		}
-		for _, cand := range containers {
-			if cand.Name == *source {
-				sourceCt = cand
-				break
-			}
-		}
-		if sourceCt == nil {
 			return fmt.Errorf("container %q not found", *source)
 		}
 	} else {

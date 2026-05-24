@@ -236,6 +236,20 @@ func (c *Client) List(ctx context.Context) ([]*Container, error) {
 	return containers, nil
 }
 
+// Get returns a single Container by name, or an error if not found.
+// Uses docker inspect for a targeted lookup.
+func (c *Client) Get(ctx context.Context, name string) (*Container, error) {
+	out, err := runCmd(ctx, "", []string{c.Runtime, "inspect", name})
+	if err != nil {
+		return nil, fmt.Errorf("inspecting container %s: %w", name, err)
+	}
+	ct := &Container{Client: c}
+	if err := fillFromInspect(ct, []byte(out)); err != nil {
+		return nil, fmt.Errorf("parsing container %s: %w", name, err)
+	}
+	return ct, nil
+}
+
 // BuildImage builds the base Docker images locally: first md-root-local,
 // then md-user-local on top of it.
 func (c *Client) BuildImage(ctx context.Context, stdout, stderr io.Writer) (retErr error) {

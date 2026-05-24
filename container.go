@@ -1563,6 +1563,18 @@ type containerJSON struct {
 	Labels    string `json:"Labels"`
 }
 
+// containerInspectJSON is the subset of `docker inspect` output we parse.
+type containerInspectJSON struct {
+	Name    string `json:"Name"`
+	State   struct {
+		Status string `json:"Status"`
+	} `json:"State"`
+	Created string `json:"Created"`
+	Config  struct {
+		Labels map[string]string `json:"Labels"`
+	} `json:"Config"`
+}
+
 // parseCreatedAt parses a container creation timestamp. Docker uses
 // "2006-01-02 15:04:05 -0700 MST"; Podman uses ISO 8601 (RFC 3339).
 func parseCreatedAt(s string) (time.Time, error) {
@@ -1622,6 +1634,39 @@ func unmarshalContainer(data []byte) (Container, error) {
 		}
 	}
 	return ct, nil
+}
+
+// fillFromInspect parses docker inspect JSON output and fills a Container.
+// The Container must already have its Client set.
+func fillFromInspect(ct *Container, data []byte) error {
+	var raw containerInspectJSON
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	ct.Name = strings.TrimPrefix(raw.Name, "/")
+	ct.State = raw.State.Status
+	if t, err := parseCreatedAt(raw.Created); err == nil {
+		ct.CreatedAt = t
+	}
+	for k, v := range raw.Config.Labels {
+		switch k {
+		case "md.repos":
+			if data, err := base64.StdEncoding.DecodeString(v); err == nil {
+				if err := json.Unmarshal(data, &ct.Repos); err != nil {
+					slog.Warn("md", "msg", "failed to unmarshal repos label", "err", err)
+				}
+			}
+		case "md.display":
+			ct.Display = v == "1"
+		case "md.tailscale":
+			ct.Tailscale = v == "1"
+		case "md.usb":
+			ct.USB = v == "1"
+		case "md.sudo":
+			ct.Sudo = v == "1"
+		}
+	}
+	return nil
 }
 
 // tailscaleStatus is the subset of `tailscale status --json` we care about.
