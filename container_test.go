@@ -385,6 +385,60 @@ func TestMergePaths(t *testing.T) {
 	})
 }
 
+func TestFillFromInspect(t *testing.T) {
+	// Both Docker and Podman inspect return a JSON array.
+	inspect := `[{
+  "Name": "/md-caic-caic-3",
+  "State": { "Status": "running" },
+  "Created": "2025-06-15T10:30:00Z",
+  "Config": {
+    "Labels": {
+      "md.display": "1",
+      "md.tailscale": "1",
+      "md.usb": "1",
+      "md.sudo": "1"
+    }
+  }
+}]`
+
+	ct := &Container{}
+	if err := fillFromInspect(ct, []byte(inspect)); err != nil {
+		t.Fatalf("fillFromInspect: %v", err)
+	}
+	if ct.Name != "md-caic-caic-3" {
+		t.Errorf("Name = %q, want %q", ct.Name, "md-caic-caic-3")
+	}
+	if ct.State != "running" {
+		t.Errorf("State = %q, want %q", ct.State, "running")
+	}
+	if !ct.Display || !ct.Tailscale || !ct.USB || !ct.Sudo {
+		t.Errorf("expected all flags true, got Display=%v Tailscale=%v USB=%v Sudo=%v", ct.Display, ct.Tailscale, ct.USB, ct.Sudo)
+	}
+
+	// Name without leading slash (Docker sometimes omits it).
+	noSlash := `[{"Name":"plain","State":{"Status":"running"},"Created":"2025-06-15T10:30:00Z","Config":{"Labels":{}}}]`
+	ct2 := &Container{}
+	if err := fillFromInspect(ct2, []byte(noSlash)); err != nil {
+		t.Fatalf("no-slash name: %v", err)
+	}
+	if ct2.Name != "plain" {
+		t.Errorf("Name = %q, want %q", ct2.Name, "plain")
+	}
+
+	// Empty array.
+	if err := fillFromInspect(&Container{}, []byte(`[]`)); err == nil {
+		t.Error("expected error for empty array")
+	}
+	// Multiple results.
+	if err := fillFromInspect(&Container{}, []byte(`[{},{}]`)); err == nil {
+		t.Error("expected error for multiple results")
+	}
+	// Bad JSON.
+	if err := fillFromInspect(&Container{}, []byte(`{bad}`)); err == nil {
+		t.Error("expected error for bad JSON")
+	}
+}
+
 func TestParseCreatedAt(t *testing.T) {
 	tests := []struct {
 		name    string

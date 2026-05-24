@@ -1636,13 +1636,20 @@ func unmarshalContainer(data []byte) (Container, error) {
 	return ct, nil
 }
 
-// fillFromInspect parses docker inspect JSON output and fills a Container.
+// fillFromInspect parses docker/podman inspect JSON output and fills a Container.
+//
+// Both Docker and Podman inspect return a JSON array, even for a single
+// container.
 // The Container must already have its Client set.
 func fillFromInspect(ct *Container, data []byte) error {
-	var raw containerInspectJSON
-	if err := json.Unmarshal(data, &raw); err != nil {
+	var raws []containerInspectJSON
+	if err := json.Unmarshal(data, &raws); err != nil {
 		return err
 	}
+	if len(raws) != 1 {
+		return fmt.Errorf("inspect returned %d results, expected 1", len(raws))
+	}
+	raw := raws[0]
 	ct.Name = strings.TrimPrefix(raw.Name, "/")
 	ct.State = raw.State.Status
 	if t, err := parseCreatedAt(raw.Created); err == nil {
