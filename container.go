@@ -34,12 +34,20 @@ import (
 const DefaultBaseImage = "ghcr.io/caic-xyz/md-user"
 
 // Repo describes a git repository to push into a container.
-// It is mounted at /home/user/src/<basename>.
+// It is mounted at /home/user/src/<Name()>.
 type Repo struct {
 	// GitRoot is the absolute path to the git repository root on the host.
 	GitRoot string `json:"git_root"`
 	// Branch is the git branch to push into the container.
 	Branch string `json:"branch"`
+	// MountedName overrides the basename used for mount path
+	// /home/user/src/<MountedName>. When empty, Name() falls back to
+	// filepath.Base(GitRoot). Use this to disambiguate repos with the
+	// same basename from different parent directories (e.g.
+	// foo/website and bar/website both map to "website" by default;
+	// set MountedName to "foo/website" and "bar/website" to keep
+	// them distinct inside the container).
+	MountedName string `json:"mounted_name,omitempty"`
 	// DefaultRemote is the host's default git remote.
 	DefaultRemote string `json:"default_remote,omitempty"`
 	// DefaultBranch is the default branch for DefaultRemote.
@@ -152,9 +160,32 @@ type Container struct {
 	tailscaleEphemeral bool
 }
 
-// Name returns the repository's base directory name, stripping any .git suffix.
+// Name returns the repository's mount name. If MountedName is set, it is
+// used directly (preserving slashes so /home/user/src/foo/website mirrors
+// the host layout). Otherwise it falls back to the basename of GitRoot,
+// stripping any .git suffix.
 func (r Repo) Name() string {
+	if r.MountedName != "" {
+		return r.MountedName
+	}
 	return strings.TrimSuffix(filepath.Base(r.GitRoot), ".git")
+}
+
+// validateRepoNames checks that all repos have unique mount names.
+//
+// Two repos with the same Name() would share /home/user/src/<name> and
+// overwrite each other. Callers must set MountedName to disambiguate repos
+// with the same basename from different parent directories.
+func validateRepoNames(repos []Repo) error {
+	seen := make(map[string]int, len(repos))
+	for i, r := range repos {
+		n := r.Name()
+		if j, dup := seen[n]; dup {
+			return fmt.Errorf("repos[%d] and repos[%d] both mount as %q; use MountedName to disambiguate", j, i, n)
+		}
+		seen[n] = i
+	}
+	return nil
 }
 
 // resolveDefaults populates DefaultRemote and DefaultBranch if not already set.
@@ -228,10 +259,29 @@ func (c *Container) Launch(ctx context.Context, stdout, stderr io.Writer, opts *
 	if err := c.prepare(opts.AgentPaths); err != nil {
 		return err
 	}
-	// Check if container already exists.
+	// Validate unique mount names within this container. Two repos with
+	// the same Name() would share /home/user/src/<name> and overwrite
+	// each other's data. Callers must set MountedName to disambiguate.
+	if err := validateRepoNames(c.Repos); err != nil {
+		return err
+	}
+
+	// Check if container already exists (short name).
+	// Container names use only the repo basename to stay short regardless
+	// of path depth or branch length. When the short name is taken — same
+	// repo, different branch — append a short random hex suffix (4 bytes)
+	// rather than the branch name. This keeps container names compact
+	// even for repos nested deep in directory trees.
+	//
+	// 4 hex bytes = 65K namespaces, negligible collision probability.
 	if _, err := runCmd(ctx, "", []string{c.Runtime, "inspect", c.Name}); err == nil {
-		return fmt.Errorf("container %s already exists. SSH in with 'ssh %s' or clean it up via 'md purge' first",
-			c.Name, c.Name)
+		var suffix [4]byte
+		_, _ = rand.Read(suffix[:])
+		c.Name = c.Name + "-" + fmt.Sprintf("%x", suffix)
+		if _, err := runCmd(ctx, "", []string{c.Runtime, "inspect", c.Name}); err == nil {
+			return fmt.Errorf("container %s already exists. SSH in with 'ssh %s' or clean it up via 'md purge' first",
+				c.Name, c.Name)
+		}
 	}
 
 	// Generate Tailscale auth key if needed.
@@ -289,7 +339,7 @@ func (c *Container) Run(ctx context.Context, stdout, stderr io.Writer, baseImage
 	var tmpName string
 	if len(c.Repos) > 0 {
 		tmpRepos = c.Repos[:1]
-		tmpName = fmt.Sprintf("md-%s-run-%x", sanitizeDockerName(c.Repos[0].Name()), buf)
+		tmpName = fmt.Sprintf("md-%s-run-%x", SanitizeDockerName(c.Repos[0].Name()), buf)
 	} else {
 		tmpName = fmt.Sprintf("md-run-%x", buf)
 	}

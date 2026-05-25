@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -461,4 +462,103 @@ func TestParseCreatedAt(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRepo(t *testing.T) {
+	t.Run("Name", func(t *testing.T) {
+		t.Run("valid", func(t *testing.T) {
+			tests := []struct {
+				name string
+				r    Repo
+				want string
+			}{
+				{
+					"basename only",
+					Repo{GitRoot: "/home/user/src/myrepo"},
+					"myrepo",
+				},
+				{
+					"basename with .git suffix",
+					Repo{GitRoot: "/home/user/src/myrepo.git"},
+					"myrepo",
+				},
+				{
+					"MountedName overrides basename",
+					Repo{GitRoot: "/home/user/src/myrepo", MountedName: "custom-name"},
+					"custom-name",
+				},
+				{
+					"MountedName preserves slashes",
+					Repo{GitRoot: "/home/user/src/projects/foo/website", MountedName: "foo/website"},
+					"foo/website",
+				},
+				{
+					"empty MountedName falls back to basename",
+					Repo{GitRoot: "/home/user/src/myrepo", MountedName: ""},
+					"myrepo",
+				},
+			}
+			for _, tt := range tests {
+				t.Run(tt.name, func(t *testing.T) {
+					if got := tt.r.Name(); got != tt.want {
+						t.Errorf("Name() = %q, want %q", got, tt.want)
+					}
+				})
+			}
+		})
+	})
+}
+
+func TestValidateRepoNames(t *testing.T) {
+	t.Run("valid", func(t *testing.T) {
+		tests := []struct {
+			name  string
+			repos []Repo
+		}{
+			{
+				"single repo",
+				[]Repo{{GitRoot: "/home/user/src/myrepo"}},
+			},
+			{
+				"two repos with different basenames",
+				[]Repo{
+					{GitRoot: "/home/user/src/foo"},
+					{GitRoot: "/home/user/src/bar"},
+				},
+			},
+			{
+				"same basename but different MountedName",
+				[]Repo{
+					{GitRoot: "/home/user/src/foo/website", MountedName: "foo/website"},
+					{GitRoot: "/home/user/src/bar/website", MountedName: "bar/website"},
+				},
+			},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				if err := validateRepoNames(tt.repos); err != nil {
+					t.Errorf("unexpected error: %v", err)
+				}
+			})
+		}
+	})
+
+	t.Run("error", func(t *testing.T) {
+		// Two repos with the same basename but no MountedName disambiguation.
+		// Both foo/website and bar/website resolve to Name() == "website".
+		repos := []Repo{
+			{GitRoot: "/home/user/src/foo/website"},
+			{GitRoot: "/home/user/src/bar/website"},
+		}
+		err := validateRepoNames(repos)
+		if err == nil {
+			t.Fatal("expected error for duplicate mount names")
+		}
+		if !strings.Contains(err.Error(), "both mount as") {
+			t.Errorf("error should mention 'both mount as', got: %v", err)
+		}
+		if !strings.Contains(err.Error(), "MountedName") {
+			t.Errorf("error should mention 'MountedName', got: %v", err)
+		}
+	})
 }

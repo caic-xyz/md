@@ -165,9 +165,14 @@ func detectRuntime() string {
 
 // Container returns a Container handle for the given repos.
 // The first repo is the primary; the rest are pushed alongside it at
-// /home/user/src/<basename> inside the container. When called with no repos,
-// the container has no associated git repository and a name is generated
-// automatically.
+// /home/user/src/<Name()> inside the container. When called with no repos,
+// the container has no associated git repository and a random name is
+// generated automatically.
+//
+// Container names use only the repo basename to stay short regardless of
+// branch name length or directory tree depth. Launch appends a short random
+// hex suffix only when the short name is already taken by a different
+// branch's container for the same repo.
 //
 // It doesn't start it, it is just a reference.
 func (c *Client) Container(repos ...Repo) *Container {
@@ -181,10 +186,11 @@ func (c *Client) Container(repos ...Repo) *Container {
 	}
 	primary := repos[0]
 	repoName := strings.TrimSuffix(filepath.Base(primary.GitRoot), ".git")
+	short := "md-" + SanitizeDockerName(repoName)
 	return &Container{
 		Client: c,
 		Repos:  repos,
-		Name:   containerName(repoName, primary.Branch),
+		Name:   short,
 	}
 }
 
@@ -605,10 +611,10 @@ func envOr(key, fallback string) string {
 	return fallback
 }
 
-// sanitizeDockerName sanitizes a string for use in a Docker container name.
+// SanitizeDockerName sanitizes a string for use in a Docker container name.
 //
 // Docker container names must match [a-zA-Z0-9][a-zA-Z0-9_.-].
-func sanitizeDockerName(name string) string {
+func SanitizeDockerName(name string) string {
 	s := reInvalid.ReplaceAllString(name, "-")
 	s = reStripRemaining.ReplaceAllString(s, "")
 	s = reCollapse.ReplaceAllString(s, "-")
@@ -621,5 +627,5 @@ func sanitizeDockerName(name string) string {
 
 // containerName returns the container name for a repo and branch.
 func containerName(repoName, branchName string) string {
-	return "md-" + sanitizeDockerName(repoName) + "-" + sanitizeDockerName(branchName)
+	return "md-" + SanitizeDockerName(repoName) + "-" + SanitizeDockerName(branchName)
 }
