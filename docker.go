@@ -1023,12 +1023,52 @@ func waitForTCP(ctx context.Context, addr string, deadline time.Time) error {
 	}
 }
 
+// tryReadTailscaleAuthURL reads the Tailscale auth URL from the container.
+// A single docker exec runs a polling loop: jq validates the JSON file and
+// prints it compactly; if invalid or empty, sleep and retry. Go parses the
+// result with tailscaleUpStatus for validation.
+func tryReadTailscaleAuthURL(ctx context.Context, stdout io.Writer, c *Container) (string, error) {
+	readCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	script := `while true; do
+  if jq -ce '.' /run/md/tailscale_auth_url.json 2>/dev/null; then exit 0; fi
+  sleep 0.1
+done`
+	args := []string{c.Runtime, "exec", c.Name, "sh", "-c", script}
+	cmd := exec.CommandContext(readCtx, args[0], args[1:]...)
+	out, err := cmd.Output()
+	if err != nil || len(out) == 0 {
+		return "", fmt.Errorf("timed out waiting for tailscale up --json output")
+	}
+
+	var status tailscaleUpStatus
+	if err := json.Unmarshal(out, &status); err != nil {
+		return "", fmt.Errorf("parsing tailscale up --json output: %w (%q)", err, string(out))
+	}
+	if status.AuthURL == "" {
+		return "", fmt.Errorf("tailscale up --json had no AuthURL field")
+	}
+	_, _ = fmt.Fprintf(stdout, "- Tailscale auth URL: %s\n", status.AuthURL)
+	return status.AuthURL, nil
+}
+
 // provisionContainer waits for SSH, pushes repos and submodules, sends .env,
 // and waits for Tailscale auth. Must be called after launchContainer.
 //
 // The task branch and default branch are pushed in parallel to reduce latency.
 func provisionContainer(ctx context.Context, stdout, stderr io.Writer, c *Container, opts *StartOpts) (*StartResult, error) {
 	result := &StartResult{}
+
+	// Try to read the Tailscale auth URL via docker exec before SSH is up,
+	// so the user can authenticate even if SSHD is slow to start.
+	if opts.Tailscale && opts.TailscaleAuthKey == "" {
+		url, err := tryReadTailscaleAuthURL(ctx, stdout, c)
+		if err != nil {
+			return nil, fmt.Errorf("reading Tailscale auth URL: %w", err)
+		}
+		result.TailscaleAuthURL = url
+	}
 
 	// Phase 1: wait for SSH to accept connections.
 	addr := fmt.Sprintf("localhost:%d", c.SSHPort)
@@ -1110,25 +1150,6 @@ func provisionContainer(ctx context.Context, stdout, stderr io.Writer, c *Contai
 	// and extra environment variables from opts.
 	if err := sendEnv(ctx, stdout, c, opts); err != nil {
 		return nil, err
-	}
-
-	// Wait for Tailscale auth URL if needed.
-	if opts.Tailscale && opts.TailscaleAuthKey == "" {
-		tailArgs := c.SSHCommand(c.Name, "tail -f /tmp/tailscale_auth_url")
-		cmd := exec.CommandContext(ctx, tailArgs[0], tailArgs[1:]...)
-		stdout, err := cmd.StdoutPipe()
-		if err == nil {
-			if err := cmd.Start(); err == nil {
-				buf := make([]byte, 4096)
-				n, _ := stdout.Read(buf)
-				line := string(buf[:n])
-				if strings.Contains(line, "https://") {
-					result.TailscaleAuthURL = strings.TrimSpace(line)
-				}
-				_ = cmd.Process.Kill()
-				_ = cmd.Wait()
-			}
-		}
 	}
 
 	return result, nil

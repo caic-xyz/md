@@ -102,3 +102,10 @@ func deleteTailscaleDevice(ctx context.Context, apiKey, deviceID string) error {
 	}
 	return nil
 }
+
+// tailscaleUpStatus is the subset of `tailscale up --json` output we care about.
+type tailscaleUpStatus struct {
+	AuthURL      string `json:"AuthURL"`
+	QR           string `json:"QR"`
+	BackendState string `json:"BackendState"`
+}

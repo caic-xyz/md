@@ -6,6 +6,11 @@ set -eu
 # Generate dynamic motd with hostname
 echo "Connected to $(hostname)" >/etc/motd
 
+# Pre-create the Tailscale well-known path and file so the host tooling
+# can inotify-wait for the first write.
+mkdir -p /run/md
+: > /run/md/tailscale_auth_url.json
+
 # If /dev/kvm exists, update the kvm group GID to match the host.
 # In rootless Docker, device GIDs map to the overflow GID (65534) and groupmod
 # would fail because that GID is already taken by nogroup. Skip in that case.
@@ -80,10 +85,11 @@ if [ -n "${MD_TAILSCALE:-}" ]; then
 			echo "[start.sh] Tailscale connected: $ts_fqdn"
 		fi
 	else
-		# Capture auth URL for the host to display (MOTD not updated without authkey).
-		# tailscale up blocks until user authenticates via the URL, then set operator.
+		# Redirect stdout+stderr to the well-known file. tailscale up --json
+		# flushes each JSON line immediately, so the file is readable as soon
+		# as inotify fires on the first write.
 		(
-			tailscale up --hostname="$(hostname)" --ssh 2>&1 | tee /tmp/tailscale_auth_url
+			tailscale up --hostname="$(hostname)" --ssh --json > /run/md/tailscale_auth_url.json 2>&1
 			tailscale set --operator=user
 		) &
 	fi
