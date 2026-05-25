@@ -27,6 +27,7 @@ apt-get install -qq -y --no-install-recommends \
 	clang \
 	cmake \
 	cpu-checker \
+	crun \
 	curl \
 	dbus-x11 \
 	dfu-util \
@@ -81,6 +82,7 @@ apt-get install -qq -y --no-install-recommends \
 	nmap \
 	openjdk-21-jdk-headless \
 	openssh-server \
+	passt \
 	pkg-config \
 	podman \
 	python-is-python3 \

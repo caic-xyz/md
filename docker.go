@@ -813,6 +813,12 @@ func launchContainer(ctx context.Context, stdout, stderr io.Writer, c *Container
 	dockerArgs = append(dockerArgs,
 		"--cap-add=NET_ADMIN", "--cap-add=NET_RAW")
 
+	// Pass through the host TUN device when Tailscale or rootless Podman
+	// (via -sudo) need to create network interfaces.
+	if opts.Tailscale || opts.Sudo {
+		dockerArgs = append(dockerArgs, "--device=/dev/net/tun:/dev/net/tun")
+	}
+
 	// Tailscale.
 	//
 	// Two approaches exist for providing /dev/net/tun to the container:
@@ -840,7 +846,6 @@ func launchContainer(ctx context.Context, stdout, stderr io.Writer, c *Container
 	//      breakage of internal mknod)
 	if opts.Tailscale {
 		dockerArgs = append(dockerArgs,
-			"--device=/dev/net/tun:/dev/net/tun",
 			"-e", "MD_TAILSCALE=1")
 		if opts.TailscaleAuthKey != "" {
 			dockerArgs = append(dockerArgs, "-e", "TAILSCALE_AUTHKEY="+opts.TailscaleAuthKey)
@@ -892,10 +897,17 @@ func launchContainer(ctx context.Context, stdout, stderr io.Writer, c *Container
 			return fmt.Errorf("generating sudo password: %w", err)
 		}
 		c.sudoPassword = sudoPassword
+		// SYS_ADMIN: allows start.sh to remount /proc and unmask Docker's
+		// /proc tmpfs mounts, both required for nested user namespaces.
+		// /dev/fuse:  required by fuse-overlayfs, the default rootless
+		// Podman storage driver.
+		// See: https://www.redhat.com/sysadmin/podman-inside-container
 		dockerArgs = append(dockerArgs,
 			"--label", "md.sudo=1",
 			"--label", "md.sudo-password="+sudoPassword,
-			"-e", "MD_SUDO_PASSWORD="+sudoPassword)
+			"-e", "MD_SUDO_PASSWORD="+sudoPassword,
+			"--cap-add=SYS_ADMIN",
+			"--device=/dev/fuse")
 	}
 	if reposJSON, err := json.Marshal(c.Repos); err == nil {
 		// Base64-encode so commas in JSON don't corrupt the comma-separated

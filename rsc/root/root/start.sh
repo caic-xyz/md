@@ -6,13 +6,6 @@ set -eu
 # Generate dynamic motd with hostname
 echo "Connected to $(hostname)" >/etc/motd
 
-# If md start provided a sudo password via env var, grant sudo access.
-if [ -n "${MD_SUDO_PASSWORD:-}" ]; then
-	usermod -aG sudo user
-	echo "user:$MD_SUDO_PASSWORD" | chpasswd
-	unset MD_SUDO_PASSWORD
-fi
-
 # If /dev/kvm exists, update the kvm group GID to match the host.
 # In rootless Docker, device GIDs map to the overflow GID (65534) and groupmod
 # would fail because that GID is already taken by nogroup. Skip in that case.
@@ -112,12 +105,35 @@ if [ -d /dev/bus/usb ]; then
 	fi
 fi
 
-# Check if rootless Podman (nested containers) will work. It requires the
-# ability to create user namespaces, which fails when the container itself
-# already runs inside a user namespace (rootless Docker or rootless Podman on
-# the host).
-if ! unshare --user true 2>/dev/null; then
-	echo "[start.sh] WARNING: nested user namespaces unavailable — rootless Podman will not work inside this container (host is likely using rootless Docker or rootless Podman)"
+# When -sudo was passed (MD_SUDO_PASSWORD is set), grant sudo access and
+# fix /proc so rootless Podman can mount a new /proc inside nested user
+# namespaces. /proc must not be nosuid (breaks newuidmap), and Docker's
+# tmpfs masks + proc submounts must be unmounted (kernel requires fully
+# visible /proc). Both fixes require SYS_ADMIN, granted by -sudo.
+# See: https://www.redhat.com/sysadmin/podman-inside-container
+#      https://github.com/containers/podman/discussions/28307
+#      https://github.com/containers/podman/issues/4131
+#      https://github.com/containers/podman/issues/10864
+if [ -n "${MD_SUDO_PASSWORD:-}" ]; then
+	usermod -aG sudo user
+	echo "user:$MD_SUDO_PASSWORD" | chpasswd
+	unset MD_SUDO_PASSWORD
+
+	if findmnt -no OPTIONS /proc | grep -q nosuid; then
+		mount -o remount,rw,suid /proc 2>/dev/null || true
+	fi
+	if findmnt -no OPTIONS /proc | grep -q nosuid; then
+		echo "[start.sh] WARNING: /proc remount failed (nosuid still set) — rootless Podman may not work"
+	else
+		echo "[start.sh] Remounted /proc without nosuid for rootless Podman"
+	fi
+	# Unmount all submounts under /proc (deepest first) so the kernel
+	# sees /proc as fully visible for nested user namespaces.
+	findmnt -nl -o TARGET --submounts /proc | sort -r | while read -r p; do
+		[ "$p" = "/proc" ] && continue
+		umount "$p" 2>/dev/null || true
+	done
+	echo "[start.sh] Unmasked Docker /proc paths for rootless Podman"
 fi
 
 # Start SSH server (after VNC so DISPLAY is available)
