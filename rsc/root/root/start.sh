@@ -89,7 +89,7 @@ if [ -n "${MD_TAILSCALE:-}" ]; then
 		# flushes each JSON line immediately, so the file is readable as soon
 		# as inotify fires on the first write.
 		(
-			tailscale up --hostname="$(hostname)" --ssh --json > /run/md/tailscale_auth_url.json 2>&1
+			tailscale up --hostname="$(hostname)" --ssh --json >/run/md/tailscale_auth_url.json 2>&1
 			tailscale set --operator=user
 		) &
 	fi
