@@ -10,7 +10,7 @@ The complete list of tool versions is at `tool_versions.md`
 
 Notable executables available in the container:
 
-- Core utilities: bash, git, curl, wget, rsync, jq, grep, ripgrep, less, file, find, xargs, sed, awk, bubblewrap, xvfb, tokei, xxd, sudo
+- Core utilities: bash, git, curl, wget, rsync, jq, grep, ripgrep, less, file, find, xargs, sed, awk, bubblewrap, inotifywait, xvfb, tokei, xxd, sudo
 - Editors: nvim (vi, vim, vimdiff)
 - Browsers: google-chrome (amd64), chromium (arm64 fallback), chrome-devtools-mcp
 - Compression: brotli, zstd, unzip

@@ -42,6 +42,7 @@ apt-get install -qq -y --no-install-recommends \
 	gpg \
 	gradle \
 	imagemagick \
+	inotify-tools \
 	iproute2 \
 	jq \
 	kmod \
