@@ -9,7 +9,7 @@ echo "Connected to $(hostname)" >/etc/motd
 # Pre-create the Tailscale well-known path and file so the host tooling
 # can inotify-wait for the first write.
 mkdir -p /run/md
-: > /run/md/tailscale_auth_url.json
+: >/run/md/tailscale_auth_url.json
 
 # If /dev/kvm exists, update the kvm group GID to match the host.
 # In rootless Docker, device GIDs map to the overflow GID (65534) and groupmod
