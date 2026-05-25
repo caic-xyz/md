@@ -553,6 +553,7 @@ type containerListEntry struct {
 	Tailscale bool               `json:"tailscale,omitempty"`
 	FQDN      string             `json:"fqdn,omitempty"`
 	USB       bool               `json:"usb,omitempty"`
+	Repos     []md.Repo          `json:"repos,omitempty"`
 	Stats     *md.ContainerStats `json:"stats,omitempty"`
 }
 
@@ -604,6 +605,7 @@ func cmdList(ctx context.Context, args []string) error {
 				Display:   ct.Display,
 				Tailscale: ct.Tailscale,
 				USB:       ct.USB,
+				Repos:     ct.Repos,
 				Stats:     allStats[ct.Name],
 			}
 			if ct.Tailscale {
@@ -618,9 +620,29 @@ func cmdList(ctx context.Context, args []string) error {
 		fmt.Println("No running md containers")
 		return nil
 	}
-	fmt.Printf("%-30s %-10s %12s  %s\n", "Container", "Status", "Uptime", "Features")
-	fmt.Println(strings.Repeat("-", 80))
-	for _, ct := range containers {
+	// Compute dynamic column widths.
+	nameWidth := len("Container")
+	repoWidth := len("Repos")
+	repoStrs := make([]string, len(containers))
+	for i, ct := range containers {
+		if n := len(ct.Name); n > nameWidth {
+			nameWidth = n
+		}
+		var parts []string
+		for _, r := range ct.Repos {
+			parts = append(parts, r.Name()+":"+r.Branch)
+		}
+		repoStrs[i] = strings.Join(parts, ", ")
+		if n := len(repoStrs[i]); n > repoWidth {
+			repoWidth = n
+		}
+	}
+	nameWidth += 3
+	repoWidth += 3
+	sepWidth := nameWidth + 1 + 10 + 1 + repoWidth + 1 + 12 + 2
+	fmt.Printf("%-*s %-10s %-*s %12s  %s\n", nameWidth, "Container", "Status", repoWidth, "Repos", "Uptime", "Features")
+	fmt.Println(strings.Repeat("-", sepWidth))
+	for i, ct := range containers {
 		var features []string
 		if ct.Display {
 			features = append(features, "display")
@@ -635,7 +657,7 @@ func cmdList(ctx context.Context, args []string) error {
 		if ct.USB {
 			features = append(features, "usb")
 		}
-		fmt.Printf("%-30s %-10s %12s  %s\n", ct.Name, ct.State, time.Since(ct.CreatedAt).Truncate(time.Second), strings.Join(features, ","))
+		fmt.Printf("%-*s %-10s %-*s %12s  %s\n", nameWidth, ct.Name, ct.State, repoWidth, repoStrs[i], time.Since(ct.CreatedAt).Truncate(time.Second), strings.Join(features, ","))
 		if s := allStats[ct.Name]; s != nil {
 			if ct.State == "running" {
 				fmt.Printf("  CPU: %.1f%%  Mem: %s/%s (%.1f%%)  PIDs: %d\n",
