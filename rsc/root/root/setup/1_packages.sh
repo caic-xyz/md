@@ -35,6 +35,7 @@ apt-get install -qq -y --no-install-recommends \
 	file \
 	flex \
 	fonts-noto-color-emoji \
+	fping \
 	fuse-overlayfs \
 	g++-arm-linux-gnueabihf \
 	git \
@@ -44,6 +45,7 @@ apt-get install -qq -y --no-install-recommends \
 	imagemagick \
 	inotify-tools \
 	iproute2 \
+	iputils-ping \
 	jq \
 	kmod \
 	less \
@@ -97,6 +99,7 @@ apt-get install -qq -y --no-install-recommends \
 	strace \
 	sudo \
 	tcpdump \
+	tcptraceroute \
 	tigervnc-standalone-server \
 	tigervnc-tools \
 	tigervnc-viewer \
@@ -105,6 +108,7 @@ apt-get install -qq -y --no-install-recommends \
 	unzip \
 	w3m \
 	wget \
+	traceroute \
 	whois \
 	xfce4 \
 	xfce4-terminal \

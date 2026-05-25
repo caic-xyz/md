@@ -121,7 +121,11 @@
 	fi
 
 	# Network Tools
+	check_version "fping" "fping" "--version"
+	check_version "iputils-ping" "ping" "-V"
 	check_version "nmap" "nmap" "--version"
+	check_version "tcptraceroute" "tcptraceroute" "--version"
+	check_version "traceroute" "traceroute" "--version"
 	check_version "tcpdump" "tcpdump" "--version"
 	check_version "Tailscale" "tailscale" "version"
 
