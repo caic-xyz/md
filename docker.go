@@ -1039,7 +1039,7 @@ done`
 	cmd := exec.CommandContext(readCtx, args[0], args[1:]...)
 	out, err := cmd.Output()
 	if err != nil || len(out) == 0 {
-		return "", fmt.Errorf("timed out waiting for tailscale up --json output")
+		return "", errors.New("timed out waiting for tailscale up --json output")
 	}
 
 	var status tailscaleUpStatus
@@ -1047,7 +1047,7 @@ done`
 		return "", fmt.Errorf("parsing tailscale up --json output: %w (%q)", err, string(out))
 	}
 	if status.AuthURL == "" {
-		return "", fmt.Errorf("tailscale up --json had no AuthURL field")
+		return "", errors.New("tailscale up --json had no AuthURL field")
 	}
 	_, _ = fmt.Fprintf(stdout, "- Tailscale auth URL: %s\n", status.AuthURL)
 	return status.AuthURL, nil
