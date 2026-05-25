@@ -10,13 +10,13 @@ apt-get update -qq >/dev/null
 echo "- apt-get upgrade"
 apt-get upgrade -qq -y >/dev/null
 echo "- apt-get install"
+# Keep the list of packages sorted!
 apt-get install -qq -y --no-install-recommends \
 	bash-completion \
-	breeze-cursor-theme \
-	xfwm4-theme-breeze \
 	bind9-dnsutils \
 	binutils \
 	bison \
+	breeze-cursor-theme \
 	brotli \
 	bubblewrap \
 	build-essential \
@@ -32,9 +32,9 @@ apt-get install -qq -y --no-install-recommends \
 	dfu-util \
 	extrepo \
 	ffmpeg \
-	fonts-noto-color-emoji \
 	file \
 	flex \
+	fonts-noto-color-emoji \
 	fuse-overlayfs \
 	g++-arm-linux-gnueabihf \
 	git \
@@ -93,9 +93,9 @@ apt-get install -qq -y --no-install-recommends \
 	shellcheck \
 	slirp4netns \
 	sqlite3 \
+	strace \
 	sudo \
 	tcpdump \
-	strace \
 	tigervnc-standalone-server \
 	tigervnc-tools \
 	tigervnc-viewer \
@@ -107,6 +107,7 @@ apt-get install -qq -y --no-install-recommends \
 	whois \
 	xfce4 \
 	xfce4-terminal \
+	xfwm4-theme-breeze \
 	xvfb \
 	xxd \
 	zstd >/dev/null
