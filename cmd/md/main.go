@@ -620,44 +620,55 @@ func cmdList(ctx context.Context, args []string) error {
 		fmt.Println("No running md containers")
 		return nil
 	}
-	// Compute dynamic column widths.
+	// Pre-compute all strings to determine column widths.
+	type row struct {
+		name     string
+		repos    string
+		features string
+	}
+	rows := make([]row, len(containers))
 	nameWidth := len("Container")
 	repoWidth := len("Repos")
-	repoStrs := make([]string, len(containers))
+	featWidth := len("Features")
 	for i, ct := range containers {
-		if n := len(ct.Name); n > nameWidth {
+		rows[i].name = ct.Name
+		if n := len(rows[i].name); n > nameWidth {
 			nameWidth = n
 		}
 		var parts []string
 		for _, r := range ct.Repos {
 			parts = append(parts, r.Name()+":"+r.Branch)
 		}
-		repoStrs[i] = strings.Join(parts, ", ")
-		if n := len(repoStrs[i]); n > repoWidth {
+		rows[i].repos = strings.Join(parts, ", ")
+		if n := len(rows[i].repos); n > repoWidth {
 			repoWidth = n
+		}
+		var feats []string
+		if ct.Display {
+			feats = append(feats, "display")
+		}
+		if ct.Tailscale {
+			if fqdn := ct.TailscaleFQDN(ctx); fqdn != "" {
+				feats = append(feats, "tailscale:"+fqdn)
+			} else {
+				feats = append(feats, "tailscale")
+			}
+		}
+		if ct.USB {
+			feats = append(feats, "usb")
+		}
+		rows[i].features = strings.Join(feats, ",")
+		if n := len(rows[i].features); n > featWidth {
+			featWidth = n
 		}
 	}
 	nameWidth += 3
 	repoWidth += 3
-	sepWidth := nameWidth + 1 + 10 + 1 + repoWidth + 1 + 12 + 2
-	fmt.Printf("%-*s %-10s %-*s %12s  %s\n", nameWidth, "Container", "Status", repoWidth, "Repos", "Uptime", "Features")
+	sepWidth := nameWidth + 1 + 10 + 1 + repoWidth + 1 + 12 + 2 + featWidth
+	fmt.Printf("%-*s %-10s %-*s %12s  %-*s\n", nameWidth, "Container", "Status", repoWidth, "Repos", "Uptime", featWidth, "Features")
 	fmt.Println(strings.Repeat("-", sepWidth))
 	for i, ct := range containers {
-		var features []string
-		if ct.Display {
-			features = append(features, "display")
-		}
-		if ct.Tailscale {
-			if fqdn := ct.TailscaleFQDN(ctx); fqdn != "" {
-				features = append(features, "tailscale:"+fqdn)
-			} else {
-				features = append(features, "tailscale")
-			}
-		}
-		if ct.USB {
-			features = append(features, "usb")
-		}
-		fmt.Printf("%-*s %-10s %-*s %12s  %s\n", nameWidth, ct.Name, ct.State, repoWidth, repoStrs[i], time.Since(ct.CreatedAt).Truncate(time.Second), strings.Join(features, ","))
+		fmt.Printf("%-*s %-10s %-*s %12s  %-*s\n", nameWidth, rows[i].name, ct.State, repoWidth, rows[i].repos, time.Since(ct.CreatedAt).Truncate(time.Second), featWidth, rows[i].features)
 		if s := allStats[ct.Name]; s != nil {
 			if ct.State == "running" {
 				fmt.Printf("  CPU: %.1f%%  Mem: %s/%s (%.1f%%)  PIDs: %d\n",
