@@ -112,7 +112,7 @@ https://chromium.googlesource.com/chromium/src/+/refs/heads/main/chrome/common/p
 
 - **Chrome Sandbox**: To run Chrome/Chromium with the sandbox enabled, the container must be launched with `--security-opt seccomp=unconfined` and `--security-opt apparmor=unconfined`. The `md` script handles this automatically.
 - **Debugging Tools**: strace requires `--cap-add=SYS_PTRACE`. The `md` script handles this automatically.
-- **Tailscale**: Requires `--cap-add=NET_ADMIN`, `--cap-add=NET_RAW`, and `--cap-add=MKNOD`. The TUN device is created inside the container's namespace. The `md` script handles this automatically when `--tailscale` is passed to `md start`.
+- **Tailscale**: Requires `--cap-add=NET_ADMIN` and `--cap-add=NET_RAW`. The host's `/dev/net/tun` is passed through via `--device=/dev/net/tun:/dev/net/tun` instead of creating it inside the container with `mknod` (which would require the `MKNOD` capability — a security liability). Requires the host to have the `tun` kernel module loaded. The `md` script handles this automatically when `--tailscale` is passed to `md start`.
 - **USB Passthrough**: Requires `--device=/dev/bus/usb` to expose host USB devices (e.g. for ADB). The `md` script handles this automatically when `--usb` is passed to `md start`.
 - **Nested Containers (rootless Podman inside md)**: Supported on **rootful Docker/Podman hosts** with `kernel.unprivileged_userns_clone=1` (default on most modern distros) — no extra flags needed. Rootless Docker/Podman hosts are not supported: `newuidmap` fails with EPERM because the container itself already runs inside a user namespace, and `start.sh` logs a warning at startup.
 

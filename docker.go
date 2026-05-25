@@ -807,16 +807,40 @@ func launchContainer(ctx context.Context, stdout, stderr io.Writer, c *Container
 
 	// NET_ADMIN and NET_RAW are always granted:
 	// - tcpdump uses AF_PACKET sockets which require NET_RAW.
-	// - Tailscale manipulates the network interface (TUN device creation,
-	//   route table changes) which requires NET_ADMIN.
+	// - Tailscale manipulates the network interface (route table changes)
+	//   which requires NET_ADMIN.
 	// Both are scoped to the container's network namespace.
 	dockerArgs = append(dockerArgs,
 		"--cap-add=NET_ADMIN", "--cap-add=NET_RAW")
 
 	// Tailscale.
+	//
+	// Two approaches exist for providing /dev/net/tun to the container:
+	//
+	//   1. --device=/dev/net/tun:/dev/net/tun (chosen): passes the host's
+	//      pre-existing TUN device into the container. This is the approach
+	//      recommended by Tailscale's official Docker image and blog posts.
+	//      Pros: no MKNOD capability needed (MKNOD allows creating arbitrary
+	//      device nodes — a known container breakout vector per
+	//      hacktricks/angelica.gitbook.io). Avoids cgroup v2 device allowlist
+	//      issues with dynamically-created nodes (containerd/containerd#11078).
+	//      Cons: requires the host kernel to have the tun module loaded and
+	//      /dev/net/tun present before container start.
+	//
+	//   2. --cap-add=MKNOD + internal mknod (dropped): the container creates
+	//      its own /dev/net/tun with mknod c 10 200. Pros: works even if the
+	//      host lacks /dev/net/tun (uncommon on modern systems). Cons: MKNOD
+	//      is a security liability; dynamically-created device nodes may be
+	//      blocked by cgroup v2 DeviceAllow rules in newer containerd/runc
+	//      versions. Tailscale themselves moved away from this pattern.
+	//
+	// Ref: https://tailscale.com/kb/1282/docker (official Docker image docs)
+	// Ref: https://tailscale.com/blog/docker-tailscale-guide (blog post)
+	// Ref: https://github.com/containerd/containerd/issues/11078 (cgroup v2
+	//      breakage of internal mknod)
 	if opts.Tailscale {
 		dockerArgs = append(dockerArgs,
-			"--cap-add=MKNOD",
+			"--device=/dev/net/tun:/dev/net/tun",
 			"-e", "MD_TAILSCALE=1")
 		if opts.TailscaleAuthKey != "" {
 			dockerArgs = append(dockerArgs, "-e", "TAILSCALE_AUTHKEY="+opts.TailscaleAuthKey)

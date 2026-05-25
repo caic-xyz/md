@@ -63,10 +63,8 @@ fi
 # Start Tailscale if enabled
 if [ -n "${MD_TAILSCALE:-}" ]; then
 	echo "[start.sh] Starting Tailscale..."
-	# Create TUN device inside container's namespace (don't use host's /dev/net/tun)
-	mkdir -p /dev/net
-	mknod /dev/net/tun c 10 200 2>/dev/null || true
-	chmod 600 /dev/net/tun
+	# /dev/net/tun is passed through from the host via --device (see docker.go).
+	# The tun kernel module must be loaded on the host for this to work.
 	tailscaled --state=/var/lib/tailscale/tailscaled.state &
 	# Wait for tailscaled to be ready
 	for _ in $(seq 1 30); do
