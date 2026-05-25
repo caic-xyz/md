@@ -20,9 +20,9 @@ A file to [guide coding agents](https://agents.md/).
 ### Image hierarchy
 
 - **`md-root-local`** — root image built locally from `rsc/root/Dockerfile` via `md build-image` (first step).
-- **`md-user-local`** — user image built locally from `rsc/user/Dockerfile` on top of `md-root-local` via `md build-image` (second step). Used as base when `--image md-user-local` is passed.
+- **`md-user-local`** — user image built locally from `rsc/user/Dockerfile` on top of `md-root-local` via `md build-image` (second step). Used as base when `-image md-user-local` is passed.
 - **`ghcr.io/caic-xyz/md-root:latest`** — remote root image with system packages. Rebuilt infrequently (when root setup scripts change). Built by `docker-build-root.yml`.
-- **`ghcr.io/caic-xyz/md-user:latest`** (default) or any `--image`/`--tag` variant — remote user image with Go, Node, Rust, etc. Rebuilt weekly. Built by `docker-build-user.yml` on top of `md-root`.
+- **`ghcr.io/caic-xyz/md-user:latest`** (default) or any `-image`/`-tag` variant — remote user image with Go, Node, Rust, etc. Rebuilt weekly. Built by `docker-build-user.yml` on top of `md-root`.
 - **`md-specialized-<hash>`** — specialized per-user image built on top of the chosen base via a generated Dockerfile + `docker build`. A Dockerfile is created at runtime with `COPY --chown` for SSH keys and `COPY --from=<named-context> --chown` for cache directories, then built with `--no-cache --pull=never --build-context cache-<name>=<hostpath>`. This approach was chosen over `docker create`/`cp`/`commit` (slower: `docker cp` uses API round-trips vs COPY's storage-driver-level tar streaming, and requires starting the container for permission fixes) and over a static Dockerfile (cannot adapt to dynamic cache sets). Built automatically by `md start` and `md run` when needed. The image name includes a 32-hex-char hash of (base image, active cache key) so that different base images or cache sets get distinct images without clobbering each other. Computed by `userImageName()` in `docker.go`.
 
 ### When the user image is rebuilt
@@ -40,9 +40,9 @@ A file to [guide coding agents](https://agents.md/).
 **Default behaviour**: all `WellKnownCaches` entries are included. Caches whose host directory does not exist are silently skipped (no rebuild triggered for missing dirs).
 
 **CLI flags** (on both `md start` and `md run`):
-- `--no-cache <name>` — exclude a specific well-known cache (repeatable).
-- `--no-caches` — disable all default caches; use `--cache` to add back specific ones.
-- `--cache <spec>` — add a well-known name (re-adds when used with `--no-caches`) or a custom `host:container[:ro]` path.
+- `-no-cache <name>` — exclude a specific well-known cache (repeatable).
+- `-no-caches` — disable all default caches; use `-cache` to add back specific ones.
+- `-cache <spec>` — add a well-known name (re-adds when used with `-no-caches`) or a custom `host:container[:ro]` path.
 
 **Well-known cache names** (defined in `WellKnownCaches`, `client.go`): android-keys, bun, cargo, go-mod, gradle, maven, npm, pip, pnpm, uv.
 
@@ -112,8 +112,8 @@ https://chromium.googlesource.com/chromium/src/+/refs/heads/main/chrome/common/p
 
 - **Chrome Sandbox**: To run Chrome/Chromium with the sandbox enabled, the container must be launched with `--security-opt seccomp=unconfined` and `--security-opt apparmor=unconfined`. The `md` script handles this automatically.
 - **Debugging Tools**: strace requires `--cap-add=SYS_PTRACE`. The `md` script handles this automatically.
-- **Tailscale**: Requires `--cap-add=NET_ADMIN` and `--cap-add=NET_RAW`. The host's `/dev/net/tun` is passed through via `--device=/dev/net/tun:/dev/net/tun` instead of creating it inside the container with `mknod` (which would require the `MKNOD` capability — a security liability). Requires the host to have the `tun` kernel module loaded. The `md` script handles this automatically when `--tailscale` is passed to `md start`.
-- **USB Passthrough**: Requires `--device=/dev/bus/usb` to expose host USB devices (e.g. for ADB). The `md` script handles this automatically when `--usb` is passed to `md start`.
+- **Tailscale**: Requires `--cap-add=NET_ADMIN` and `--cap-add=NET_RAW`. The host's `/dev/net/tun` is passed through via `--device=/dev/net/tun:/dev/net/tun` instead of creating it inside the container with `mknod` (which would require the `MKNOD` capability — a security liability). Requires the host to have the `tun` kernel module loaded. The `md` script handles this automatically when `-tailscale` is passed to `md start`.
+- **USB Passthrough**: Requires `--device=/dev/bus/usb` to expose host USB devices (e.g. for ADB). The `md` script handles this automatically when `-usb` is passed to `md start`.
 - **Nested Containers (rootless Podman inside md)**: Supported on **rootful Docker/Podman hosts** with `kernel.unprivileged_userns_clone=1` (default on most modern distros) — no extra flags needed. Rootless Docker/Podman hosts are not supported: `newuidmap` fails with EPERM because the container itself already runs inside a user namespace, and `start.sh` logs a warning at startup.
 
 ## For End Users: Remote GUI Access
