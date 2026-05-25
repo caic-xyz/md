@@ -266,12 +266,11 @@ func (c *Container) Launch(ctx context.Context, stdout, stderr io.Writer, opts *
 		return err
 	}
 
-	// Check if container already exists (short name).
-	// Container names use only the repo basename to stay short regardless
-	// of path depth or branch length. When the short name is taken — same
-	// repo, different branch — append a short random hex suffix (4 bytes)
-	// rather than the branch name. This keeps container names compact
-	// even for repos nested deep in directory trees.
+	// Check if container already exists. Container names include both
+	// repo and branch, so collisions are rare (same repo+branch launched
+	// twice, or two repos with the same basename from different
+	// directories on the same branch). Append a short random hex suffix
+	// (4 bytes) as a safe fallback.
 	//
 	// 4 hex bytes = 65K namespaces, negligible collision probability.
 	if _, err := runCmd(ctx, "", []string{c.Runtime, "inspect", c.Name}); err == nil {

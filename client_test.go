@@ -104,9 +104,9 @@ func TestClient(t *testing.T) {
 			wantRepo string
 			wantName string
 		}{
-			{"regular", "/home/user/src/myrepo", "myrepo", "md-myrepo"},
-			{"bare", "/home/user/src/myrepo.git", "myrepo", "md-myrepo"},
-			{"no_git_suffix", "/home/user/src/myrepo.git.git", "myrepo.git", "md-myrepo.git"},
+			{"regular", "/home/user/src/myrepo", "myrepo", "md-myrepo-main"},
+			{"bare", "/home/user/src/myrepo.git", "myrepo", "md-myrepo-main"},
+			{"no_git_suffix", "/home/user/src/myrepo.git.git", "myrepo.git", "md-myrepo.git-main"},
 		}
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {

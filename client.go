@@ -169,10 +169,10 @@ func detectRuntime() string {
 // the container has no associated git repository and a random name is
 // generated automatically.
 //
-// Container names use only the repo basename to stay short regardless of
-// branch name length or directory tree depth. Launch appends a short random
-// hex suffix only when the short name is already taken by a different
-// branch's container for the same repo.
+// Container names use the repo basename and branch: md-<repo>-<branch>.
+// Launch appends a short random hex suffix only when the name is already
+// taken (e.g. two repos with the same basename from different directories
+// on the same branch).
 //
 // It doesn't start it, it is just a reference.
 func (c *Client) Container(repos ...Repo) *Container {
@@ -186,11 +186,10 @@ func (c *Client) Container(repos ...Repo) *Container {
 	}
 	primary := repos[0]
 	repoName := strings.TrimSuffix(filepath.Base(primary.GitRoot), ".git")
-	short := "md-" + SanitizeDockerName(repoName)
 	return &Container{
 		Client: c,
 		Repos:  repos,
-		Name:   short,
+		Name:   containerName(repoName, primary.Branch),
 	}
 }
 
