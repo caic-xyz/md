@@ -620,47 +620,56 @@ func cmdList(ctx context.Context, args []string) error {
 		fmt.Println("No running md containers")
 		return nil
 	}
-	// Pre-compute all strings to determine column widths.
+	// Phase 1: compute name, repo widths, and build non-tailscale features.
 	type row struct {
 		name     string
 		repos    string
 		features string
 	}
 	rows := make([]row, len(containers))
+	tsFQDNs := make([]string, len(containers)) // populated in parallel for tailscale containers
 	nameWidth := len("Container")
 	repoWidth := len("Repos")
-	featWidth := len("Features")
 	for i, ct := range containers {
 		rows[i].name = ct.Name
-		if n := len(rows[i].name); n > nameWidth {
-			nameWidth = n
-		}
+		nameWidth = max(nameWidth, len(rows[i].name))
 		var parts []string
 		for _, r := range ct.Repos {
 			parts = append(parts, r.Name()+":"+r.Branch)
 		}
 		rows[i].repos = strings.Join(parts, ", ")
-		if n := len(rows[i].repos); n > repoWidth {
-			repoWidth = n
-		}
+		repoWidth = max(repoWidth, len(rows[i].repos))
 		var feats []string
 		if ct.Display {
 			feats = append(feats, "display")
 		}
 		if ct.Tailscale {
-			if fqdn := ct.TailscaleFQDN(ctx); fqdn != "" {
-				feats = append(feats, "tailscale:"+fqdn)
-			} else {
-				feats = append(feats, "tailscale")
-			}
+			feats = append(feats, "tailscale")
 		}
 		if ct.USB {
 			feats = append(feats, "usb")
 		}
 		rows[i].features = strings.Join(feats, ",")
-		if n := len(rows[i].features); n > featWidth {
-			featWidth = n
+	}
+
+	// Phase 2: query Tailscale FQDNs in parallel.
+	var wg sync.WaitGroup
+	for i, ct := range containers {
+		if ct.Tailscale && ct.State == "running" {
+			wg.Go(func() {
+				tsFQDNs[i] = ct.TailscaleFQDN(ctx)
+			})
 		}
+	}
+	wg.Wait()
+
+	// Phase 3: rebuild feature strings with FQDNs and compute feature width.
+	featWidth := len("Features")
+	for i := range containers {
+		if fqdn := tsFQDNs[i]; fqdn != "" {
+			rows[i].features = "tailscale:" + fqdn
+		}
+		featWidth = max(featWidth, len(rows[i].features))
 	}
 	nameWidth += 3
 	repoWidth += 3

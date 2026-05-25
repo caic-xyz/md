@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -144,11 +145,6 @@ type Container struct {
 	// Sudo indicates root access via sudo is enabled.
 	// Label: md.sudo
 	Sudo bool
-	// sudoPassword is the random password set by Launch, cached
-	// so SudoPassword() doesn't need to docker inspect. Empty for
-	// containers loaded from docker list (fall back to label).
-	sudoPassword string
-
 	// SSHPort is the host port mapped to the container's SSH port.
 	// Set by Launch; available immediately after Launch returns.
 	SSHPort int32
@@ -156,6 +152,10 @@ type Container struct {
 	// Set by Launch; available immediately after Launch returns. Zero if display is disabled.
 	VNCPort int32
 
+	// sudoPassword is the random password set by Launch, cached
+	// so SudoPassword() doesn't need to docker inspect. Empty for
+	// containers loaded from docker list (fall back to label).
+	sudoPassword string
 	// tailscaleEphemeral is set by Launch and consumed by Connect.
 	tailscaleEphemeral bool
 }
@@ -164,7 +164,7 @@ type Container struct {
 // used directly (preserving slashes so /home/user/src/foo/website mirrors
 // the host layout). Otherwise it falls back to the basename of GitRoot,
 // stripping any .git suffix.
-func (r Repo) Name() string {
+func (r *Repo) Name() string {
 	if r.MountedName != "" {
 		return r.MountedName
 	}
@@ -277,7 +277,7 @@ func (c *Container) Launch(ctx context.Context, stdout, stderr io.Writer, opts *
 	if _, err := runCmd(ctx, "", []string{c.Runtime, "inspect", c.Name}); err == nil {
 		var suffix [4]byte
 		_, _ = rand.Read(suffix[:])
-		c.Name = c.Name + "-" + fmt.Sprintf("%x", suffix)
+		c.Name = c.Name + "-" + hex.EncodeToString(suffix[:])
 		if _, err := runCmd(ctx, "", []string{c.Runtime, "inspect", c.Name}); err == nil {
 			return fmt.Errorf("container %s already exists. SSH in with 'ssh %s' or clean it up via 'md purge' first",
 				c.Name, c.Name)
@@ -1272,13 +1272,19 @@ func (c *Container) TailscaleFQDN(ctx context.Context) string {
 	}
 	statusJSON, err := runCmd(ctx, "", []string{c.Runtime, "exec", c.Name, "tailscale", "status", "--json"})
 	if err != nil {
+		slog.DebugContext(ctx, "md", "msg", "tailscale status failed", "container", c.Name, "err", err)
 		return ""
 	}
 	var status tailscaleStatus
-	if json.Unmarshal([]byte(statusJSON), &status) != nil {
+	if err := json.Unmarshal([]byte(statusJSON), &status); err != nil {
+		slog.DebugContext(ctx, "md", "msg", "tailscale status JSON parse failed", "container", c.Name, "err", err)
 		return ""
 	}
-	return strings.TrimRight(status.Self.DNSName, ".")
+	fqdn := strings.TrimRight(status.Self.DNSName, ".")
+	if fqdn == "" {
+		slog.DebugContext(ctx, "md", "msg", "tailscale FQDN empty", "container", c.Name)
+	}
+	return fqdn
 }
 
 // SyncDefaultBranch force-pushes the host's default branch (e.g. origin/main)
