@@ -518,6 +518,7 @@ func TestRepo(t *testing.T) {
 			}{
 				{"from basename", Repo{GitRoot: "/home/user/src/myrepo"}},
 				{"explicit absolute path", Repo{GitRoot: "/home/user/src/myrepo", MountedPath: "/home/user/src/custom"}},
+				{"tilde expansion", Repo{GitRoot: "/home/user/src/myrepo", MountedPath: "~/src/custom"}},
 			}
 			for _, tt := range tests {
 				t.Run(tt.name, func(t *testing.T) {
@@ -535,6 +536,7 @@ func TestRepo(t *testing.T) {
 			}{
 				{"empty GitRoot", Repo{}, "GitRoot is empty"},
 				{"relative MountedPath", Repo{GitRoot: "/home/user/src/myrepo", MountedPath: "custom"}, "must be an absolute POSIX path"},
+				{"bare tilde", Repo{GitRoot: "/home/user/src/myrepo", MountedPath: "~"}, "absolute POSIX path"},
 			}
 			for _, tt := range tests {
 				t.Run(tt.name, func(t *testing.T) {
@@ -578,9 +580,11 @@ func TestValidateRepoNames(t *testing.T) {
 		}
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {
-			for i := range tt.repos {
-				tt.repos[i].Validate()
-			}
+				for i := range tt.repos {
+					if err := tt.repos[i].Validate(); err != nil {
+						t.Fatal(err)
+					}
+				}
 				if err := validateRepoNames(tt.repos); err != nil {
 					t.Errorf("unexpected error: %v", err)
 				}

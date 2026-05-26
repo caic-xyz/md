@@ -111,9 +111,9 @@ func TestClient(t *testing.T) {
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {
 				ct, err := c.Container(Repo{GitRoot: tt.gitRoot, Branch: "main"})
-			if err != nil {
-				t.Fatal(err)
-			}
+				if err != nil {
+					t.Fatal(err)
+				}
 				if ct.Repos[0].MountedPath != tt.wantRepo {
 					t.Errorf("MountedPath = %q, want %q", ct.Repos[0].MountedPath, tt.wantRepo)
 				}

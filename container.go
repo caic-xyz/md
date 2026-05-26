@@ -168,6 +168,9 @@ func (r *Repo) populateMountPath() {
 // Validate normalizes the repo and returns an error for invalid values.
 func (r *Repo) Validate() error {
 	r.populateMountPath()
+	if strings.HasPrefix(r.MountedPath, "~/") {
+		r.MountedPath = "/home/user/" + r.MountedPath[2:]
+	}
 	if r.GitRoot == "" {
 		return errors.New("Repo.GitRoot is empty")
 	}
