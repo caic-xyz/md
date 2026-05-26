@@ -151,6 +151,31 @@ jobs:
             false
           fi
 
+  # Runs the smoke test (end-to-end container lifecycle) with code coverage.
+  smoke:
+    name: "smoke: ubuntu-latest"
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONDONTWRITEBYTECODE: x
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: "Check: go test -tags=smoke (short)"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: go test -tags=smoke -run TestSmoke -short -covermode=count -coverprofile coverage_smoke.txt -v -timeout 30m ./...
+      - uses: codecov/codecov-action@v6
+        with:
+          token: ${{secrets.CODECOV_TOKEN}}
+          files: coverage_smoke.txt
+          flags: smoke
+
   codeql:
     name: "codeql: ${{matrix.os}}"
     runs-on: "${{matrix.os}}"
