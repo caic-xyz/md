@@ -520,14 +520,14 @@ func generateDockerfile(baseImage string, active []activeCM, dirs []string, base
 // keysDir contains SSH host keys and authorized_keys. home resolves "~/" in
 // cache HostPaths. mountPaths lists container-side -v mount targets to
 // pre-create with user ownership.
-func buildSpecializedImage(ctx context.Context, stdout, stderr io.Writer, rt, keysDir, imageName, baseImage, home string, caches []CacheMount, mountPaths []string, quiet bool) error {
+func (c *Client) buildSpecializedImage(ctx context.Context, stdout, stderr io.Writer, imageName, baseImage string, caches []CacheMount, mountPaths []string, quiet bool) error {
 	slog.DebugContext(ctx, "md", "msg", "building specialized image", "image", imageName, "base", baseImage)
 	arch := runtime.GOARCH
 	// Local-only images (no "/" in name) are never pulled from a registry.
 	// A tag (":latest") does not imply a registry; only a "/" does.
 	isLocal := !strings.Contains(baseImage, "/")
 	if isLocal {
-		if _, err := runCmd(ctx, "", []string{rt, "image", "inspect", "--format", "{{.Id}}", baseImage}); err != nil {
+		if _, err := runCmd(ctx, "", []string{c.Runtime, "image", "inspect", "--format", "{{.Id}}", baseImage}); err != nil {
 			return fmt.Errorf("local image %s not found; build it first with 'md build-image'", baseImage)
 		}
 		if !quiet {
@@ -535,24 +535,24 @@ func buildSpecializedImage(ctx context.Context, stdout, stderr io.Writer, rt, ke
 		}
 	} else {
 		// Compare the local image ID before and after pull to detect changes.
-		idBefore, _ := runCmd(ctx, "", []string{rt, "image", "inspect", "--format", "{{.Id}}", baseImage})
+		idBefore, _ := runCmd(ctx, "", []string{c.Runtime, "image", "inspect", "--format", "{{.Id}}", baseImage})
 		if !quiet {
 			_, _ = fmt.Fprintf(stdout, "- Pulling base image %s ...\n", baseImage)
 		}
 		if quiet {
-			if _, err := runCmd(ctx, "", []string{rt, "pull", "--platform", "linux/" + arch, baseImage}); err != nil {
+			if _, err := runCmd(ctx, "", []string{c.Runtime, "pull", "--platform", "linux/" + arch, baseImage}); err != nil {
 				return cmdErrWithStderr("pulling base image", err)
 			}
 		} else {
-			if err := runCmdOut(ctx, "", []string{rt, "pull", "--platform", "linux/" + arch, baseImage}, stdout, stderr); err != nil {
+			if err := runCmdOut(ctx, "", []string{c.Runtime, "pull", "--platform", "linux/" + arch, baseImage}, stdout, stderr); err != nil {
 				return fmt.Errorf("pulling base image: %w", err)
 			}
 		}
-		idAfter, _ := runCmd(ctx, "", []string{rt, "image", "inspect", "--format", "{{.Id}}", baseImage})
+		idAfter, _ := runCmd(ctx, "", []string{c.Runtime, "image", "inspect", "--format", "{{.Id}}", baseImage})
 		if !quiet {
 			if idBefore != "" && idBefore == idAfter {
 				_, _ = fmt.Fprintf(stdout, "  Base image is up to date.\n")
-			} else if v := getImageVersionLabel(ctx, rt, baseImage); strings.HasPrefix(v, "v") {
+			} else if v := getImageVersionLabel(ctx, c.Runtime, baseImage); strings.HasPrefix(v, "v") {
 				_, _ = fmt.Fprintf(stdout, "  Version: %s\n", v)
 			}
 		}
@@ -560,21 +560,21 @@ func buildSpecializedImage(ctx context.Context, stdout, stderr io.Writer, rt, ke
 
 	slog.DebugContext(ctx, "md", "msg", "pull complete, fetching base image digest")
 	// Get base image digest for label.
-	baseDigest, err := runCmd(ctx, "", []string{rt, "image", "inspect", "--format", "{{index .RepoDigests 0}}", baseImage})
+	baseDigest, err := runCmd(ctx, "", []string{c.Runtime, "image", "inspect", "--format", "{{index .RepoDigests 0}}", baseImage})
 	if err != nil || baseDigest == "" {
-		baseDigest, _ = runCmd(ctx, "", []string{rt, "image", "inspect", "--format", "{{.Id}}", baseImage})
+		baseDigest, _ = runCmd(ctx, "", []string{c.Runtime, "image", "inspect", "--format", "{{.Id}}", baseImage})
 	}
 	var manifestDigest string
 	if !isLocal {
-		manifestDigest, _ = getRemoteManifestDigest(ctx, rt, baseImage, arch)
+		manifestDigest, _ = getRemoteManifestDigest(ctx, c.Runtime, baseImage, arch)
 	}
 
-	contextSHA, err := keysSHA(keysDir)
+	contextSHA, err := keysSHA(c.keysDir)
 	if err != nil {
 		return fmt.Errorf("computing keys SHA: %w", err)
 	}
 
-	active, dirs, activeKey := resolveCaches(caches, home, mountPaths)
+	active, dirs, activeKey := resolveCaches(caches, c.Home, mountPaths)
 
 	if !quiet {
 		_, _ = fmt.Fprintf(stdout, "- Building container image %s from %s ...\n", imageName, baseImage)
@@ -585,7 +585,7 @@ func buildSpecializedImage(ctx context.Context, stdout, stderr io.Writer, rt, ke
 		}
 		for _, cm := range caches {
 			if !activeNames[cm.Name] {
-				_, _ = fmt.Fprintf(stdout, "  Cache %s: %s not found, skipping\n", cm.Name, resolveHostPath(cm.HostPath, home))
+				_, _ = fmt.Fprintf(stdout, "  Cache %s: %s not found, skipping\n", cm.Name, resolveHostPath(cm.HostPath, c.Home))
 			}
 		}
 		for _, a := range active {
@@ -616,7 +616,7 @@ func buildSpecializedImage(ctx context.Context, stdout, stderr io.Writer, rt, ke
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	for _, name := range []string{"ssh_host_ed25519_key", "ssh_host_ed25519_key.pub", "authorized_keys"} {
-		data, err := os.ReadFile(filepath.Join(keysDir, name))
+		data, err := os.ReadFile(filepath.Join(c.keysDir, name))
 		if err != nil {
 			return fmt.Errorf("reading %s: %w", name, err)
 		}
@@ -635,7 +635,7 @@ func buildSpecializedImage(ctx context.Context, stdout, stderr io.Writer, rt, ke
 	// Build the image. --no-cache forces all layers to rebuild (prevents stale
 	// results). We omit --pull so BuildKit won't re-pull the base (we already
 	// pulled above).
-	buildCmd := []string{rt, "build", "--no-cache", "--platform", "linux/" + arch, "-t", imageName}
+	buildCmd := []string{c.Runtime, "build", "--no-cache", "--platform", "linux/" + arch, "-t", imageName}
 	for _, a := range active {
 		buildCmd = append(buildCmd, "--build-context", fmt.Sprintf("cache-%s=%s", a.cm.Name, a.hostPath))
 	}
@@ -645,7 +645,7 @@ func buildSpecializedImage(ctx context.Context, stdout, stderr io.Writer, rt, ke
 		if _, err := runCmd(ctx, "", buildCmd); err != nil {
 			buildErr := cmdErrWithStderr("building image", err)
 			if isStaleBuilderCacheErr(buildErr) {
-				if _, pruneErr := runCmd(ctx, "", []string{rt, "builder", "prune", "-f"}); pruneErr != nil {
+				if _, pruneErr := runCmd(ctx, "", []string{c.Runtime, "builder", "prune", "-f"}); pruneErr != nil {
 					return buildErr
 				}
 				if _, err2 := runCmd(ctx, "", buildCmd); err2 != nil {
@@ -660,7 +660,7 @@ func buildSpecializedImage(ctx context.Context, stdout, stderr io.Writer, rt, ke
 			buildErr := fmt.Errorf("building image: %w", err)
 			if isStaleBuilderCacheErr(buildErr) {
 				_, _ = fmt.Fprintln(stdout, "- Stale BuildKit cache detected; pruning and retrying ...")
-				if _, pruneErr := runCmd(ctx, "", []string{rt, "builder", "prune", "-f"}); pruneErr != nil {
+				if _, pruneErr := runCmd(ctx, "", []string{c.Runtime, "builder", "prune", "-f"}); pruneErr != nil {
 					return buildErr
 				}
 				if err2 := runCmdOut(ctx, "", buildCmd, stdout, stderr); err2 != nil {
@@ -754,7 +754,7 @@ func resolveHostPath(p, home string) string {
 // SSH config, and sets up host-side git remotes. It does NOT wait for SSH.
 // Port and creation-time results are stored directly on c (launchSSHPort,
 // launchVNCPort, CreatedAt) so that connectContainer can complete startup.
-func launchContainer(ctx context.Context, stdout, stderr io.Writer, c *Container, opts *StartOpts, imageName string) error {
+func (c *Container) launchContainer(ctx context.Context, stdout, stderr io.Writer, opts *StartOpts, imageName string) error {
 	if len(c.Repos) > 1000 {
 		return fmt.Errorf("too many repositories: %d (max 1000)", len(c.Repos))
 	}
@@ -1147,7 +1147,7 @@ func provisionContainer(ctx context.Context, stdout, stderr io.Writer, c *Contai
 
 	// Phase 3: send .env into the container, combining per-repo .env files
 	// and extra environment variables from opts.
-	if err := sendEnv(ctx, stdout, c, opts); err != nil {
+	if err := c.sendEnv(ctx, stdout, opts); err != nil {
 		return nil, err
 	}
 
@@ -1156,7 +1156,7 @@ func provisionContainer(ctx context.Context, stdout, stderr io.Writer, c *Contai
 
 // sendEnv combines per-repo .env files and extra environment variables from
 // opts, then copies them into the container at /home/user/.env.
-func sendEnv(ctx context.Context, stdout io.Writer, c *Container, opts *StartOpts) error {
+func (c *Container) sendEnv(ctx context.Context, stdout io.Writer, opts *StartOpts) error {
 	var envContent []byte
 	for _, r := range c.Repos {
 		data, err := os.ReadFile(filepath.Join(r.GitRoot, ".env"))

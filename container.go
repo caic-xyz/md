@@ -327,7 +327,7 @@ func (c *Container) Launch(ctx context.Context, stdout, stderr io.Writer, opts *
 	c.Display = opts.Display
 	c.USB = opts.USB
 	c.Sudo = opts.Sudo
-	return launchContainer(ctx, stdout, stderr, c, opts, imageName)
+	return c.launchContainer(ctx, stdout, stderr, opts, imageName)
 }
 
 // Connect waits for SSH, pushes repos into the container, and completes
@@ -376,7 +376,7 @@ func (c *Container) Run(ctx context.Context, stdout, stderr io.Writer, baseImage
 		return 1, err
 	}
 	opts := StartOpts{Quiet: true, ExtraEnv: extraEnv, AgentPaths: slices.Collect(maps.Values(HarnessMounts)), MaxCPUs: maxCPUs, ExtraRunArgs: extraRunArgs}
-	if err := launchContainer(ctx, stdout, stderr, tmp, &opts, imageName); err != nil {
+	if err := tmp.launchContainer(ctx, stdout, stderr, &opts, imageName); err != nil {
 		tmp.cleanup(ctx)
 		return 1, err
 	}
@@ -926,7 +926,7 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 	if err := c.prepare(startOpts.AgentPaths); err != nil {
 		return nil, err
 	}
-	if err := launchContainer(ctx, stdout, stderr, fork, startOpts, snapshotImage); err != nil {
+	if err := fork.launchContainer(ctx, stdout, stderr, startOpts, snapshotImage); err != nil {
 		return nil, err
 	}
 	fork.Display = startOpts.Display
@@ -1377,7 +1377,7 @@ func (c *Container) ensureImage(ctx context.Context, stdout, stderr io.Writer, b
 		}
 		return imageName, nil
 	}
-	if err := buildSpecializedImage(ctx, stdout, stderr, c.Runtime, c.keysDir, imageName, baseImage, c.Home, caches, agentContainerPaths(), quiet); err != nil {
+	if err := c.buildSpecializedImage(ctx, stdout, stderr, imageName, baseImage, caches, agentContainerPaths(), quiet); err != nil {
 		return "", err
 	}
 	c.invalidateImageBuildCache()

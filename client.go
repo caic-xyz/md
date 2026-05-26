@@ -348,7 +348,7 @@ func (c *Client) Warmup(ctx context.Context, stdout, stderr io.Writer, opts *War
 		}
 		return false, nil
 	}
-	if err := buildSpecializedImage(ctx, stdout, stderr, c.Runtime, c.keysDir, imageName, baseImage, c.Home, opts.Caches, agentContainerPaths(), opts.Quiet); err != nil {
+	if err := c.buildSpecializedImage(ctx, stdout, stderr, imageName, baseImage, opts.Caches, agentContainerPaths(), opts.Quiet); err != nil {
 		return false, err
 	}
 	c.invalidateImageBuildCache()
