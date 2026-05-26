@@ -15,6 +15,20 @@ A file to [guide coding agents](https://agents.md/).
 - For Python code changes, ensure code passes `pylint` and `ruff` checks as defined in `.github/workflows/docker-build-user.yml`
 - When adding new tools to the system, they must also be added to `rsc/user/home/user/setup/generate_version_report.sh` to ensure they appear in version reports. The script generates `/home/user/src/tool_versions.md` which is used in release notes and build reports
 
+## Smoke Tests
+
+Smoke tests verify end-to-end image build, container launch, cache injection, and nested podman inside a sudo-enabled container. They are gated behind the `smoke` build tag:
+
+```bash
+# Fast: skip image builds, use pre-existing or remote images
+go test -tags=smoke -run TestSmoke -short -v -timeout 120m
+
+# Full: build images if needed, including clean rebuild test
+go test -tags=smoke -run TestSmoke -v -timeout 120m
+```
+
+The test requires a container runtime (docker or podman) in PATH. Nested podman subtests are skipped under rootless podman due to user namespace stacking (`newuidmap` fails with `EPERM`).
+
 ## md Tool: Image Build and Cache Injection
 
 ### Image hierarchy
