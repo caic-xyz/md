@@ -20,8 +20,8 @@ import (
 )
 
 // hasImage checks whether a container image exists in the local store.
-func hasImage(ctx context.Context, rt, name string) bool {
-	_, err := runCmd(ctx, "", []string{rt, "image", "inspect", "--format", "{{.Id}}", name})
+func hasImage(ctx context.Context, c *Client, name string) bool {
+	_, err := c.runCmd(ctx, "", []string{c.Runtime, "image", "inspect", "--format", "{{.Id}}", name})
 	return err == nil
 }
 
@@ -29,7 +29,12 @@ func hasImage(ctx context.Context, rt, name string) bool {
 // and -short is passed, falls back to the remote default image instead of
 // building. Returns the base image to use.
 func ensureImages(t *testing.T, ctx context.Context, rt string) string {
-	if hasImage(ctx, rt, "md-root-local") && hasImage(ctx, rt, "md-user-local") {
+	client, err := New(io.Discard)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	client.Runtime = rt
+	if hasImage(ctx, client, "md-root-local") && hasImage(ctx, client, "md-user-local") {
 		t.Log("local images already present, skipping build")
 		return "md-user-local"
 	}
@@ -38,11 +43,6 @@ func ensureImages(t *testing.T, ctx context.Context, rt string) string {
 		return DefaultBaseImage + ":latest"
 	}
 	t.Log("building local images (md-root-local → md-user-local) ...")
-	client, err := New(io.Discard)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	client.Runtime = rt
 	if err := client.BuildImage(ctx, io.Discard, io.Discard); err != nil {
 		t.Fatalf("BuildImage: %v", err)
 	}
@@ -50,23 +50,17 @@ func ensureImages(t *testing.T, ctx context.Context, rt string) string {
 	return "md-user-local"
 }
 
-// launchSmokeContainer creates a Client, allocates a container with the given
-// name suffix, cleans up leftovers, and calls Launch+Connect with -sudo.
+// launchSmokeContainer allocates a container with the given name suffix,
+// cleans up leftovers, and calls Launch+Connect with -sudo.
 // Returns the live container (caller must Purge via t.Cleanup).
-func launchSmokeContainer(t *testing.T, ctx context.Context, rt, baseImage, nameSuffix string, caches ...CacheMount) *Container {
-	client, err := New(io.Discard)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	client.Runtime = rt
-
-	ct, err := client.Container()
+func launchSmokeContainer(t *testing.T, ctx context.Context, c *Client, baseImage, nameSuffix string, caches ...CacheMount) *Container {
+	ct, err := c.Container()
 	if err != nil {
 		t.Fatalf("Container: %v", err)
 	}
 	ct.Name = "md-smoke-" + nameSuffix
 
-	_, _ = runCmd(ctx, "", []string{rt, "rm", "-f", "-v", ct.Name})
+	_, _ = c.runCmd(ctx, "", []string{c.Runtime, "rm", "-f", "-v", ct.Name})
 
 	opts := &StartOpts{
 		BaseImage: baseImage,
@@ -129,11 +123,17 @@ func TestSmoke(t *testing.T) {
 
 			baseImage := ensureImages(t, t.Context(), rt)
 
+			client, err := New(io.Discard)
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			client.Runtime = rt
+
 			t.Run("launch", func(t *testing.T) {
-				ct := launchSmokeContainer(t, t.Context(), rt, baseImage, rt+"-launch")
+				ct := launchSmokeContainer(t, t.Context(), client, baseImage, rt+"-launch")
 
 				t.Run("sudo", func(t *testing.T) {
-					out, err := runCmd(t.Context(), "", ct.SSHCommand(ct.Name, "echo '"+ct.sudoPassword+"' | sudo -S whoami"))
+					out, err := ct.runCmd(t.Context(), "", ct.SSHCommand(ct.Name, "echo '"+ct.sudoPassword+"' | sudo -S whoami"))
 					if err != nil {
 						t.Fatalf("sudo whoami: %v", err)
 					}
@@ -144,7 +144,7 @@ func TestSmoke(t *testing.T) {
 				})
 
 				t.Run("file_io", func(t *testing.T) {
-					if _, err := runCmd(t.Context(), "", ct.SSHCommand(ct.Name, "echo hello > /tmp/smoke-test && cat /tmp/smoke-test")); err != nil {
+					if _, err := ct.runCmd(t.Context(), "", ct.SSHCommand(ct.Name, "echo hello > /tmp/smoke-test && cat /tmp/smoke-test")); err != nil {
 						t.Fatalf("file I/O: %v", err)
 					}
 				})
@@ -155,13 +155,13 @@ func TestSmoke(t *testing.T) {
 				if err := os.WriteFile(filepath.Join(src, "hello.txt"), []byte("cache-works"), 0o644); err != nil {
 					t.Fatal(err)
 				}
-				ct := launchSmokeContainer(t, t.Context(), rt, baseImage, rt+"-cache", CacheMount{
+				ct := launchSmokeContainer(t, t.Context(), client, baseImage, rt+"-cache", CacheMount{
 					Name:          "smoke-cache",
 					HostPath:      src,
 					ContainerPath: "/home/user/.cache/smoke",
 				})
 
-				out, err := runCmd(t.Context(), "", ct.SSHCommand(ct.Name, "cat /home/user/.cache/smoke/hello.txt"))
+				out, err := ct.runCmd(t.Context(), "", ct.SSHCommand(ct.Name, "cat /home/user/.cache/smoke/hello.txt"))
 				if err != nil {
 					t.Fatalf("read cached file: %v", err)
 				}
@@ -175,7 +175,7 @@ func TestSmoke(t *testing.T) {
 				if !nestedOK {
 					t.Skip("skipping: nested newuidmap fails with rootless podman (user namespace stacking)")
 				}
-				ct := launchSmokeContainer(t, t.Context(), rt, baseImage, rt+"-nested")
+				ct := launchSmokeContainer(t, t.Context(), client, baseImage, rt+"-nested")
 
 				t.Run("version", func(t *testing.T) {
 					args := ct.SSHCommand(ct.Name, "podman version --format '{{.Version}}'")
@@ -220,7 +220,7 @@ func TestSmoke(t *testing.T) {
 				t.Run("run_alpine_id", func(t *testing.T) {
 					subCtx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
 					defer cancel()
-					out, err := runCmd(subCtx, "", ct.SSHCommand(ct.Name, "podman run --rm docker.io/alpine:latest id -u"))
+					out, err := ct.runCmd(subCtx, "", ct.SSHCommand(ct.Name, "podman run --rm docker.io/alpine:latest id -u"))
 					if err != nil {
 						t.Fatalf("podman run id: %v", err)
 					}
@@ -256,9 +256,9 @@ func TestSmoke(t *testing.T) {
 			})
 
 			t.Run("lifecycle", func(t *testing.T) {
-				ct := launchSmokeContainer(t, t.Context(), rt, baseImage, rt+"-lifecycle")
+				ct := launchSmokeContainer(t, t.Context(), client, baseImage, rt+"-lifecycle")
 
-				if _, err := runCmd(t.Context(), "", ct.SSHCommand(ct.Name, "echo persisted > /tmp/smoke-test")); err != nil {
+				if _, err := ct.runCmd(t.Context(), "", ct.SSHCommand(ct.Name, "echo persisted > /tmp/smoke-test")); err != nil {
 					t.Fatalf("write file: %v", err)
 				}
 
@@ -272,7 +272,7 @@ func TestSmoke(t *testing.T) {
 					t.Fatalf("Revive: %v", err)
 				}
 
-				out, err := runCmd(t.Context(), "", ct.SSHCommand(ct.Name, "cat /tmp/smoke-test"))
+				out, err := ct.runCmd(t.Context(), "", ct.SSHCommand(ct.Name, "cat /tmp/smoke-test"))
 				if err != nil {
 					t.Fatalf("read file after revive: %v", err)
 				}
@@ -289,17 +289,11 @@ func TestSmoke(t *testing.T) {
 				defer cancel()
 
 				for _, img := range []string{"md-root-local", "md-user-local"} {
-					if hasImage(subCtx, rt, img) {
+					if hasImage(subCtx, client, img) {
 						t.Logf("removing existing image %s for clean build test", img)
-						_, _ = runCmd(subCtx, "", []string{rt, "rmi", "-f", img})
+						_, _ = client.runCmd(subCtx, "", []string{client.Runtime, "rmi", "-f", img})
 					}
 				}
-
-				client, err := New(io.Discard)
-				if err != nil {
-					t.Fatalf("New: %v", err)
-				}
-				client.Runtime = rt
 
 				t.Log("building images from scratch ...")
 				if err := client.BuildImage(subCtx, os.Stdout, os.Stderr); err != nil {
@@ -307,7 +301,7 @@ func TestSmoke(t *testing.T) {
 				}
 
 				for _, img := range []string{"md-root-local", "md-user-local"} {
-					if !hasImage(subCtx, rt, img) {
+					if !hasImage(subCtx, client, img) {
 						t.Errorf("image %s not found after build", img)
 					}
 				}
@@ -317,8 +311,8 @@ func TestSmoke(t *testing.T) {
 					"org.opencontainers.image.licenses",
 				}
 				for _, label := range labels {
-					out, err := runCmd(subCtx, "", []string{
-						rt, "image", "inspect", "--format",
+					out, err := client.runCmd(subCtx, "", []string{
+						client.Runtime, "image", "inspect", "--format",
 						fmt.Sprintf("{{index .Config.Labels %q}}", label), "md-user-local",
 					})
 					if err != nil {

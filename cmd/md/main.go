@@ -589,7 +589,7 @@ func cmdList(ctx context.Context, args []string) error {
 			names[i] = ct.Name
 		}
 		var statsErr error
-		allStats, statsErr = md.StatsAll(ctx, c.Runtime, names)
+		allStats, statsErr = c.StatsAll(ctx, names)
 		if statsErr != nil {
 			slog.WarnContext(ctx, "md", "msg", "fetching container stats", "err", statsErr)
 		}

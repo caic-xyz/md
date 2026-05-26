@@ -120,12 +120,12 @@ func keysSHA(keysDir string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-func dockerInspectFormat(ctx context.Context, rt, name, format string) (string, error) {
-	return runCmd(ctx, "", []string{rt, "image", "inspect", name, "--format", format})
+func (c *Client) dockerInspectFormat(ctx context.Context, name, format string) (string, error) {
+	return c.runCmd(ctx, "", []string{c.Runtime, "image", "inspect", name, "--format", format})
 }
 
-func getImageVersionLabel(ctx context.Context, rt, imageName string) string {
-	out, err := dockerInspectFormat(ctx, rt, imageName, `{{index .Config.Labels "org.opencontainers.image.version"}}`)
+func (c *Client) getImageVersionLabel(ctx context.Context, imageName string) string {
+	out, err := c.dockerInspectFormat(ctx, imageName, `{{index .Config.Labels "org.opencontainers.image.version"}}`)
 	if err != nil || out == "" || out == "<no value>" {
 		return ""
 	}
@@ -151,9 +151,9 @@ func getImageVersionLabel(ctx context.Context, rt, imageName string) string {
 // Both Docker schema v2 manifest lists and OCI image indexes share the same
 // "manifests[].{digest, platform}" JSON structure, so one parser covers both
 // runtimes and both formats.
-func getRemoteManifestDigest(ctx context.Context, rt, image, arch string) (string, error) {
+func (c *Client) getRemoteManifestDigest(ctx context.Context, image, arch string) (string, error) {
 	slog.DebugContext(ctx, "md", "msg", "fetching remote manifest digest", "image", image, "arch", arch)
-	out, err := runCmd(ctx, "", []string{rt, "manifest", "inspect", image})
+	out, err := c.runCmd(ctx, "", []string{c.Runtime, "manifest", "inspect", image})
 	if err != nil {
 		return "", err
 	}
@@ -211,18 +211,18 @@ type imageBuildCacheEntry struct {
 // cachedRemoteManifestDigest returns the remote per-architecture manifest digest.
 // When Client.DigestCacheTTL is non-zero, results are cached for that duration
 // to skip repeated registry round-trips. When zero, the registry is always queried.
-func (c *Client) cachedRemoteManifestDigest(ctx context.Context, rt, image, arch string) (string, error) {
+func (c *Client) cachedRemoteManifestDigest(ctx context.Context, image, arch string) (string, error) {
 	if c.DigestCacheTTL == 0 {
-		return getRemoteManifestDigest(ctx, rt, image, arch)
+		return c.getRemoteManifestDigest(ctx, image, arch)
 	}
-	key := rt + "\x00" + image + "\x00" + arch
+	key := c.Runtime + "\x00" + image + "\x00" + arch
 	c.mu.Lock()
 	if e, ok := c.digestCache[key]; ok && time.Now().Before(e.expires) {
 		c.mu.Unlock()
 		return e.digest, e.err
 	}
 	c.mu.Unlock()
-	digest, err := getRemoteManifestDigest(ctx, rt, image, arch)
+	digest, err := c.getRemoteManifestDigest(ctx, image, arch)
 	c.mu.Lock()
 	c.digestCache[key] = remoteDigestEntry{digest: digest, err: err, expires: time.Now().Add(c.DigestCacheTTL)}
 	c.mu.Unlock()
@@ -277,15 +277,15 @@ func cacheSpecKey(caches []CacheMount) string {
 // home is used to resolve "~/" in cache HostPaths so only caches whose host
 // directory currently exists are compared (matching what resolveCaches
 // would actually inject).
-func (c *Client) imageBuildNeeded(ctx context.Context, rt, imageName, baseImage, keysDir, home string, caches []CacheMount) bool {
+func (c *Client) imageBuildNeeded(ctx context.Context, imageName, baseImage string, caches []CacheMount) bool {
 	// Compute cheap inputs first so we can check the cache.
-	contextSHA, err := keysSHA(keysDir)
+	contextSHA, err := keysSHA(c.keysDir)
 	if err != nil {
 		return true
 	}
 	var activeCaches []CacheMount
 	for _, cm := range caches {
-		if _, err := os.Stat(resolveHostPath(cm.HostPath, home)); err == nil {
+		if _, err := os.Stat(resolveHostPath(cm.HostPath, c.Home)); err == nil {
 			activeCaches = append(activeCaches, cm)
 		}
 	}
@@ -300,7 +300,7 @@ func (c *Client) imageBuildNeeded(ctx context.Context, rt, imageName, baseImage,
 	}
 	c.mu.Unlock()
 
-	needed := c.imageBuildNeededSlow(ctx, rt, imageName, baseImage, contextSHA, activeKey)
+	needed := c.imageBuildNeededSlow(ctx, imageName, baseImage, contextSHA, activeKey)
 
 	c.mu.Lock()
 	c.imageBuildCache = &imageBuildCacheEntry{
@@ -322,15 +322,15 @@ func (c *Client) invalidateImageBuildCache() {
 }
 
 // imageBuildNeededSlow performs the full check with docker inspect calls.
-func (c *Client) imageBuildNeededSlow(ctx context.Context, rt, imageName, baseImage, contextSHA, activeKey string) bool {
+func (c *Client) imageBuildNeededSlow(ctx context.Context, imageName, baseImage, contextSHA, activeKey string) bool {
 	slog.DebugContext(ctx, "md", "msg", "checking if image build needed", "image", imageName, "base", baseImage)
 	// Quick check: does the specialized image have labels at all?
-	currentDigest, err := dockerInspectFormat(ctx, rt, imageName, `{{index .Config.Labels "md.base_digest"}}`)
+	currentDigest, err := c.dockerInspectFormat(ctx, imageName, `{{index .Config.Labels "md.base_digest"}}`)
 	if err != nil || currentDigest == "" || currentDigest == "<no value>" {
 		slog.DebugContext(ctx, "md", "msg", "build needed: no base_digest label", "image", imageName)
 		return true
 	}
-	currentContext, err := dockerInspectFormat(ctx, rt, imageName, `{{index .Config.Labels "md.context_sha"}}`)
+	currentContext, err := c.dockerInspectFormat(ctx, imageName, `{{index .Config.Labels "md.context_sha"}}`)
 	if err != nil || currentContext == "" || currentContext == "<no value>" {
 		slog.DebugContext(ctx, "md", "msg", "build needed: no context_sha label", "image", imageName)
 		return true
@@ -338,9 +338,9 @@ func (c *Client) imageBuildNeededSlow(ctx context.Context, rt, imageName, baseIm
 
 	// Get the base image digest.
 	var baseDigest string
-	if d, err := dockerInspectFormat(ctx, rt, baseImage, "{{index .RepoDigests 0}}"); err == nil && d != "" {
+	if d, err := c.dockerInspectFormat(ctx, baseImage, "{{index .RepoDigests 0}}"); err == nil && d != "" {
 		baseDigest = d
-	} else if id, err := dockerInspectFormat(ctx, rt, baseImage, "{{.Id}}"); err == nil {
+	} else if id, err := c.dockerInspectFormat(ctx, baseImage, "{{.Id}}"); err == nil {
 		baseDigest = id
 	} else {
 		slog.DebugContext(ctx, "md", "msg", "build needed: cannot get base image digest", "base", baseImage)
@@ -361,9 +361,9 @@ func (c *Client) imageBuildNeededSlow(ctx context.Context, rt, imageName, baseIm
 	isLocal := !strings.Contains(baseImage, "/")
 	if !isLocal {
 		slog.DebugContext(ctx, "md", "msg", "checking remote manifest digest", "base", baseImage)
-		storedManifest, err := dockerInspectFormat(ctx, rt, imageName, `{{index .Config.Labels "md.base_manifest_digest"}}`)
+		storedManifest, err := c.dockerInspectFormat(ctx, imageName, `{{index .Config.Labels "md.base_manifest_digest"}}`)
 		if err == nil && storedManifest != "" && storedManifest != "<no value>" {
-			remoteDigest, err := c.cachedRemoteManifestDigest(ctx, rt, baseImage, runtime.GOARCH)
+			remoteDigest, err := c.cachedRemoteManifestDigest(ctx, baseImage, runtime.GOARCH)
 			if err == nil && remoteDigest != storedManifest {
 				slog.DebugContext(ctx, "md", "msg", "build needed: remote manifest changed", "stored", storedManifest, "remote", remoteDigest)
 				return true
@@ -376,7 +376,7 @@ func (c *Client) imageBuildNeededSlow(ctx context.Context, rt, imageName, baseIm
 		return true
 	}
 
-	currentKey, err := dockerInspectFormat(ctx, rt, imageName, `{{index .Config.Labels "md.cache_key"}}`)
+	currentKey, err := c.dockerInspectFormat(ctx, imageName, `{{index .Config.Labels "md.cache_key"}}`)
 	if err != nil || currentKey == "<no value>" {
 		currentKey = ""
 	}
@@ -527,7 +527,7 @@ func (c *Client) buildSpecializedImage(ctx context.Context, stdout, stderr io.Wr
 	// A tag (":latest") does not imply a registry; only a "/" does.
 	isLocal := !strings.Contains(baseImage, "/")
 	if isLocal {
-		if _, err := runCmd(ctx, "", []string{c.Runtime, "image", "inspect", "--format", "{{.Id}}", baseImage}); err != nil {
+		if _, err := c.runCmd(ctx, "", []string{c.Runtime, "image", "inspect", "--format", "{{.Id}}", baseImage}); err != nil {
 			return fmt.Errorf("local image %s not found; build it first with 'md build-image'", baseImage)
 		}
 		if !quiet {
@@ -535,24 +535,24 @@ func (c *Client) buildSpecializedImage(ctx context.Context, stdout, stderr io.Wr
 		}
 	} else {
 		// Compare the local image ID before and after pull to detect changes.
-		idBefore, _ := runCmd(ctx, "", []string{c.Runtime, "image", "inspect", "--format", "{{.Id}}", baseImage})
+		idBefore, _ := c.runCmd(ctx, "", []string{c.Runtime, "image", "inspect", "--format", "{{.Id}}", baseImage})
 		if !quiet {
 			_, _ = fmt.Fprintf(stdout, "- Pulling base image %s ...\n", baseImage)
 		}
 		if quiet {
-			if _, err := runCmd(ctx, "", []string{c.Runtime, "pull", "--platform", "linux/" + arch, baseImage}); err != nil {
+			if _, err := c.runCmd(ctx, "", []string{c.Runtime, "pull", "--platform", "linux/" + arch, baseImage}); err != nil {
 				return cmdErrWithStderr("pulling base image", err)
 			}
 		} else {
-			if err := runCmdOut(ctx, "", []string{c.Runtime, "pull", "--platform", "linux/" + arch, baseImage}, stdout, stderr); err != nil {
+			if err := c.runCmdOut(ctx, "", []string{c.Runtime, "pull", "--platform", "linux/" + arch, baseImage}, stdout, stderr); err != nil {
 				return fmt.Errorf("pulling base image: %w", err)
 			}
 		}
-		idAfter, _ := runCmd(ctx, "", []string{c.Runtime, "image", "inspect", "--format", "{{.Id}}", baseImage})
+		idAfter, _ := c.runCmd(ctx, "", []string{c.Runtime, "image", "inspect", "--format", "{{.Id}}", baseImage})
 		if !quiet {
 			if idBefore != "" && idBefore == idAfter {
 				_, _ = fmt.Fprintf(stdout, "  Base image is up to date.\n")
-			} else if v := getImageVersionLabel(ctx, c.Runtime, baseImage); strings.HasPrefix(v, "v") {
+			} else if v := c.getImageVersionLabel(ctx, baseImage); strings.HasPrefix(v, "v") {
 				_, _ = fmt.Fprintf(stdout, "  Version: %s\n", v)
 			}
 		}
@@ -560,13 +560,13 @@ func (c *Client) buildSpecializedImage(ctx context.Context, stdout, stderr io.Wr
 
 	slog.DebugContext(ctx, "md", "msg", "pull complete, fetching base image digest")
 	// Get base image digest for label.
-	baseDigest, err := runCmd(ctx, "", []string{c.Runtime, "image", "inspect", "--format", "{{index .RepoDigests 0}}", baseImage})
+	baseDigest, err := c.runCmd(ctx, "", []string{c.Runtime, "image", "inspect", "--format", "{{index .RepoDigests 0}}", baseImage})
 	if err != nil || baseDigest == "" {
-		baseDigest, _ = runCmd(ctx, "", []string{c.Runtime, "image", "inspect", "--format", "{{.Id}}", baseImage})
+		baseDigest, _ = c.runCmd(ctx, "", []string{c.Runtime, "image", "inspect", "--format", "{{.Id}}", baseImage})
 	}
 	var manifestDigest string
 	if !isLocal {
-		manifestDigest, _ = getRemoteManifestDigest(ctx, c.Runtime, baseImage, arch)
+		manifestDigest, _ = c.getRemoteManifestDigest(ctx, baseImage, arch)
 	}
 
 	contextSHA, err := keysSHA(c.keysDir)
@@ -642,13 +642,13 @@ func (c *Client) buildSpecializedImage(ctx context.Context, stdout, stderr io.Wr
 	buildCmd = append(buildCmd, tmpDir)
 
 	if quiet {
-		if _, err := runCmd(ctx, "", buildCmd); err != nil {
+		if _, err := c.runCmd(ctx, "", buildCmd); err != nil {
 			buildErr := cmdErrWithStderr("building image", err)
 			if isStaleBuilderCacheErr(buildErr) {
-				if _, pruneErr := runCmd(ctx, "", []string{c.Runtime, "builder", "prune", "-f"}); pruneErr != nil {
+				if _, pruneErr := c.runCmd(ctx, "", []string{c.Runtime, "builder", "prune", "-f"}); pruneErr != nil {
 					return buildErr
 				}
-				if _, err2 := runCmd(ctx, "", buildCmd); err2 != nil {
+				if _, err2 := c.runCmd(ctx, "", buildCmd); err2 != nil {
 					return cmdErrWithStderr("building image", err2)
 				}
 				return nil
@@ -656,14 +656,14 @@ func (c *Client) buildSpecializedImage(ctx context.Context, stdout, stderr io.Wr
 			return buildErr
 		}
 	} else {
-		if err := runCmdOut(ctx, "", buildCmd, stdout, stderr); err != nil {
+		if err := c.runCmdOut(ctx, "", buildCmd, stdout, stderr); err != nil {
 			buildErr := fmt.Errorf("building image: %w", err)
 			if isStaleBuilderCacheErr(buildErr) {
 				_, _ = fmt.Fprintln(stdout, "- Stale BuildKit cache detected; pruning and retrying ...")
-				if _, pruneErr := runCmd(ctx, "", []string{c.Runtime, "builder", "prune", "-f"}); pruneErr != nil {
+				if _, pruneErr := c.runCmd(ctx, "", []string{c.Runtime, "builder", "prune", "-f"}); pruneErr != nil {
 					return buildErr
 				}
-				if err2 := runCmdOut(ctx, "", buildCmd, stdout, stderr); err2 != nil {
+				if err2 := c.runCmdOut(ctx, "", buildCmd, stdout, stderr); err2 != nil {
 					return fmt.Errorf("building image: %w", err2)
 				}
 				return nil
@@ -758,9 +758,8 @@ func (c *Container) launchContainer(ctx context.Context, stdout, stderr io.Write
 	if len(c.Repos) > 1000 {
 		return fmt.Errorf("too many repositories: %d (max 1000)", len(c.Repos))
 	}
-	rt := c.Runtime
 	var dockerArgs []string
-	dockerArgs = append(dockerArgs, rt, "run", "-d",
+	dockerArgs = append(dockerArgs, c.Runtime, "run", "-d",
 		"--name", c.Name, "--hostname", c.Name,
 		"-p", "127.0.0.1::22")
 
@@ -792,7 +791,7 @@ func (c *Container) launchContainer(ctx context.Context, stdout, stderr io.Write
 	//   profile so Chrome can create namespaces and sandboxed processes can
 	//   access /proc. Docker-only; podman uses SELinux and passing this
 	//   option can hang on kernel security filesystem access.
-	if rt != "podman" {
+	if c.Runtime != "podman" {
 		dockerArgs = append(dockerArgs, "--security-opt", "apparmor=unconfined")
 	}
 
@@ -801,7 +800,7 @@ func (c *Container) launchContainer(ctx context.Context, stdout, stderr io.Write
 	// start.sh running as root for privileged setup (groupmod, sshd, dbus).
 	// Rootless Docker is handled inside start.sh via /proc/self/uid_map
 	// detection since Docker lacks --userns=keep-id.
-	if isRootlessPodman(rt) {
+	if isRootlessPodman(c.Runtime) {
 		dockerArgs = append(dockerArgs, "--userns=keep-id", "--user", "0:0")
 	}
 
@@ -933,19 +932,19 @@ func (c *Container) launchContainer(ctx context.Context, stdout, stderr io.Write
 	dockerArgs = append(dockerArgs, imageName)
 
 	if opts.Quiet {
-		if _, err := runCmd(ctx, "", dockerArgs); err != nil {
+		if _, err := c.runCmd(ctx, "", dockerArgs); err != nil {
 			return fmt.Errorf("starting container: %w", err)
 		}
 	} else {
 		_, _ = fmt.Fprintf(stdout, "- Starting container %s ... ", c.Name)
-		if err := runCmdOut(ctx, "", dockerArgs, stdout, stderr); err != nil {
+		if err := c.runCmdOut(ctx, "", dockerArgs, stdout, stderr); err != nil {
 			_, _ = fmt.Fprintln(stdout)
 			return fmt.Errorf("starting container: %w", err)
 		}
 	}
 
 	// Get SSH port and creation time.
-	port, err := getHostPort(ctx, rt, c.Name, "22/tcp")
+	port, err := c.getHostPort(ctx, c.Name, "22/tcp")
 	if err != nil {
 		return fmt.Errorf("getting SSH port: %w", err)
 	}
@@ -953,7 +952,7 @@ func (c *Container) launchContainer(ctx context.Context, stdout, stderr io.Write
 	if !opts.Quiet {
 		_, _ = fmt.Fprintf(stdout, "- Found ssh port %d\n", port)
 	}
-	createdStr, err := runCmd(ctx, "", []string{rt, "inspect", "--format", "{{.Created}}", c.Name})
+	createdStr, err := c.runCmd(ctx, "", []string{c.Runtime, "inspect", "--format", "{{.Created}}", c.Name})
 	if err != nil {
 		return fmt.Errorf("getting container creation time: %w", err)
 	}
@@ -965,7 +964,7 @@ func (c *Container) launchContainer(ctx context.Context, stdout, stderr io.Write
 
 	// Get VNC port if display enabled.
 	if opts.Display {
-		vncPort, _ := getHostPort(ctx, rt, c.Name, "5901/tcp")
+		vncPort, _ := c.getHostPort(ctx, c.Name, "5901/tcp")
 		c.VNCPort = vncPort
 		if vncPort != 0 && !opts.Quiet {
 			_, _ = fmt.Fprintf(stdout, "- Found VNC port %d (display :1)\n", vncPort)
@@ -994,8 +993,8 @@ func (c *Container) launchContainer(ctx context.Context, stdout, stderr io.Write
 	if len(c.Repos) > 0 {
 		for _, r := range c.Repos {
 			rPath := r.MountedPath
-			_, _ = runCmd(ctx, r.GitRoot, []string{"git", "remote", "rm", c.Name})
-			if err := runCmdOut(ctx, r.GitRoot, []string{"git", "remote", "add", c.Name, "user@" + c.Name + ":" + rPath}, stdout, stderr); err != nil {
+			_, _ = c.runCmd(ctx, r.GitRoot, []string{"git", "remote", "rm", c.Name})
+			if err := c.runCmdOut(ctx, r.GitRoot, []string{"git", "remote", "add", c.Name, "user@" + c.Name + ":" + rPath}, stdout, stderr); err != nil {
 				return fmt.Errorf("adding git remote for %s: %w", rPath, err)
 			}
 		}
@@ -1057,7 +1056,7 @@ done`
 // and waits for Tailscale auth. Must be called after launchContainer.
 //
 // The task branch and default branch are pushed in parallel to reduce latency.
-func provisionContainer(ctx context.Context, stdout, stderr io.Writer, c *Container, opts *StartOpts) (*StartResult, error) {
+func (c *Container) provisionContainer(ctx context.Context, stdout, stderr io.Writer, opts *StartOpts) (*StartResult, error) {
 	result := &StartResult{}
 
 	// Try to read the Tailscale auth URL via docker exec before SSH is up,
@@ -1092,7 +1091,7 @@ func provisionContainer(ctx context.Context, stdout, stderr io.Writer, c *Contai
 				mp := shellQuote(c.Repos[repoIdx].MountedPath)
 				rBranch := shellQuote(c.Repos[repoIdx].Branch)
 
-				if err := runCmdOut(egCtx, "", c.SSHCommand(c.Name, "git init -q "+mp), stdout, stderr); err != nil {
+				if err := c.runCmdOut(egCtx, "", c.SSHCommand(c.Name, "git init -q "+mp), stdout, stderr); err != nil {
 					return fmt.Errorf("init repo %s in container: %w", c.Repos[repoIdx].MountedPath, err)
 				}
 
@@ -1104,13 +1103,13 @@ func provisionContainer(ctx context.Context, stdout, stderr io.Writer, c *Contai
 					resolveErr <- c.Repos[repoIdx].resolveDefaults(egCtx)
 				}()
 
-				if err := runCmdOut(egCtx, c.Repos[repoIdx].GitRoot, []string{
+				if err := c.runCmdOut(egCtx, c.Repos[repoIdx].GitRoot, []string{
 					"git", "push", "-q", c.Name,
 					c.Repos[repoIdx].Branch + ":refs/heads/base",
 				}, stdout, stderr); err != nil {
 					return fmt.Errorf("push repo %s: %w", c.Repos[repoIdx].MountedPath, err)
 				}
-				if err := runCmdOut(egCtx, "", c.SSHCommand(c.Name,
+				if err := c.runCmdOut(egCtx, "", c.SSHCommand(c.Name,
 					"cd "+mp+
 						" && git branch -q --track "+rBranch+" base"+
 						" && git switch -q "+rBranch), stdout, stderr); err != nil {
@@ -1129,10 +1128,10 @@ func provisionContainer(ctx context.Context, stdout, stderr io.Writer, c *Contai
 				}
 
 				// resolveDefaults ran above, so DefaultRemote is set.
-				originURL, err := runCmd(egCtx, c.Repos[repoIdx].GitRoot, []string{"git", "remote", "get-url", c.Repos[repoIdx].DefaultRemote})
+				originURL, err := c.runCmd(egCtx, c.Repos[repoIdx].GitRoot, []string{"git", "remote", "get-url", c.Repos[repoIdx].DefaultRemote})
 				if err == nil && originURL != "" {
 					httpsURL := convertGitURLToHTTPS(originURL)
-					_, _ = runCmd(egCtx, "", c.SSHCommand(c.Name, "cd "+mp+" && git remote add origin "+shellQuote(httpsURL)))
+					_, _ = c.runCmd(egCtx, "", c.SSHCommand(c.Name, "cd "+mp+" && git remote add origin "+shellQuote(httpsURL)))
 					if !opts.Quiet {
 						_, _ = fmt.Fprintf(stdout, "- Set %s origin to %s\n", c.Repos[repoIdx].MountedPath, httpsURL)
 					}

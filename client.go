@@ -212,7 +212,7 @@ func (c *Client) SCPCommand(extraArgs ...string) []string {
 
 // List returns running md containers sorted by name.
 func (c *Client) List(ctx context.Context) ([]*Container, error) {
-	out, err := runCmd(ctx, "", []string{c.Runtime, "ps", "--all", "--no-trunc", "--format", "{{json .}}"})
+	out, err := c.runCmd(ctx, "", []string{c.Runtime, "ps", "--all", "--no-trunc", "--format", "{{json .}}"})
 	if err != nil {
 		return nil, err
 	}
@@ -242,7 +242,7 @@ func (c *Client) List(ctx context.Context) ([]*Container, error) {
 // Get returns a single Container by name, or an error if not found.
 // Uses docker inspect for a targeted lookup.
 func (c *Client) Get(ctx context.Context, name string) (*Container, error) {
-	out, err := runCmd(ctx, "", []string{c.Runtime, "inspect", name})
+	out, err := c.runCmd(ctx, "", []string{c.Runtime, "inspect", name})
 	if err != nil {
 		return nil, fmt.Errorf("inspecting container %s: %w", name, err)
 	}
@@ -284,7 +284,7 @@ func (c *Client) BuildImage(ctx context.Context, stdout, stderr io.Writer) (retE
 		rootCmd = append(rootCmd, "--secret", "id=github_token,env=GITHUB_TOKEN")
 	}
 	rootCmd = append(rootCmd, rootCtx)
-	if err := runCmdOut(ctx, "", rootCmd, stdout, stderr); err != nil {
+	if err := c.runCmdOut(ctx, "", rootCmd, stdout, stderr); err != nil {
 		return err
 	}
 	_, _ = fmt.Fprintln(stdout, "- Root image built as 'md-root-local'.")
@@ -307,7 +307,7 @@ func (c *Client) BuildImage(ctx context.Context, stdout, stderr io.Writer) (retE
 		userCmd = append(userCmd, "--secret", "id=github_token,env=GITHUB_TOKEN")
 	}
 	userCmd = append(userCmd, userCtx)
-	if err := runCmdOut(ctx, "", userCmd, stdout, stderr); err != nil {
+	if err := c.runCmdOut(ctx, "", userCmd, stdout, stderr); err != nil {
 		return err
 	}
 	_, _ = fmt.Fprintln(stdout, "- User image built as 'md-user-local'.")
@@ -315,7 +315,7 @@ func (c *Client) BuildImage(ctx context.Context, stdout, stderr io.Writer) (retE
 	// Clean up BuildKit cache (--mount=type=cache volumes from Dockerfiles).
 	// These are only useful during the build itself; pruning avoids leaving
 	// orphaned resources on disk.
-	if _, err := runCmd(ctx, "", []string{c.Runtime, "builder", "prune", "-f"}); err != nil {
+	if _, err := c.runCmd(ctx, "", []string{c.Runtime, "builder", "prune", "-f"}); err != nil {
 		_, _ = fmt.Fprintf(stdout, "- Warning: pruning build cache: %v\n", err)
 	}
 	return nil
@@ -342,7 +342,7 @@ func (c *Client) Warmup(ctx context.Context, stdout, stderr io.Writer, opts *War
 		baseImage = DefaultBaseImage + ":latest"
 	}
 	imageName := userImageName(baseImage, activeCacheKey(opts.Caches, c.Home))
-	if !c.imageBuildNeeded(ctx, c.Runtime, imageName, baseImage, c.keysDir, c.Home, opts.Caches) {
+	if !c.imageBuildNeeded(ctx, imageName, baseImage, opts.Caches) {
 		if !opts.Quiet {
 			_, _ = fmt.Fprintf(stdout, "- Docker image %s is up to date, skipping build.\n", imageName)
 		}
@@ -361,7 +361,7 @@ func (c *Client) PruneImages(ctx context.Context, stdout, stderr io.Writer) ([]s
 	// List all md-specialized-* and md-fork-* images.
 	allImages := make(map[string]struct{})
 	for _, prefix := range []string{"md-specialized-*", "md-fork-*"} {
-		out, err := runCmd(ctx, "", []string{
+		out, err := c.runCmd(ctx, "", []string{
 			c.Runtime, "images", "--format", "{{.Repository}}", "--filter", "reference=" + prefix,
 		})
 		if err != nil {
@@ -378,7 +378,7 @@ func (c *Client) PruneImages(ctx context.Context, stdout, stderr io.Writer) ([]s
 	}
 
 	// Find images used by running md containers.
-	containerOut, err := runCmd(ctx, "", []string{
+	containerOut, err := c.runCmd(ctx, "", []string{
 		c.Runtime, "ps", "-a", "--filter", "name=^md-", "--format", "{{.Image}}",
 	})
 	if err != nil {
@@ -399,7 +399,7 @@ func (c *Client) PruneImages(ctx context.Context, stdout, stderr io.Writer) ([]s
 		if _, used := inUse[img]; used {
 			continue
 		}
-		if _, err := runCmd(ctx, "", []string{c.Runtime, "rmi", img}); err != nil {
+		if _, err := c.runCmd(ctx, "", []string{c.Runtime, "rmi", img}); err != nil {
 			_, _ = fmt.Fprintf(stdout, "- Warning: failed to remove %s: %v\n", img, err)
 			continue
 		}
@@ -408,7 +408,7 @@ func (c *Client) PruneImages(ctx context.Context, stdout, stderr io.Writer) ([]s
 	sort.Strings(removed)
 
 	// Clean up BuildKit build cache.
-	if _, err := runCmd(ctx, "", []string{c.Runtime, "builder", "prune", "-f"}); err != nil {
+	if _, err := c.runCmd(ctx, "", []string{c.Runtime, "builder", "prune", "-f"}); err != nil {
 		_, _ = fmt.Fprintf(stdout, "- Warning: pruning build cache: %v\n", err)
 	}
 	return removed, nil
@@ -419,7 +419,7 @@ func (c *Client) PruneImages(ctx context.Context, stdout, stderr io.Writer) ([]s
 func (c *Client) gatherGitMetadata(ctx context.Context, containerName, repo string) string {
 	r := shellQuote(repo)
 	cmd := "cd " + r + " && echo '=== Branch ===' && git rev-parse --abbrev-ref HEAD && echo && echo '=== Files Changed ===' && git diff --stat --cached base -- . && echo && echo '=== Recent Commits ===' && git log -5 base -- ."
-	out, _ := runCmd(ctx, "", c.SSHCommand(containerName, cmd))
+	out, _ := c.runCmd(ctx, "", c.SSHCommand(containerName, cmd))
 	return out
 }
 
@@ -427,7 +427,7 @@ func (c *Client) gatherGitMetadata(ctx context.Context, containerName, repo stri
 func (c *Client) gatherGitDiff(ctx context.Context, containerName, repo string) string {
 	r := shellQuote(repo)
 	cmd := "cd " + r + " && git diff --patience -U10 --cached base -- ."
-	out, _ := runCmd(ctx, "", c.SSHCommand(containerName, cmd))
+	out, _ := c.runCmd(ctx, "", c.SSHCommand(containerName, cmd))
 	return out
 }
 
