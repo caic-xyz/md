@@ -164,33 +164,31 @@ func detectRuntime() string {
 }
 
 // Container returns a Container handle for the given repos.
-// The first repo is the primary; the rest are pushed alongside it at
-// /home/user/src/<Name()> inside the container. When called with no repos,
-// the container has no associated git repository and a random name is
-// generated automatically.
-//
-// Container names use the repo basename and branch: md-<repo>-<branch>.
-// Launch appends a short random hex suffix only when the name is already
-// taken (e.g. two repos with the same basename from different directories
-// on the same branch).
-//
+// It populates MountedPath on each repo from GitRoot if not already set
+// (repos is mutated in place). The first repo is the primary. When called
+// with no repos, the container has no associated git repository and a
+// random name is generated automatically.
 // It doesn't start it, it is just a reference.
-func (c *Client) Container(repos ...Repo) *Container {
+func (c *Client) Container(repos ...Repo) (*Container, error) {
+	// Validate repos, auto-populating MountedPath from GitRoot.
+	for i := range repos {
+		if err := repos[i].Validate(); err != nil {
+			return nil, fmt.Errorf("repos[%d]: %w", i, err)
+		}
+	}
 	if len(repos) == 0 {
 		var buf [4]byte
 		_, _ = rand.Read(buf[:])
 		return &Container{
 			Client: c,
 			Name:   fmt.Sprintf("md-agent-%x", buf),
-		}
+		}, nil
 	}
-	primary := repos[0]
-	repoName := strings.TrimSuffix(filepath.Base(primary.GitRoot), ".git")
 	return &Container{
 		Client: c,
 		Repos:  repos,
-		Name:   containerName(repoName, primary.Branch),
-	}
+		Name:   containerName(repos[0].MountName(), repos[0].Branch),
+	}, nil
 }
 
 // SSHCommand returns the base SSH command args. Extra arguments (flags,
@@ -420,7 +418,7 @@ func (c *Client) PruneImages(ctx context.Context, stdout, stderr io.Writer) ([]s
 // the container. This data is always small.
 func (c *Client) gatherGitMetadata(ctx context.Context, containerName, repo string) string {
 	r := shellQuote(repo)
-	cmd := "cd ~/src/" + r + " && echo '=== Branch ===' && git rev-parse --abbrev-ref HEAD && echo && echo '=== Files Changed ===' && git diff --stat --cached base -- . && echo && echo '=== Recent Commits ===' && git log -5 base -- ."
+	cmd := "cd " + r + " && echo '=== Branch ===' && git rev-parse --abbrev-ref HEAD && echo && echo '=== Files Changed ===' && git diff --stat --cached base -- . && echo && echo '=== Recent Commits ===' && git log -5 base -- ."
 	out, _ := runCmd(ctx, "", c.SSHCommand(containerName, cmd))
 	return out
 }
@@ -428,7 +426,7 @@ func (c *Client) gatherGitMetadata(ctx context.Context, containerName, repo stri
 // gatherGitDiff runs SSH to get the full patience diff from the container.
 func (c *Client) gatherGitDiff(ctx context.Context, containerName, repo string) string {
 	r := shellQuote(repo)
-	cmd := "cd ~/src/" + r + " && git diff --patience -U10 --cached base -- ."
+	cmd := "cd " + r + " && git diff --patience -U10 --cached base -- ."
 	out, _ := runCmd(ctx, "", c.SSHCommand(containerName, cmd))
 	return out
 }

@@ -475,33 +475,75 @@ func TestRepo(t *testing.T) {
 				{
 					"basename only",
 					Repo{GitRoot: "/home/user/src/myrepo"},
-					"myrepo",
+					"/home/user/src/myrepo",
 				},
 				{
 					"basename with .git suffix",
 					Repo{GitRoot: "/home/user/src/myrepo.git"},
-					"myrepo",
+					"/home/user/src/myrepo",
 				},
 				{
-					"MountedName overrides basename",
-					Repo{GitRoot: "/home/user/src/myrepo", MountedName: "custom-name"},
-					"custom-name",
+					"MountedPath overrides basename",
+					Repo{GitRoot: "/home/user/src/myrepo", MountedPath: "/home/user/src/custom-name"},
+					"/home/user/src/custom-name",
 				},
 				{
-					"MountedName preserves slashes",
-					Repo{GitRoot: "/home/user/src/projects/foo/website", MountedName: "foo/website"},
-					"foo/website",
+					"MountedPath preserves slashes",
+					Repo{GitRoot: "/home/user/src/projects/foo/website", MountedPath: "/home/user/src/foo/website"},
+					"/home/user/src/foo/website",
 				},
 				{
-					"empty MountedName falls back to basename",
-					Repo{GitRoot: "/home/user/src/myrepo", MountedName: ""},
-					"myrepo",
+					"empty MountedPath falls back to basename",
+					Repo{GitRoot: "/home/user/src/myrepo", MountedPath: ""},
+					"/home/user/src/myrepo",
 				},
 			}
 			for _, tt := range tests {
 				t.Run(tt.name, func(t *testing.T) {
-					if got := tt.r.Name(); got != tt.want {
-						t.Errorf("Name() = %q, want %q", got, tt.want)
+					if err := tt.r.Validate(); err != nil {
+						t.Fatal(err)
+					}
+					if got := tt.r.MountedPath; got != tt.want {
+						t.Errorf("MountedPath = %q, want %q", got, tt.want)
+					}
+				})
+			}
+		})
+	})
+	t.Run("Validate", func(t *testing.T) {
+		t.Run("valid", func(t *testing.T) {
+			tests := []struct {
+				name string
+				r    Repo
+			}{
+				{"from basename", Repo{GitRoot: "/home/user/src/myrepo"}},
+				{"explicit absolute path", Repo{GitRoot: "/home/user/src/myrepo", MountedPath: "/home/user/src/custom"}},
+			}
+			for _, tt := range tests {
+				t.Run(tt.name, func(t *testing.T) {
+					if err := tt.r.Validate(); err != nil {
+						t.Fatal(err)
+					}
+				})
+			}
+		})
+		t.Run("error", func(t *testing.T) {
+			tests := []struct {
+				name string
+				r    Repo
+				want string
+			}{
+				{"empty GitRoot", Repo{}, "GitRoot is empty"},
+				{"relative MountedPath", Repo{GitRoot: "/home/user/src/myrepo", MountedPath: "custom"}, "must be an absolute POSIX path"},
+			}
+			for _, tt := range tests {
+				t.Run(tt.name, func(t *testing.T) {
+					err := tt.r.Validate()
+					if err == nil {
+						t.Fatal("expected error, got nil")
+					}
+					if !strings.Contains(err.Error(), tt.want) {
+						t.Errorf("error = %q, want containing %q", err.Error(), tt.want)
 					}
 				})
 			}
@@ -527,15 +569,18 @@ func TestValidateRepoNames(t *testing.T) {
 				},
 			},
 			{
-				"same basename but different MountedName",
+				"same basename but different MountedPath",
 				[]Repo{
-					{GitRoot: "/home/user/src/foo/website", MountedName: "foo/website"},
-					{GitRoot: "/home/user/src/bar/website", MountedName: "bar/website"},
+					{GitRoot: "/home/user/src/foo/website", MountedPath: "/home/user/src/foo/website"},
+					{GitRoot: "/home/user/src/bar/website", MountedPath: "/home/user/src/bar/website"},
 				},
 			},
 		}
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {
+			for i := range tt.repos {
+				tt.repos[i].Validate()
+			}
 				if err := validateRepoNames(tt.repos); err != nil {
 					t.Errorf("unexpected error: %v", err)
 				}
@@ -544,8 +589,8 @@ func TestValidateRepoNames(t *testing.T) {
 	})
 
 	t.Run("error", func(t *testing.T) {
-		// Two repos with the same basename but no MountedName disambiguation.
-		// Both foo/website and bar/website resolve to Name() == "website".
+		// Two repos with the same basename but no MountedPath disambiguation.
+		// Both resolve to MountedPath == "/home/user/src/website".
 		repos := []Repo{
 			{GitRoot: "/home/user/src/foo/website"},
 			{GitRoot: "/home/user/src/bar/website"},
@@ -557,8 +602,8 @@ func TestValidateRepoNames(t *testing.T) {
 		if !strings.Contains(err.Error(), "both mount as") {
 			t.Errorf("error should mention 'both mount as', got: %v", err)
 		}
-		if !strings.Contains(err.Error(), "MountedName") {
-			t.Errorf("error should mention 'MountedName', got: %v", err)
+		if !strings.Contains(err.Error(), "MountedPath") {
+			t.Errorf("error should mention 'MountedPath', got: %v", err)
 		}
 	})
 }

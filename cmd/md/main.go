@@ -314,7 +314,7 @@ func newContainer(ctx context.Context, cf *containerFlags, extraRepoSpecs []stri
 		return nil, err
 	}
 	repos = append(repos, extra...)
-	return c.Container(repos...), nil
+	return c.Container(repos...)
 }
 
 // resolveRepoSpecs resolves "path[:branch]" specs into Repos.
@@ -468,7 +468,7 @@ func printContainerSummary(ctx context.Context, ct *md.Container, r *md.StartRes
 	}
 	if len(ct.Repos) > 0 {
 		for _, r := range ct.Repos {
-			fmt.Printf("  > Repo %s on branch '%s'\n", r.Name(), r.Branch)
+			fmt.Printf("  > Repo %s on branch '%s'\n", filepath.Base(r.MountedPath), r.Branch)
 		}
 		if r != nil {
 			fmt.Printf("  > Host branch '%s' is mapped in the container as 'base'\n", ct.Repos[0].Branch)
@@ -635,7 +635,7 @@ func cmdList(ctx context.Context, args []string) error {
 		nameWidth = max(nameWidth, len(rows[i].name))
 		var parts []string
 		for _, r := range ct.Repos {
-			parts = append(parts, r.Name()+":"+r.Branch)
+			parts = append(parts, filepath.Base(r.MountedPath)+":"+r.Branch)
 		}
 		rows[i].repos = strings.Join(parts, ", ")
 		repoWidth = max(repoWidth, len(rows[i].repos))
@@ -785,7 +785,7 @@ func cmdPush(ctx context.Context, args []string) error {
 	}
 	var mu sync.Mutex
 	printBackup := func(i int, backup string) {
-		repoName := ct.Repos[i].Name()
+		repoName := filepath.Base(ct.Repos[i].MountedPath)
 		mu.Lock()
 		fmt.Printf("- %s: previous state saved as git branch: %s\n", repoName, backup)
 		mu.Unlock()

@@ -19,6 +19,7 @@ import (
 	"math/big"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -35,20 +36,16 @@ import (
 const DefaultBaseImage = "ghcr.io/caic-xyz/md-user"
 
 // Repo describes a git repository to push into a container.
-// It is mounted at /home/user/src/<Name()>.
 type Repo struct {
 	// GitRoot is the absolute path to the git repository root on the host.
 	GitRoot string `json:"git_root"`
 	// Branch is the git branch to push into the container.
 	Branch string `json:"branch"`
-	// MountedName overrides the basename used for mount path
-	// /home/user/src/<MountedName>. When empty, Name() falls back to
-	// filepath.Base(GitRoot). Use this to disambiguate repos with the
-	// same basename from different parent directories (e.g.
-	// foo/website and bar/website both map to "website" by default;
-	// set MountedName to "foo/website" and "bar/website" to keep
-	// them distinct inside the container).
-	MountedName string `json:"mounted_name,omitempty"`
+	// MountedPath is the absolute destination path inside the
+	// container, e.g. "/home/user/src/github/caic". When empty,
+	// populateMountPath fills it from filepath.Base(GitRoot).
+	// Callers may set it explicitly for disambiguation.
+	MountedPath string `json:"mounted_path,omitempty"`
 	// DefaultRemote is the host's default git remote.
 	DefaultRemote string `json:"default_remote,omitempty"`
 	// DefaultBranch is the default branch for DefaultRemote.
@@ -124,7 +121,8 @@ type StartResult struct {
 type Container struct {
 	*Client
 	// Repos are the git repositories in this container. Repos[0] is the
-	// primary; the rest are pushed alongside it at /home/user/src/<basename>.
+	// primary; the rest are pushed alongside it. Each repo's MountedPath
+	// gives the absolute destination path.
 	// Label: md.repos (base64-encoded JSON)
 	Repos []Repo
 	// Name is the Docker container name (e.g. "md-myrepo-main").
@@ -160,28 +158,47 @@ type Container struct {
 	tailscaleEphemeral bool
 }
 
-// Name returns the repository's mount name. If MountedName is set, it is
-// used directly (preserving slashes so /home/user/src/foo/website mirrors
-// the host layout). Otherwise it falls back to the basename of GitRoot,
-// stripping any .git suffix.
-func (r *Repo) Name() string {
-	if r.MountedName != "" {
-		return r.MountedName
+// populateMountPath sets MountedPath from GitRoot if not already set.
+func (r *Repo) populateMountPath() {
+	if r.MountedPath == "" {
+		r.MountedPath = "/home/user/src/" + strings.TrimSuffix(filepath.Base(r.GitRoot), ".git")
 	}
-	return strings.TrimSuffix(filepath.Base(r.GitRoot), ".git")
 }
 
-// validateRepoNames checks that all repos have unique mount names.
+// Validate normalizes the repo and returns an error for invalid values.
+func (r *Repo) Validate() error {
+	r.populateMountPath()
+	if r.GitRoot == "" {
+		return errors.New("Repo.GitRoot is empty")
+	}
+	if r.MountedPath == "" {
+		return errors.New("Repo.MountedPath could not be determined from GitRoot")
+	}
+	if !path.IsAbs(r.MountedPath) {
+		return fmt.Errorf("Repo.MountedPath must be an absolute POSIX path, got %q", r.MountedPath)
+	}
+	return nil
+}
+
+// MountName returns the repository name component used for Docker
+// container naming (e.g. "github-caic" for "/home/user/src/github/caic").
+// It extracts the portion after "/home/user/src/", replacing slashes
+// with hyphens.
+func (r *Repo) MountName() string {
+	return SanitizeDockerName(strings.TrimPrefix(r.MountedPath, "/home/user/src/"))
+}
+
+// validateRepoNames checks that all repos have unique mount paths.
 //
-// Two repos with the same Name() would share /home/user/src/<name> and
-// overwrite each other. Callers must set MountedName to disambiguate repos
+// Two repos with the same MountedPath would share a directory and
+// overwrite each other. Callers must set MountedPath to disambiguate repos
 // with the same basename from different parent directories.
 func validateRepoNames(repos []Repo) error {
 	seen := make(map[string]int, len(repos))
 	for i, r := range repos {
-		n := r.Name()
+		n := r.MountedPath
 		if j, dup := seen[n]; dup {
-			return fmt.Errorf("repos[%d] and repos[%d] both mount as %q; use MountedName to disambiguate", j, i, n)
+			return fmt.Errorf("repos[%d] and repos[%d] both mount as %q; set MountedPath to disambiguate", j, i, n)
 		}
 		seen[n] = i
 	}
@@ -259,9 +276,9 @@ func (c *Container) Launch(ctx context.Context, stdout, stderr io.Writer, opts *
 	if err := c.prepare(opts.AgentPaths); err != nil {
 		return err
 	}
-	// Validate unique mount names within this container. Two repos with
-	// the same Name() would share /home/user/src/<name> and overwrite
-	// each other's data. Callers must set MountedName to disambiguate.
+	// Validate unique mount paths within this container. Two repos with
+	// the same MountedPath would share a directory and overwrite each
+	// other's data. Set MountedPath explicitly to disambiguate.
 	if err := validateRepoNames(c.Repos); err != nil {
 		return err
 	}
@@ -338,7 +355,7 @@ func (c *Container) Run(ctx context.Context, stdout, stderr io.Writer, baseImage
 	var tmpName string
 	if len(c.Repos) > 0 {
 		tmpRepos = c.Repos[:1]
-		tmpName = fmt.Sprintf("md-%s-run-%x", SanitizeDockerName(c.Repos[0].Name()), buf)
+		tmpName = fmt.Sprintf("md-%s-run-%x", c.Repos[0].MountName(), buf)
 	} else {
 		tmpName = fmt.Sprintf("md-run-%x", buf)
 	}
@@ -368,7 +385,7 @@ func (c *Container) Run(ctx context.Context, stdout, stderr io.Writer, baseImage
 	cmdStr := strings.Join(command, " ")
 	var sshCmd string
 	if len(c.Repos) > 0 {
-		sshCmd = "cd ~/src/" + shellQuote(c.Repos[0].Name()) + " && " + cmdStr
+		sshCmd = "cd " + shellQuote(c.Repos[0].MountedPath) + " && " + cmdStr
 	} else {
 		sshCmd = cmdStr
 	}
@@ -396,8 +413,8 @@ func (c *Container) Revive(ctx context.Context, stdout, stderr io.Writer) error 
 	// absent (will be added) or point to the expected URL. A remote
 	// pointing elsewhere indicates a name collision — fail early.
 	for _, r := range c.Repos {
-		rName := r.Name()
-		wantURL := "user@" + c.Name + ":/home/user/src/" + rName
+		rPath := r.MountedPath
+		wantURL := "user@" + c.Name + ":" + rPath
 		got, err := gitutil.RunGit(ctx, r.GitRoot, "remote", "get-url", c.Name)
 		if err == nil {
 			if got != wantURL {
@@ -408,7 +425,7 @@ func (c *Container) Revive(ctx context.Context, stdout, stderr io.Writer) error 
 		}
 		// Remote doesn't exist, add it.
 		if err := runCmdOut(ctx, r.GitRoot, []string{"git", "remote", "add", c.Name, wantURL}, stdout, stderr); err != nil {
-			return fmt.Errorf("adding git remote for %s: %w", rName, err)
+			return fmt.Errorf("adding git remote for %s: %w", rPath, err)
 		}
 	}
 
@@ -577,10 +594,10 @@ func (c *Container) Push(ctx context.Context, stdout, stderr io.Writer, repoIdx 
 		return "", err
 	}
 	r := c.Repos[repoIdx]
-	repoName := shellQuote(r.Name())
+	mp := shellQuote(r.MountedPath)
 	branch := shellQuote(r.Branch)
 	// Commit any pending changes in the container.
-	_, _ = runCmd(ctx, "", c.SSHCommand(c.Name, "cd ~/src/"+repoName+" && git add . && (git diff --quiet HEAD -- . || git commit -q -m 'Backup before push')"))
+	_, _ = runCmd(ctx, "", c.SSHCommand(c.Name, "cd "+mp+" && git add . && (git diff --quiet HEAD -- . || git commit -q -m 'Backup before push')"))
 	// Refuse if there are pending local changes on the branch being pushed.
 	currentBranch, _ := gitutil.RunGit(ctx, r.GitRoot, "branch", "--show-current")
 	if currentBranch == r.Branch {
@@ -589,13 +606,13 @@ func (c *Container) Push(ctx context.Context, stdout, stderr io.Writer, repoIdx 
 		}
 	}
 	// Save a backup branch of the current container state.
-	containerCommit, _ := runCmd(ctx, "", c.SSHCommand(c.Name, "cd ~/src/"+repoName+" && git rev-parse HEAD"))
+	containerCommit, _ := runCmd(ctx, "", c.SSHCommand(c.Name, "cd "+mp+" && git rev-parse HEAD"))
 	backupBranch := "backup-" + time.Now().Format("20060102-150405")
-	_, _ = runCmd(ctx, "", c.SSHCommand(c.Name, "cd ~/src/"+repoName+" && git branch -f "+backupBranch+" "+shellQuote(containerCommit)))
+	_, _ = runCmd(ctx, "", c.SSHCommand(c.Name, "cd "+mp+" && git branch -f "+backupBranch+" "+shellQuote(containerCommit)))
 	if err := runCmdOut(ctx, r.GitRoot, []string{"git", "push", "-q", "-f", "--tags", c.Name, r.Branch + ":base"}, stdout, stderr); err != nil {
 		return "", err
 	}
-	if err := runCmdOut(ctx, "", c.SSHCommand(c.Name, "cd ~/src/"+repoName+" && git switch -q -C "+branch+" base && git branch --set-upstream-to=base"), stdout, stderr); err != nil {
+	if err := runCmdOut(ctx, "", c.SSHCommand(c.Name, "cd "+mp+" && git switch -q -C "+branch+" base && git branch --set-upstream-to=base"), stdout, stderr); err != nil {
 		return "", err
 	}
 	// Update the local remote-tracking ref so it reflects the pushed state.
@@ -620,16 +637,16 @@ func (c *Container) Fetch(ctx context.Context, stdout, stderr io.Writer, repoIdx
 		return err
 	}
 	r := c.Repos[repoIdx]
-	repoName := shellQuote(r.Name())
+	mp := shellQuote(r.MountedPath)
 	if err := c.SyncDefaultBranch(ctx, repoIdx); err != nil {
 		return err
 	}
 	// Check if there are uncommitted changes in the container.
-	if _, err := runCmd(ctx, "", c.SSHCommand(c.Name, "cd ~/src/"+repoName+" && git add . && git diff --quiet HEAD -- .")); err != nil {
+	if _, err := runCmd(ctx, "", c.SSHCommand(c.Name, "cd "+mp+" && git add . && git diff --quiet HEAD -- .")); err != nil {
 		commitMsg := "Pull from md"
 		if p != nil {
-			metadata := c.gatherGitMetadata(ctx, c.Name, r.Name())
-			diff := c.gatherGitDiff(ctx, c.Name, r.Name())
+			metadata := c.gatherGitMetadata(ctx, c.Name, r.MountedPath)
+			diff := c.gatherGitDiff(ctx, c.Name, r.MountedPath)
 			if msg, err := gitutil.GenerateCommitMsg(ctx, p, metadata, diff, nil); err != nil {
 				slog.WarnContext(ctx, "md", "msg", "failed to generate commit message", "err", err)
 			} else if msg != "" {
@@ -645,7 +662,7 @@ func (c *Container) Fetch(ctx context.Context, stdout, stderr io.Writer, repoIdx
 			gitUserEmail = "md@localhost"
 		}
 		gitAuthor := shellQuote(gitUserName + " <" + gitUserEmail + ">")
-		commitCmd := "cd ~/src/" + repoName + " && echo " + shellQuote(commitMsg) + " | git commit -a -q --author " + gitAuthor + " -F -"
+		commitCmd := "cd " + mp + " && echo " + shellQuote(commitMsg) + " | git commit -a -q --author " + gitAuthor + " -F -"
 		if err := runCmdOut(ctx, "", c.SSHCommand(c.Name, commitCmd), stdout, stderr); err != nil {
 			return fmt.Errorf("committing in container: %w", err)
 		}
@@ -717,14 +734,14 @@ func (c *Container) Diff(ctx context.Context, stdout, stderr io.Writer, repoIdx 
 		quotedArgs[i] = shellQuote(a)
 	}
 	repo := c.Repos[repoIdx]
-	repoName := shellQuote(repo.Name())
+	mp := shellQuote(repo.MountedPath)
 	sshArgs := c.SSHCommand("-q")
 	cmd := exec.CommandContext(ctx, sshArgs[0])
 	if f, ok := stdout.(*os.File); ok && term.IsTerminal(int(f.Fd())) {
 		sshArgs = append(sshArgs, "-t")
 		cmd.Stdin = os.Stdin
 	}
-	sshArgs = append(sshArgs, c.Name, "cd ~/src/"+repoName+" && git add . && git diff base "+strings.Join(quotedArgs, " ")+" -- .")
+	sshArgs = append(sshArgs, c.Name, "cd "+mp+" && git add . && git diff base "+strings.Join(quotedArgs, " ")+" -- .")
 	var err error
 	cmd.Path, err = exec.LookPath(sshArgs[0])
 	if err != nil {
@@ -859,7 +876,10 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 	}
 
 	// Create the new container handle with destination branches.
-	fork := c.Container(forkRepos...)
+	fork, err := c.Container(forkRepos...)
+	if err != nil {
+		return nil, fmt.Errorf("fork container: %w", err)
+	}
 
 	// Fetch current state from source container and create/reset local branches
 	// for repos inherited from the source.
@@ -868,7 +888,7 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 	}
 	for i, r := range c.Repos {
 		if err := runCmdOut(ctx, r.GitRoot, []string{"git", "fetch", "-q", c.Name, r.Branch}, stdout, stderr); err != nil {
-			return nil, fmt.Errorf("fetching %s from source container: %w", r.Name(), err)
+			return nil, fmt.Errorf("fetching %s from source container: %w", r.MountedPath, err)
 		}
 		fetchedRef := c.Name + "/" + r.Branch
 		curr, _ := gitutil.CurrentBranch(ctx, r.GitRoot)
@@ -958,7 +978,7 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 		_, _ = fmt.Fprintln(stdout, "- Setting up branches in forked container ...")
 	}
 	for i, r := range c.Repos {
-		repoName := shellQuote(r.Name())
+		mp := shellQuote(r.MountedPath)
 		oldBranch := shellQuote(r.Branch)
 		newBranch := shellQuote(fork.Repos[i].Branch)
 
@@ -966,13 +986,13 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 			"git", "push", "-q", "-f", fork.Name,
 			fork.Repos[i].Branch + ":refs/heads/base",
 		}, stdout, stderr); err != nil {
-			return nil, fmt.Errorf("pushing base for %s: %w", r.Name(), err)
+			return nil, fmt.Errorf("pushing base for %s: %w", r.MountedPath, err)
 		}
-		renameCmd := "cd ~/src/" + repoName +
+		renameCmd := "cd " + mp +
 			" && git branch -m " + oldBranch + " " + newBranch +
 			" && git branch --set-upstream-to=base"
 		if err := runCmdOut(ctx, "", fork.SSHCommand(fork.Name, renameCmd), stdout, stderr); err != nil {
-			return nil, fmt.Errorf("renaming branch for %s: %w", r.Name(), err)
+			return nil, fmt.Errorf("renaming branch for %s: %w", r.MountedPath, err)
 		}
 		if err := runCmdOut(ctx, fork.Repos[i].GitRoot, []string{
 			"git", "fetch", "-q", fork.Name, fork.Repos[i].Branch,
@@ -990,24 +1010,23 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 	nSrc := len(c.Repos)
 	for i, src := range extraRepos {
 		dst := forkRepos[nSrc+i]
-		rName := src.Name()
-		rRepo := shellQuote(rName)
+		mp := shellQuote(src.MountedPath)
 		dstBranch := shellQuote(dst.Branch)
 
-		if err := runCmdOut(ctx, "", fork.SSHCommand(fork.Name, "git init -q ~/src/"+rRepo), stdout, stderr); err != nil {
-			return nil, fmt.Errorf("init extra repo %s in container: %w", rName, err)
+		if err := runCmdOut(ctx, "", fork.SSHCommand(fork.Name, "git init -q "+mp), stdout, stderr); err != nil {
+			return nil, fmt.Errorf("init extra repo %s in container: %w", src.MountedPath, err)
 		}
 		if err := runCmdOut(ctx, src.GitRoot, []string{
 			"git", "push", "-q", fork.Name,
 			src.Branch + ":refs/heads/base",
 		}, stdout, stderr); err != nil {
-			return nil, fmt.Errorf("push extra repo %s: %w", rName, err)
+			return nil, fmt.Errorf("push extra repo %s: %w", src.MountedPath, err)
 		}
-		setupCmd := "cd ~/src/" + rRepo +
+		setupCmd := "cd " + mp +
 			" && git branch --track " + dstBranch + " base" +
 			" && git switch -q " + dstBranch
 		if err := runCmdOut(ctx, "", fork.SSHCommand(fork.Name, setupCmd), stdout, stderr); err != nil {
-			return nil, fmt.Errorf("setting up extra repo %s: %w", rName, err)
+			return nil, fmt.Errorf("setting up extra repo %s: %w", src.MountedPath, err)
 		}
 	}
 
@@ -1677,6 +1696,11 @@ func unmarshalContainer(data []byte) (Container, error) {
 				if err := json.Unmarshal(data, &ct.Repos); err != nil {
 					slog.Warn("md", "msg", "failed to unmarshal repos label", "err", err)
 				}
+				for i := range ct.Repos {
+					if err := ct.Repos[i].Validate(); err != nil {
+						return Container{}, fmt.Errorf("unmarshal repos[%d]: %w", i, err)
+					}
+				}
 			}
 		case "md.display":
 			ct.Display = v == "1"
@@ -1716,6 +1740,11 @@ func fillFromInspect(ct *Container, data []byte) error {
 			if data, err := base64.StdEncoding.DecodeString(v); err == nil {
 				if err := json.Unmarshal(data, &ct.Repos); err != nil {
 					slog.Warn("md", "msg", "failed to unmarshal repos label", "err", err)
+				}
+				for i := range ct.Repos {
+					if err := ct.Repos[i].Validate(); err != nil {
+						return fmt.Errorf("inspect repos[%d]: %w", i, err)
+					}
 				}
 			}
 		case "md.display":

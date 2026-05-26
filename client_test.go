@@ -104,15 +104,18 @@ func TestClient(t *testing.T) {
 			wantRepo string
 			wantName string
 		}{
-			{"regular", "/home/user/src/myrepo", "myrepo", "md-myrepo-main"},
-			{"bare", "/home/user/src/myrepo.git", "myrepo", "md-myrepo-main"},
-			{"no_git_suffix", "/home/user/src/myrepo.git.git", "myrepo.git", "md-myrepo.git-main"},
+			{"regular", "/home/user/src/myrepo", "/home/user/src/myrepo", "md-myrepo-main"},
+			{"bare", "/home/user/src/myrepo.git", "/home/user/src/myrepo", "md-myrepo-main"},
+			{"no_git_suffix", "/home/user/src/myrepo.git.git", "/home/user/src/myrepo.git", "md-myrepo.git-main"},
 		}
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {
-				ct := c.Container(Repo{GitRoot: tt.gitRoot, Branch: "main"})
-				if ct.Repos[0].Name() != tt.wantRepo {
-					t.Errorf("repoName() = %q, want %q", ct.Repos[0].Name(), tt.wantRepo)
+				ct, err := c.Container(Repo{GitRoot: tt.gitRoot, Branch: "main"})
+			if err != nil {
+				t.Fatal(err)
+			}
+				if ct.Repos[0].MountedPath != tt.wantRepo {
+					t.Errorf("MountedPath = %q, want %q", ct.Repos[0].MountedPath, tt.wantRepo)
 				}
 				if ct.Name != tt.wantName {
 					t.Errorf("Name = %q, want %q", ct.Name, tt.wantName)
