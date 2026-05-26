@@ -1026,7 +1026,7 @@ func waitForTCP(ctx context.Context, addr string, deadline time.Time) error {
 // A single docker exec runs a polling loop: jq validates the JSON file and
 // prints it compactly; if invalid or empty, sleep and retry. Go parses the
 // result with tailscaleUpStatus for validation.
-func tryReadTailscaleAuthURL(ctx context.Context, stdout io.Writer, c *Container) (string, error) {
+func (c *Container) tryReadTailscaleAuthURL(ctx context.Context, stdout io.Writer) (string, error) {
 	readCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
@@ -1034,16 +1034,14 @@ func tryReadTailscaleAuthURL(ctx context.Context, stdout io.Writer, c *Container
   if jq -ce '.' /run/md/tailscale_auth_url.json 2>/dev/null; then exit 0; fi
   sleep 0.1
 done`
-	args := []string{c.Runtime, "exec", c.Name, "sh", "-c", script}
-	cmd := exec.CommandContext(readCtx, args[0], args[1:]...)
-	out, err := cmd.Output()
-	if err != nil || len(out) == 0 {
+	out, err := c.runCmd(readCtx, "", []string{c.Runtime, "exec", c.Name, "sh", "-c", script})
+	if err != nil || out == "" {
 		return "", errors.New("timed out waiting for tailscale up --json output")
 	}
 
 	var status tailscaleUpStatus
-	if err := json.Unmarshal(out, &status); err != nil {
-		return "", fmt.Errorf("parsing tailscale up --json output: %w (%q)", err, string(out))
+	if err := json.Unmarshal([]byte(out), &status); err != nil {
+		return "", fmt.Errorf("parsing tailscale up --json output: %w (%q)", err, out)
 	}
 	if status.AuthURL == "" {
 		return "", errors.New("tailscale up --json had no AuthURL field")
@@ -1062,7 +1060,7 @@ func (c *Container) provisionContainer(ctx context.Context, stdout, stderr io.Wr
 	// Try to read the Tailscale auth URL via docker exec before SSH is up,
 	// so the user can authenticate even if SSHD is slow to start.
 	if opts.Tailscale && opts.TailscaleAuthKey == "" {
-		url, err := tryReadTailscaleAuthURL(ctx, stdout, c)
+		url, err := c.tryReadTailscaleAuthURL(ctx, stdout)
 		if err != nil {
 			return nil, fmt.Errorf("reading Tailscale auth URL: %w", err)
 		}
@@ -1075,7 +1073,7 @@ func (c *Container) provisionContainer(ctx context.Context, stdout, stderr io.Wr
 	if err := waitForTCP(ctx, addr, deadline); err != nil {
 		return nil, err
 	}
-	if err := waitForSSH(ctx, c, deadline); err != nil {
+	if err := c.waitForSSH(ctx, deadline); err != nil {
 		return nil, err
 	}
 
@@ -1183,6 +1181,7 @@ func (c *Container) sendEnv(ctx context.Context, stdout io.Writer, opts *StartOp
 	}
 	sshEnvArgs := c.SSHCommand(c.Name, "cat > /home/user/.env")
 	cmd := exec.CommandContext(ctx, sshEnvArgs[0], sshEnvArgs[1:]...)
+	cmd.Env = append(os.Environ(), c.env...)
 	cmd.Stdin = bytes.NewReader(envContent)
 	out, err := cmd.CombinedOutput()
 	if err != nil {

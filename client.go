@@ -60,6 +60,10 @@ type Client struct {
 	// https://tailscale.com/docs/features/ephemeral-nodes
 	TailscaleAPIKey string
 
+	// DigestCacheTTL controls how long remote image digest lookups are cached.
+	// When zero, caching is disabled and the registry is queried on every start.
+	DigestCacheTTL time.Duration
+
 	// keysDir is the directory containing SSH host keys and authorized_keys
 	// (~/.config/md/), used as a named Docker build context.
 	keysDir string
@@ -68,9 +72,9 @@ type Client struct {
 	// lacks the Include directive.
 	sshArgs []string
 
-	// DigestCacheTTL controls how long remote image digest lookups are cached.
-	// When zero, caching is disabled and the registry is queried on every start.
-	DigestCacheTTL time.Duration
+	// env holds extra environment variables appended to subprocess
+	// environments (podman, ssh, git, etc.).
+	env []string
 
 	// buildMu serializes image build operations (BuildImage, Warmup, and the
 	// build step inside Launch) so concurrent callers don't race on the same
@@ -91,19 +95,41 @@ type Client struct {
 // New creates a Client with global MD tool config and initialises SSH
 // infrastructure (keys, authorized_keys, config.d include).
 func New(stdout io.Writer) (*Client, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return nil, err
+	return newClient("", "", stdout)
+}
+
+// newClient is like New but allows overriding the home and runtime. When
+// home is empty, os.UserHomeDir() is used and XDG_* env vars are respected.
+// When home is explicit, all paths derive from it unconditionally. When rt
+// is empty, detectRuntime() is called.
+func newClient(home, rt string, stdout io.Writer) (*Client, error) {
+	fromEnv := home == ""
+	if fromEnv {
+		var err error
+		home, err = os.UserHomeDir()
+		if err != nil {
+			return nil, err
+		}
 	}
-	xdgConfigHome := envOr("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	xdgConfigHome := filepath.Join(home, ".config")
+	xdgDataHome := filepath.Join(home, ".local", "share")
+	xdgStateHome := filepath.Join(home, ".local", "state")
+	if fromEnv {
+		xdgConfigHome = envOr("XDG_CONFIG_HOME", xdgConfigHome)
+		xdgDataHome = envOr("XDG_DATA_HOME", xdgDataHome)
+		xdgStateHome = envOr("XDG_STATE_HOME", xdgStateHome)
+	}
+	if rt == "" {
+		rt = detectRuntime()
+	}
 	c := &Client{
 		Home:           home,
 		XDGConfigHome:  xdgConfigHome,
-		XDGDataHome:    envOr("XDG_DATA_HOME", filepath.Join(home, ".local", "share")),
-		XDGStateHome:   envOr("XDG_STATE_HOME", filepath.Join(home, ".local", "state")),
+		XDGDataHome:    xdgDataHome,
+		XDGStateHome:   xdgStateHome,
 		HostKeyPath:    filepath.Join(xdgConfigHome, "md", "ssh_host_ed25519_key"),
 		UserKeyPath:    filepath.Join(home, ".ssh", "md"),
-		Runtime:        detectRuntime(),
+		Runtime:        rt,
 		DigestCacheTTL: 12 * time.Hour,
 		digestCache:    make(map[string]remoteDigestEntry),
 	}
@@ -126,14 +152,10 @@ func (c *Client) setupSSH(stdout io.Writer) error {
 		}
 	}
 	sshDir := filepath.Join(c.Home, ".ssh")
-	missing, err := ensureSSHConfigInclude(stdout, sshDir)
-	if err != nil {
+	if err := ensureSSHConfigInclude(stdout, sshDir); err != nil {
 		return err
 	}
 	c.sshArgs = []string{"ssh"}
-	if missing {
-		c.sshArgs = append(c.sshArgs, "-o", "Include="+filepath.Join(sshDir, "config.d", "*.conf"))
-	}
 	if err := ensureEd25519Key(stdout, c.UserKeyPath, "md-user"); err != nil {
 		return err
 	}

@@ -418,7 +418,7 @@ func (c *Container) Revive(ctx context.Context, stdout, stderr io.Writer) error 
 	for _, r := range c.Repos {
 		rPath := r.MountedPath
 		wantURL := "user@" + c.Name + ":" + rPath
-		got, err := gitutil.RunGit(ctx, r.GitRoot, "remote", "get-url", c.Name)
+		got, err := c.runCmd(ctx, r.GitRoot, []string{"git", "remote", "get-url", c.Name})
 		if err == nil {
 			if got != wantURL {
 				return fmt.Errorf("git remote %s in %s points to %q, expected %q", c.Name, r.GitRoot, got, wantURL)
@@ -471,7 +471,7 @@ func (c *Container) Revive(ctx context.Context, stdout, stderr io.Writer) error 
 	if err := waitForTCP(ctx, addr, deadline); err != nil {
 		return fmt.Errorf("waiting for SSH port on %s: %w", c.Name, err)
 	}
-	if err := waitForSSH(ctx, c, deadline); err != nil {
+	if err := c.waitForSSH(ctx, deadline); err != nil {
 		return fmt.Errorf("SSH handshake on %s: %w", c.Name, err)
 	}
 
@@ -482,11 +482,9 @@ func (c *Container) Revive(ctx context.Context, stdout, stderr io.Writer) error 
 // waitForSSH runs a trivial SSH command in a retry loop until it succeeds or
 // the deadline is exceeded. This confirms SSH is fully operational after the
 // TCP socket opens (sshd may need a few more milliseconds to accept auth).
-func waitForSSH(ctx context.Context, c *Container, deadline time.Time) error {
-	args := c.SSHCommand(c.Name, "true")
+func (c *Container) waitForSSH(ctx context.Context, deadline time.Time) error {
 	for {
-		cmd := exec.CommandContext(ctx, args[0], args[1:]...)
-		if err := cmd.Run(); err == nil {
+		if _, err := c.runCmd(ctx, "", c.SSHCommand(c.Name, "true")); err == nil {
 			return nil
 		}
 		if ctx.Err() != nil {
@@ -520,7 +518,7 @@ func (c *Container) Purge(ctx context.Context, stdout, stderr io.Writer) error {
 	containerExists := containerErr == nil
 	var anyRemoteExists bool
 	for _, repo := range c.Repos {
-		if _, err := gitutil.RunGit(ctx, repo.GitRoot, "remote", "get-url", c.Name); err == nil {
+		if _, err := c.runCmd(ctx, repo.GitRoot, []string{"git", "remote", "get-url", c.Name}); err == nil {
 			anyRemoteExists = true
 			break
 		}
@@ -564,8 +562,8 @@ func (c *Container) Purge(ctx context.Context, stdout, stderr io.Writer) error {
 
 	var retErr error
 	for _, repo := range c.Repos {
-		if _, err := gitutil.RunGit(ctx, repo.GitRoot, "remote", "get-url", c.Name); err == nil {
-			if _, err := gitutil.RunGit(ctx, repo.GitRoot, "remote", "remove", c.Name); err != nil {
+		if _, err := c.runCmd(ctx, repo.GitRoot, []string{"git", "remote", "get-url", c.Name}); err == nil {
+			if _, err := c.runCmd(ctx, repo.GitRoot, []string{"git", "remote", "remove", c.Name}); err != nil {
 				retErr = errors.Join(retErr, err)
 			}
 		}
@@ -738,6 +736,7 @@ func (c *Container) Diff(ctx context.Context, stdout, stderr io.Writer, repoIdx 
 	mp := shellQuote(repo.MountedPath)
 	sshArgs := c.SSHCommand("-q")
 	cmd := exec.CommandContext(ctx, sshArgs[0])
+	cmd.Env = append(os.Environ(), c.env...)
 	if f, ok := stdout.(*os.File); ok && term.IsTerminal(int(f.Fd())) {
 		sshArgs = append(sshArgs, "-t")
 		cmd.Stdin = os.Stdin
@@ -959,6 +958,7 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 	sshEnvArgs := fork.SSHCommand(fork.Name, "cat > /home/user/.env")
 	for {
 		cmd := exec.CommandContext(ctx, sshEnvArgs[0], sshEnvArgs[1:]...)
+		cmd.Env = append(os.Environ(), fork.env...)
 		cmd.Stdin = bytes.NewReader(envContent)
 		out, err := cmd.CombinedOutput()
 		if err == nil {
@@ -1318,7 +1318,7 @@ func (c *Container) SyncDefaultBranch(ctx context.Context, repoIdx int) error {
 	if r.DefaultBranch == r.Branch {
 		return nil
 	}
-	if _, err := gitutil.RunGit(ctx, r.GitRoot, "push", "-q", "-f", c.Name, "refs/remotes/"+r.DefaultRemote+"/"+r.DefaultBranch+":refs/heads/"+r.DefaultBranch); err != nil {
+	if _, err := c.runCmd(ctx, r.GitRoot, []string{"git", "push", "-q", "-f", c.Name, "refs/remotes/" + r.DefaultRemote + "/" + r.DefaultBranch + ":refs/heads/" + r.DefaultBranch}); err != nil {
 		return fmt.Errorf("sync default branch %q: %w", r.DefaultBranch, err)
 	}
 	return nil
@@ -1329,7 +1329,7 @@ func (c *Container) checkContainerState(ctx context.Context) error {
 	containerExists := containerErr == nil
 	var remoteExists bool
 	if len(c.Repos) > 0 {
-		_, remoteErr := gitutil.RunGit(ctx, c.Repos[0].GitRoot, "remote", "get-url", c.Name)
+		_, remoteErr := c.runCmd(ctx, c.Repos[0].GitRoot, []string{"git", "remote", "get-url", c.Name})
 		remoteExists = remoteErr == nil
 	}
 	sshConfigDir := filepath.Join(c.Home, ".ssh", "config.d")
@@ -1382,9 +1382,9 @@ func (c *Container) ensureImage(ctx context.Context, stdout, stderr io.Writer, b
 func (c *Container) cleanup(ctx context.Context) {
 	removeSSHConfig(filepath.Join(c.Home, ".ssh", "config.d"), c.Name)
 	if len(c.Repos) > 0 {
-		_, _ = gitutil.RunGit(ctx, c.Repos[0].GitRoot, "remote", "remove", c.Name)
+		_, _ = c.runCmd(ctx, c.Repos[0].GitRoot, []string{"git", "remote", "remove", c.Name})
 		for _, repo := range c.Repos[1:] {
-			_, _ = gitutil.RunGit(ctx, repo.GitRoot, "remote", "remove", c.Name)
+			_, _ = c.runCmd(ctx, repo.GitRoot, []string{"git", "remote", "remove", c.Name})
 		}
 	}
 	_, _ = c.runCmd(ctx, "", []string{c.Runtime, "rm", "-f", "-v", c.Name})
@@ -1443,10 +1443,10 @@ func (c *Container) pushSubmodules(ctx context.Context, stdout, stderr io.Writer
 		// was never checked out (init but not update, or deinited).
 		// GIT_DIR fully decouples git from any worktree.
 		containerURL := "user@" + c.Name + ":" + containerModuleDir
-		if err := runGitDir(ctx, hostGitRoot, hostModuleDir, "push", "-q", containerURL, "--all"); err != nil {
+		if err := c.runGitDir(ctx, hostGitRoot, hostModuleDir, "push", "-q", containerURL, "--all"); err != nil {
 			return fmt.Errorf("push submodule refs %s: %w", relPath, err)
 		}
-		if err := runGitDir(ctx, hostGitRoot, hostModuleDir, "push", "-q", containerURL, "--tags"); err != nil {
+		if err := c.runGitDir(ctx, hostGitRoot, hostModuleDir, "push", "-q", containerURL, "--tags"); err != nil {
 			return fmt.Errorf("push submodule tags %s: %w", relPath, err)
 		}
 	}
@@ -1558,7 +1558,9 @@ func (c *Client) runCmd(ctx context.Context, dir string, args []string) (string,
 	slog.DebugContext(ctx, "md", "msg", "exec", "cmd", args)
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "LANG=C")
+	env := append(os.Environ(), c.env...)
+	env = append(env, "LANG=C")
+	cmd.Env = env
 	out, err := cmd.Output()
 	return strings.TrimSpace(string(out)), err
 }
@@ -1582,7 +1584,9 @@ func (c *Client) runCmdOut(ctx context.Context, dir string, args []string, stdou
 	slog.DebugContext(ctx, "md", "msg", "exec", "cmd", args)
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "LANG=C")
+	env := append(os.Environ(), c.env...)
+	env = append(env, "LANG=C")
+	cmd.Env = env
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	return cmd.Run()
@@ -1824,10 +1828,11 @@ func parseIOPair(s string) (uint64, uint64, error) {
 // (core.worktree). dir is the working directory and also used as
 // GIT_WORK_TREE so git never tries to chdir to a non-existent
 // submodule worktree.
-func runGitDir(ctx context.Context, dir, gitDir string, args ...string) error {
+func (c *Client) runGitDir(ctx context.Context, dir, gitDir string, args ...string) error {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "GIT_DIR="+gitDir, "GIT_WORK_TREE="+dir, "LANG=C")
+	cmd.Env = append(cmd.Env, c.env...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if _, err := cmd.Output(); err != nil {

@@ -8,7 +8,6 @@ package md
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -28,13 +27,8 @@ func hasImage(ctx context.Context, c *Client, name string) bool {
 // ensureImages ensures md-root-local and md-user-local exist. When they don't
 // and -short is passed, falls back to the remote default image instead of
 // building. Returns the base image to use.
-func ensureImages(t *testing.T, ctx context.Context, rt string) string {
-	client, err := New(io.Discard)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	client.Runtime = rt
-	if hasImage(ctx, client, "md-root-local") && hasImage(ctx, client, "md-user-local") {
+func ensureImages(t *testing.T, ctx context.Context, c *Client) string {
+	if hasImage(ctx, c, "md-root-local") && hasImage(ctx, c, "md-user-local") {
 		t.Log("local images already present, skipping build")
 		return "md-user-local"
 	}
@@ -43,16 +37,16 @@ func ensureImages(t *testing.T, ctx context.Context, rt string) string {
 		return DefaultBaseImage + ":latest"
 	}
 	t.Log("building local images (md-root-local → md-user-local) ...")
-	if err := client.BuildImage(ctx, io.Discard, io.Discard); err != nil {
+	if err := c.BuildImage(ctx, io.Discard, io.Discard); err != nil {
 		t.Fatalf("BuildImage: %v", err)
 	}
 	t.Log("images built successfully")
 	return "md-user-local"
 }
 
-// launchSmokeContainer allocates a container with the given name suffix,
-// cleans up leftovers, and calls Launch+Connect with -sudo.
-// Returns the live container (caller must Purge via t.Cleanup).
+// launchSmokeContainer creates a Container with the given name suffix and
+// calls Launch+Connect with -sudo. Returns the live container (caller must
+// Purge via t.Cleanup).
 func launchSmokeContainer(t *testing.T, ctx context.Context, c *Client, baseImage, nameSuffix string, caches ...CacheMount) *Container {
 	ct, err := c.Container()
 	if err != nil {
@@ -92,18 +86,6 @@ func launchSmokeContainer(t *testing.T, ctx context.Context, c *Client, baseImag
 // confirm rootless podman works inside, pull from registries, and exercise the
 // container lifecycle. Runs under each available container runtime.
 func TestSmoke(t *testing.T) {
-	// Use a temporary home so the test doesn't depend on ~/.config/md
-	// being writable (e.g. when running inside a read-only container).
-	// os.MkdirTemp + manual cleanup (not t.TempDir) so that rootless
-	// podman storage permission errors on cleanup don't fail the test.
-	tmpHome, err := os.MkdirTemp("", "md-smoke-home-*")
-	if err != nil {
-		t.Fatalf("MkdirTemp: %v", err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(tmpHome) })
-	t.Setenv("HOME", tmpHome)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmpHome, ".config"))
-
 	for _, rt := range []string{"docker", "podman"} {
 		t.Run(rt, func(t *testing.T) {
 			if _, err := exec.LookPath(rt); err != nil {
@@ -112,6 +94,45 @@ func TestSmoke(t *testing.T) {
 			if rt == "podman" && os.Getuid() == 0 {
 				t.Skip("skipping: rootless podman smoke test requires non-root user")
 			}
+			t.Parallel()
+
+			// Isolated temp home for SSH keys and podman storage.
+			// client.env propagates HOME to subprocesses so podman
+			// reads ~/.config/containers/storage.conf from here,
+			// and ssh reads ~/.ssh/config (Include directive).
+			tmp := t.TempDir()
+			tmpHome := filepath.Join(tmp, "home")
+			if err := os.MkdirAll(tmpHome, 0o700); err != nil {
+				t.Fatalf("create home: %v", err)
+			}
+			cfgDir := filepath.Join(tmpHome, ".config", "containers")
+			if err := os.MkdirAll(cfgDir, 0o700); err != nil {
+				t.Fatalf("create containers config dir: %v", err)
+			}
+			storageConf := "[storage]\n"
+			storageConf += "driver = \"overlay\"\n"
+			storageConf += "graphroot = \"" + filepath.ToSlash(tmpHome) + "/.local/share/containers/storage\"\n"
+			storageConf += "runroot = \"" + filepath.ToSlash(tmp) + "/runroot\"\n"
+			if err := os.WriteFile(filepath.Join(cfgDir, "storage.conf"), []byte(storageConf), 0o644); err != nil {
+				t.Fatalf("write storage.conf: %v", err)
+			}
+
+			client, err := newClient(tmpHome, rt, io.Discard)
+			if err != nil {
+				t.Fatalf("newClient: %v", err)
+			}
+			client.env = []string{
+				"HOME=" + tmpHome,
+				"XDG_CONFIG_HOME=" + filepath.Join(tmpHome, ".config"),
+			}
+
+			// podman system reset cleans up overlay storage before
+			// t.TempDir removal, avoiding permission errors.
+			t.Cleanup(func() {
+				ctx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 30*time.Second)
+				defer cancel()
+				_, _ = client.runCmd(ctx, "", []string{rt, "system", "reset", "-f"})
+			})
 
 			// Rootless podman adds --userns=keep-id, which puts the
 			// inner container in a user namespace. Nested newuidmap
@@ -121,13 +142,7 @@ func TestSmoke(t *testing.T) {
 			// Error: "newuidmap: write to uid_map failed: Operation not permitted"
 			nestedOK := rt != "podman" || os.Getuid() == 0
 
-			baseImage := ensureImages(t, t.Context(), rt)
-
-			client, err := New(io.Discard)
-			if err != nil {
-				t.Fatalf("New: %v", err)
-			}
-			client.Runtime = rt
+			baseImage := ensureImages(t, t.Context(), client)
 
 			t.Run("launch", func(t *testing.T) {
 				ct := launchSmokeContainer(t, t.Context(), client, baseImage, rt+"-launch")
@@ -178,43 +193,36 @@ func TestSmoke(t *testing.T) {
 				ct := launchSmokeContainer(t, t.Context(), client, baseImage, rt+"-nested")
 
 				t.Run("version", func(t *testing.T) {
-					args := ct.SSHCommand(ct.Name, "podman version --format '{{.Version}}'")
-					out, err := exec.CommandContext(t.Context(), args[0], args[1:]...).CombinedOutput()
+					out, err := ct.runCmd(t.Context(), "", ct.SSHCommand(ct.Name, "podman version --format '{{.Version}}'"))
 					if err != nil {
-						t.Fatalf("podman version: %v\noutput: %s", err, string(out))
+						t.Fatalf("podman version: %v", err)
 					}
-					if got := strings.TrimSpace(string(out)); got == "" {
+					if out == "" {
 						t.Fatal("podman returned empty version")
 					} else {
-						t.Logf("nested podman version: %s", got)
+						t.Logf("nested podman version: %s", out)
 					}
 				})
 
 				t.Run("info", func(t *testing.T) {
-					args := ct.SSHCommand(ct.Name, "podman info --format '{{.Host.RemoteSocket.Path}}'")
-					out, err := exec.CommandContext(t.Context(), args[0], args[1:]...).CombinedOutput()
+					out, err := ct.runCmd(t.Context(), "", ct.SSHCommand(ct.Name, "podman info --format '{{.Host.RemoteSocket.Path}}'"))
 					if err != nil {
-						t.Fatalf("podman info: %v\noutput: %s", err, string(out))
+						t.Fatalf("podman info: %v", err)
 					}
-					t.Logf("nested podman socket: %s", strings.TrimSpace(string(out)))
+					t.Logf("nested podman socket: %s", out)
 				})
 
 				t.Run("run_alpine", func(t *testing.T) {
 					subCtx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
 					defer cancel()
-					args := ct.SSHCommand(ct.Name, "podman run --rm docker.io/alpine:latest echo hello-from-nested-podman")
-					out, err := exec.CommandContext(subCtx, args[0], args[1:]...).Output()
+					out, err := ct.runCmd(subCtx, "", ct.SSHCommand(ct.Name, "podman run --rm docker.io/alpine:latest echo hello-from-nested-podman"))
 					if err != nil {
-						var exitErr *exec.ExitError
-						if errors.As(err, &exitErr) {
-							t.Fatalf("podman run alpine: %v\nstderr: %s", err, string(exitErr.Stderr))
-						}
 						t.Fatalf("podman run alpine: %v", err)
 					}
-					if got := strings.TrimSpace(string(out)); got != "hello-from-nested-podman" {
-						t.Fatalf("expected 'hello-from-nested-podman', got %q", got)
+					if out != "hello-from-nested-podman" {
+						t.Fatalf("expected 'hello-from-nested-podman', got %q", out)
 					}
-					t.Logf("nested podman run: %s", strings.TrimSpace(string(out)))
+					t.Logf("nested podman run: %s", out)
 				})
 
 				t.Run("run_alpine_id", func(t *testing.T) {
@@ -233,24 +241,22 @@ func TestSmoke(t *testing.T) {
 				t.Run("pull_busybox", func(t *testing.T) {
 					subCtx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 					defer cancel()
-					args := ct.SSHCommand(ct.Name, "podman pull docker.io/busybox:latest")
-					out, err := exec.CommandContext(subCtx, args[0], args[1:]...).CombinedOutput()
+					out, err := ct.runCmd(subCtx, "", ct.SSHCommand(ct.Name, "podman pull docker.io/busybox:latest"))
 					if err != nil {
-						t.Fatalf("podman pull busybox: %v\noutput: %s", err, string(out))
+						t.Fatalf("podman pull busybox: %v", err)
 					}
-					t.Logf("pull output: %s", strings.TrimSpace(string(out)))
+					t.Logf("pull output: %s", out)
 				})
 
 				t.Run("run_busybox", func(t *testing.T) {
 					subCtx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 					defer cancel()
-					args := ct.SSHCommand(ct.Name, "podman run --rm docker.io/busybox:latest echo ok")
-					out, err := exec.CommandContext(subCtx, args[0], args[1:]...).CombinedOutput()
+					out, err := ct.runCmd(subCtx, "", ct.SSHCommand(ct.Name, "podman run --rm docker.io/busybox:latest echo ok"))
 					if err != nil {
-						t.Fatalf("podman run busybox: %v\noutput: %s", err, string(out))
+						t.Fatalf("podman run busybox: %v", err)
 					}
-					if got := strings.TrimSpace(string(out)); got != "ok" {
-						t.Fatalf("expected 'ok', got %q", got)
+					if out != "ok" {
+						t.Fatalf("expected 'ok', got %q", out)
 					}
 				})
 			})
@@ -291,7 +297,7 @@ func TestSmoke(t *testing.T) {
 				for _, img := range []string{"md-root-local", "md-user-local"} {
 					if hasImage(subCtx, client, img) {
 						t.Logf("removing existing image %s for clean build test", img)
-						_, _ = client.runCmd(subCtx, "", []string{client.Runtime, "rmi", "-f", img})
+						_, _ = client.runCmd(subCtx, "", []string{rt, "rmi", "-f", img})
 					}
 				}
 
@@ -312,7 +318,7 @@ func TestSmoke(t *testing.T) {
 				}
 				for _, label := range labels {
 					out, err := client.runCmd(subCtx, "", []string{
-						client.Runtime, "image", "inspect", "--format",
+						rt, "image", "inspect", "--format",
 						fmt.Sprintf("{{index .Config.Labels %q}}", label), "md-user-local",
 					})
 					if err != nil {

@@ -21,10 +21,10 @@ Smoke tests verify end-to-end image build, container launch, cache injection, an
 
 ```bash
 # Fast: skip image builds, use pre-existing or remote images
-go test -tags=smoke -run TestSmoke -short -v -timeout 120m
+go test -tags=smoke -run TestSmoke -short -v -timeout 30m
 
 # Full: build images if needed, including clean rebuild test
-go test -tags=smoke -run TestSmoke -v -timeout 120m
+go test -tags=smoke -run TestSmoke -v -timeout 30m
 ```
 
 The test requires a container runtime (docker or podman) in PATH. Nested podman subtests are skipped under rootless podman due to user namespace stacking (`newuidmap` fails with `EPERM`).
