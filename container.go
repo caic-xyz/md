@@ -179,15 +179,6 @@ func (c *Container) SSHCommand(opts []string, cmd string) []string {
 	return args
 }
 
-// populateMountPath sets MountedPath from GitRoot if not already set.
-//
-//nolint:funcorder // private helper used only by Validate below
-func (r *Repo) populateMountPath() {
-	if r.MountedPath == "" {
-		r.MountedPath = "/home/user/src/" + strings.TrimSuffix(filepath.Base(r.GitRoot), ".git")
-	}
-}
-
 // Validate normalizes the repo and returns an error for invalid values.
 func (r *Repo) Validate() error {
 	r.populateMountPath()
@@ -242,50 +233,11 @@ func (r *Repo) resolveDefaults(ctx context.Context) error {
 	return nil
 }
 
-// prepare creates harness-specific config directories on the host so they can
-// be bind-mounted into the container. Always-mounted directories
-// (~/.config/agents, ~/.config/md) are created regardless.
-//
-//nolint:funcorder // called only by Launch below
-func (c *Container) prepare(paths []AgentPaths) error {
-	combined := mergePaths(paths)
-	dirs := make([]string, 0, len(combined.HomePaths)+len(combined.XDGConfigPaths)+len(combined.LocalSharePaths)+len(combined.LocalStatePaths))
-	for _, p := range combined.HomePaths {
-		dirs = append(dirs, filepath.Join(c.Home, p))
+// populateMountPath sets MountedPath from GitRoot if not already set.
+func (r *Repo) populateMountPath() {
+	if r.MountedPath == "" {
+		r.MountedPath = "/home/user/src/" + strings.TrimSuffix(filepath.Base(r.GitRoot), ".git")
 	}
-	for _, p := range combined.XDGConfigPaths {
-		dirs = append(dirs, filepath.Join(c.XDGConfigHome, p))
-	}
-	for _, p := range combined.LocalSharePaths {
-		dirs = append(dirs, filepath.Join(c.XDGDataHome, p))
-	}
-	for _, p := range combined.LocalStatePaths {
-		dirs = append(dirs, filepath.Join(c.XDGStateHome, p))
-	}
-	for _, d := range dirs {
-		if err := os.MkdirAll(d, 0o700); err != nil {
-			return err
-		}
-	}
-	// Ensure ~/.claude.json symlink when ~/.claude is being prepared.
-	for _, p := range combined.HomePaths {
-		if p == ".claude" {
-			claudeJSON := filepath.Join(c.Home, ".claude.json")
-			target := filepath.Join(c.Home, ".claude", "claude.json")
-			if fi, err := os.Lstat(claudeJSON); err != nil {
-				if !os.IsNotExist(err) {
-					return fmt.Errorf("checking claude.json symlink: %w", err)
-				}
-				if err := os.Symlink(target, claudeJSON); err != nil {
-					return fmt.Errorf("creating claude.json symlink: %w", err)
-				}
-			} else if fi.Mode()&os.ModeSymlink == 0 {
-				return fmt.Errorf("file %s exists but is not a symlink", claudeJSON)
-			}
-			break
-		}
-	}
-	return nil
 }
 
 // Launch prepares the image and starts the Docker container. It does NOT
@@ -495,32 +447,6 @@ func (c *Container) Revive(ctx context.Context, stdout, stderr io.Writer) error 
 
 	c.State = "running"
 	return nil
-}
-
-// waitForSSH runs a trivial SSH command in a retry loop until it succeeds or
-// the deadline is exceeded. This confirms SSH is fully operational after the
-// TCP socket opens (sshd may need a few more milliseconds to accept auth).
-//
-//nolint:funcorder // called only by provisionContainer below
-func (c *Container) waitForSSH(ctx context.Context, deadline time.Time) error {
-	var lastErr error
-	for {
-		sshArgs := c.SSHCommand(nil, "true")
-		cmd := exec.CommandContext(ctx, sshArgs[0], sshArgs[1:]...) //nolint:gosec // args are from trusted SSH config
-		cmd.Env = append(os.Environ(), c.env...)
-		if out, err := cmd.CombinedOutput(); err == nil {
-			return nil
-		} else {
-			lastErr = fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
-		}
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("timed out waiting for SSH on %s: %w", c.Name, lastErr)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
 }
 
 // Stop stops the container without removing it. The container can be
@@ -737,27 +663,6 @@ func (c *Container) Pull(ctx context.Context, stdout, stderr io.Writer, repoIdx 
 		}
 	}
 	return c.runCmdOut(ctx, r.GitRoot, []string{"git", "push", "-q", "-f", c.Name, r.Branch + ":base"}, stdout, stderr)
-}
-
-// gatherGitMetadata runs SSH commands to collect branch, stat, and log from
-// the container. This data is always small.
-//
-//nolint:funcorder // called only by execGitGather below
-func (c *Container) gatherGitMetadata(ctx context.Context, repo string) string {
-	r := shellQuote(repo)
-	cmd := "cd " + r + " && echo '=== Branch ===' && git rev-parse --abbrev-ref HEAD && echo && echo '=== Files Changed ===' && git diff --stat --cached base -- . && echo && echo '=== Recent Commits ===' && git log -5 base -- ."
-	out, _ := c.runCmd(ctx, "", c.SSHCommand(nil, cmd))
-	return out
-}
-
-// gatherGitDiff runs SSH to get the full patience diff from the container.
-//
-//nolint:funcorder // called only by execGitGather below
-func (c *Container) gatherGitDiff(ctx context.Context, repo string) string {
-	r := shellQuote(repo)
-	cmd := "cd " + r + " && git diff --patience -U10 --cached base -- ."
-	out, _ := c.runCmd(ctx, "", c.SSHCommand(nil, cmd))
-	return out
 }
 
 // Diff writes the diff between base and current for Repos[repoIdx] to stdout/stderr.
@@ -1375,6 +1280,91 @@ func (c *Container) SyncDefaultBranch(ctx context.Context, repoIdx int) error {
 		return fmt.Errorf("sync default branch %q: %w", r.DefaultBranch, err)
 	}
 	return nil
+}
+
+// prepare creates harness-specific config directories on the host so they can
+// be bind-mounted into the container. Always-mounted directories
+// (~/.config/agents, ~/.config/md) are created regardless.
+func (c *Container) prepare(paths []AgentPaths) error {
+	combined := mergePaths(paths)
+	dirs := make([]string, 0, len(combined.HomePaths)+len(combined.XDGConfigPaths)+len(combined.LocalSharePaths)+len(combined.LocalStatePaths))
+	for _, p := range combined.HomePaths {
+		dirs = append(dirs, filepath.Join(c.Home, p))
+	}
+	for _, p := range combined.XDGConfigPaths {
+		dirs = append(dirs, filepath.Join(c.XDGConfigHome, p))
+	}
+	for _, p := range combined.LocalSharePaths {
+		dirs = append(dirs, filepath.Join(c.XDGDataHome, p))
+	}
+	for _, p := range combined.LocalStatePaths {
+		dirs = append(dirs, filepath.Join(c.XDGStateHome, p))
+	}
+	for _, d := range dirs {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			return err
+		}
+	}
+	// Ensure ~/.claude.json symlink when ~/.claude is being prepared.
+	for _, p := range combined.HomePaths {
+		if p == ".claude" {
+			claudeJSON := filepath.Join(c.Home, ".claude.json")
+			target := filepath.Join(c.Home, ".claude", "claude.json")
+			if fi, err := os.Lstat(claudeJSON); err != nil {
+				if !os.IsNotExist(err) {
+					return fmt.Errorf("checking claude.json symlink: %w", err)
+				}
+				if err := os.Symlink(target, claudeJSON); err != nil {
+					return fmt.Errorf("creating claude.json symlink: %w", err)
+				}
+			} else if fi.Mode()&os.ModeSymlink == 0 {
+				return fmt.Errorf("file %s exists but is not a symlink", claudeJSON)
+			}
+			break
+		}
+	}
+	return nil
+}
+
+// waitForSSH runs a trivial SSH command in a retry loop until it succeeds or
+// the deadline is exceeded. This confirms SSH is fully operational after the
+// TCP socket opens (sshd may need a few more milliseconds to accept auth).
+func (c *Container) waitForSSH(ctx context.Context, deadline time.Time) error {
+	var lastErr error
+	for {
+		sshArgs := c.SSHCommand(nil, "true")
+		cmd := exec.CommandContext(ctx, sshArgs[0], sshArgs[1:]...) //nolint:gosec // args are from trusted SSH config
+		cmd.Env = append(os.Environ(), c.env...)
+		if out, err := cmd.CombinedOutput(); err == nil {
+			return nil
+		} else {
+			lastErr = fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timed out waiting for SSH on %s: %w", c.Name, lastErr)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// gatherGitMetadata runs SSH commands to collect branch, stat, and log from
+// the container. This data is always small.
+func (c *Container) gatherGitMetadata(ctx context.Context, repo string) string {
+	r := shellQuote(repo)
+	cmd := "cd " + r + " && echo '=== Branch ===' && git rev-parse --abbrev-ref HEAD && echo && echo '=== Files Changed ===' && git diff --stat --cached base -- . && echo && echo '=== Recent Commits ===' && git log -5 base -- ."
+	out, _ := c.runCmd(ctx, "", c.SSHCommand(nil, cmd))
+	return out
+}
+
+// gatherGitDiff runs SSH to get the full patience diff from the container.
+func (c *Container) gatherGitDiff(ctx context.Context, repo string) string {
+	r := shellQuote(repo)
+	cmd := "cd " + r + " && git diff --patience -U10 --cached base -- ."
+	out, _ := c.runCmd(ctx, "", c.SSHCommand(nil, cmd))
+	return out
 }
 
 func (c *Container) checkContainerState(ctx context.Context) error {

@@ -136,40 +136,6 @@ func newClient(home, rt string, stdout io.Writer) (*Client, error) {
 	return c, nil
 }
 
-// setupSSH ensures SSH keys, authorized_keys, and ~/.ssh/config.d exist.
-// Called once by New(); idempotent.
-//
-//nolint:funcorder // called only by newClient above
-func (c *Client) setupSSH(stdout io.Writer) error {
-	for _, d := range []string{
-		filepath.Dir(c.HostKeyPath), // ~/.config/md/
-		filepath.Join(c.Home, ".ssh", "config.d"),
-	} {
-		if err := os.MkdirAll(d, 0o700); err != nil {
-			return err
-		}
-	}
-	sshDir := filepath.Join(c.Home, ".ssh")
-	if err := ensureSSHConfigInclude(stdout, sshDir); err != nil {
-		return err
-	}
-	if err := ensureEd25519Key(stdout, c.UserKeyPath, "md-user"); err != nil {
-		return err
-	}
-	if err := ensureEd25519Key(stdout, c.HostKeyPath, "md-host"); err != nil {
-		return err
-	}
-	pubKey, err := os.ReadFile(c.UserKeyPath + ".pub")
-	if err != nil {
-		return err
-	}
-	authKeysPath := filepath.Join(c.keysDir, "authorized_keys")
-	if existing, _ := os.ReadFile(authKeysPath); bytes.Equal(existing, pubKey) { //nolint:gosec // path is from trusted config dir
-		return nil
-	}
-	return os.WriteFile(authKeysPath, pubKey, 0o600) //nolint:gosec // path is constructed from trusted config dir
-}
-
 // detectRuntime returns the container runtime to use.
 // Checks for docker, then podman in PATH.
 func detectRuntime() string {
@@ -412,6 +378,38 @@ func (c *Client) PruneImages(ctx context.Context, stdout, stderr io.Writer) ([]s
 		_, _ = fmt.Fprintf(stdout, "- Warning: pruning build cache: %v\n", err)
 	}
 	return removed, nil
+}
+
+// setupSSH ensures SSH keys, authorized_keys, and ~/.ssh/config.d exist.
+// Called once by New(); idempotent.
+func (c *Client) setupSSH(stdout io.Writer) error {
+	for _, d := range []string{
+		filepath.Dir(c.HostKeyPath), // ~/.config/md/
+		filepath.Join(c.Home, ".ssh", "config.d"),
+	} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			return err
+		}
+	}
+	sshDir := filepath.Join(c.Home, ".ssh")
+	if err := ensureSSHConfigInclude(stdout, sshDir); err != nil {
+		return err
+	}
+	if err := ensureEd25519Key(stdout, c.UserKeyPath, "md-user"); err != nil {
+		return err
+	}
+	if err := ensureEd25519Key(stdout, c.HostKeyPath, "md-host"); err != nil {
+		return err
+	}
+	pubKey, err := os.ReadFile(c.UserKeyPath + ".pub")
+	if err != nil {
+		return err
+	}
+	authKeysPath := filepath.Join(c.keysDir, "authorized_keys")
+	if existing, _ := os.ReadFile(authKeysPath); bytes.Equal(existing, pubKey) { //nolint:gosec // path is from trusted config dir
+		return nil
+	}
+	return os.WriteFile(authKeysPath, pubKey, 0o600) //nolint:gosec // path is constructed from trusted config dir
 }
 
 // Harness identifies an agent harness whose config directories are mounted
