@@ -64,7 +64,7 @@ func extractEmbeddedTree(prefix, tmpPattern string) (dir string, retErr error) {
 		}
 		target := filepath.Join(tmp, rel)
 		if d.IsDir() {
-			return os.MkdirAll(target, 0o755)
+			return os.MkdirAll(target, 0o755) //nolint:gosec // matches embedded filesystem permissions
 		}
 		data, err := rscFS.ReadFile(path)
 		if err != nil {
@@ -110,7 +110,7 @@ func prepareRootBuildContext() (string, error) {
 func keysSHA(keysDir string) (string, error) {
 	h := sha256.New()
 	for _, name := range []string{"ssh_host_ed25519_key", "ssh_host_ed25519_key.pub", "authorized_keys"} {
-		data, err := os.ReadFile(filepath.Join(keysDir, name))
+		data, err := os.ReadFile(filepath.Join(keysDir, name)) //nolint:gosec // name is from a hardcoded list
 		if err != nil {
 			return "", err
 		}
@@ -616,7 +616,7 @@ func (c *Client) buildSpecializedImage(ctx context.Context, stdout, stderr io.Wr
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	for _, name := range []string{"ssh_host_ed25519_key", "ssh_host_ed25519_key.pub", "authorized_keys"} {
-		data, err := os.ReadFile(filepath.Join(c.keysDir, name))
+		data, err := os.ReadFile(filepath.Join(c.keysDir, name)) //nolint:gosec // name is from a hardcoded list
 		if err != nil {
 			return fmt.Errorf("reading %s: %w", name, err)
 		}
@@ -628,7 +628,7 @@ func (c *Client) buildSpecializedImage(ctx context.Context, stdout, stderr io.Wr
 	df := generateDockerfile(baseImage, active, dirs, baseDigest, contextSHA, activeKey, manifestDigest)
 	slog.DebugContext(ctx, "md", "msg", "generated Dockerfile", "content", df)
 
-	if err := os.WriteFile(filepath.Join(tmpDir, "Dockerfile"), []byte(df), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(tmpDir, "Dockerfile"), []byte(df), 0o644); err != nil { //nolint:gosec // Dockerfile is ephemeral, world-readable is fine
 		return fmt.Errorf("writing Dockerfile: %w", err)
 	}
 
@@ -1181,7 +1181,7 @@ func (c *Container) sendEnv(ctx context.Context, stdout io.Writer, opts *StartOp
 		_, _ = fmt.Fprintln(stdout, "- sending .env into container ...")
 	}
 	sshEnvArgs := c.SSHCommand(nil, "cat > /home/user/.env")
-	cmd := exec.CommandContext(ctx, sshEnvArgs[0], sshEnvArgs[1:]...)
+	cmd := exec.CommandContext(ctx, sshEnvArgs[0], sshEnvArgs[1:]...) //nolint:gosec // args are from trusted SSH config
 	cmd.Env = append(os.Environ(), c.env...)
 	cmd.Stdin = bytes.NewReader(envContent)
 	out, err := cmd.CombinedOutput()

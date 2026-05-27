@@ -260,7 +260,7 @@ type hunkSpan struct {
 // inter-change context runs to at most target lines on each side.
 //
 // Returns the trimmed lines and the number of lines removed.
-func trimHunkContext(body []string, target int) ([]string, int) {
+func trimHunkContext(body []string, target int) (out []string, removedCount int) {
 	if len(body) == 0 {
 		return body, 0
 	}
@@ -283,8 +283,7 @@ func trimHunkContext(body []string, target int) ([]string, int) {
 		i = j
 	}
 
-	var out []string
-	removed := 0
+	var removed int
 	for si, s := range spans {
 		if !s.context {
 			out = append(out, body[s.start:s.end]...)
@@ -399,7 +398,7 @@ func splitDiff(diff string, maxChunk int) []string {
 // If a filter would eliminate all remaining files, it is skipped to ensure
 // there is always something to describe. Returns the kept files and all
 // removed file paths accumulated across applied filters.
-func progressiveFilter(files []fileDiff, filters []func(string) bool, budget int) ([]fileDiff, []string) {
+func progressiveFilter(files []fileDiff, filters []func(string) bool, budget int) (kept []fileDiff, removedPaths []string) {
 	var removed []string
 	for _, f := range filters {
 		kept, r := filterFiles(files, f)

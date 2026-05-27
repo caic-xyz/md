@@ -216,7 +216,7 @@ func findContainerAndRepo(ctx context.Context, cf *containerFlags) (*md.Containe
 	if err != nil {
 		return nil, 0, err
 	}
-	searchPath := ""
+	var searchPath string
 	if cf.repo != nil && *cf.repo != "" {
 		searchPath = *cf.repo
 	} else {
@@ -277,7 +277,7 @@ func newContainer(ctx context.Context, cf *containerFlags, extraRepoSpecs []stri
 	}
 	// Resolve primary repo.
 	var repos []md.Repo
-	primaryPath := ""
+	var primaryPath string
 	if cf.repo != nil && *cf.repo != "" {
 		primaryPath = *cf.repo
 	} else {
@@ -339,10 +339,10 @@ func resolveRepoSpecs(ctx context.Context, specs []string) ([]md.Repo, error) {
 
 // ensureGithubToken populates c.GithubToken from `gh auth token` if
 // GITHUB_TOKEN was not set. Returns true if a token is available.
-func ensureGithubToken(c *md.Client) bool {
+func ensureGithubToken(ctx context.Context, c *md.Client) bool {
 	if c.GithubToken == "" {
 		if _, err := exec.LookPath("gh"); err == nil {
-			if out, err := exec.Command("gh", "auth", "token").Output(); err == nil {
+			if out, err := exec.CommandContext(ctx, "gh", "auth", "token").Output(); err == nil {
 				c.GithubToken = strings.TrimSpace(string(out))
 			}
 		}
@@ -352,11 +352,11 @@ func ensureGithubToken(c *md.Client) bool {
 
 // resolveGithubToken returns the GitHub token to inject into the container
 // when github is true. Returns "" when false.
-func resolveGithubToken(c *md.Client, github bool) (string, error) {
+func resolveGithubToken(ctx context.Context, c *md.Client, github bool) (string, error) {
 	if !github {
 		return "", nil
 	}
-	if !ensureGithubToken(c) {
+	if !ensureGithubToken(ctx, c) {
 		return "", errors.New("--github requires a GitHub token; set GITHUB_TOKEN or authenticate with `gh auth login`")
 	}
 	return c.GithubToken, nil
@@ -409,7 +409,7 @@ func cmdStart(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	githubToken, err := resolveGithubToken(ct.Client, *github)
+	githubToken, err := resolveGithubToken(ctx, ct.Client, *github)
 	if err != nil {
 		return err
 	}
@@ -446,7 +446,7 @@ func cmdStart(ctx context.Context, args []string) error {
 	}
 	if !*noSSH {
 		sshArgs := ct.SSHCommand(nil, "")
-		cmd := exec.CommandContext(ctx, sshArgs[0], sshArgs[1:]...)
+		cmd := exec.CommandContext(ctx, sshArgs[0], sshArgs[1:]...) //nolint:gosec // args are from trusted SSH config
 		cmd.Stdin = os.Stdin
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
@@ -526,7 +526,7 @@ func cmdRun(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	githubToken, err := resolveGithubToken(ct.Client, *github)
+	githubToken, err := resolveGithubToken(ctx, ct.Client, *github)
 	if err != nil {
 		return err
 	}
@@ -682,15 +682,15 @@ func cmdList(ctx context.Context, args []string) error {
 			if ct.State == "running" {
 				fmt.Printf("  CPU: %.1f%%  Mem: %s/%s (%.1f%%)  PIDs: %d\n",
 					s.CPUPerc,
-					md.FormatBytes(int64(s.MemUsed)), md.FormatBytes(int64(s.MemLimit)),
+					md.FormatBytes(int64(s.MemUsed)), md.FormatBytes(int64(s.MemLimit)), //nolint:gosec // MemLimit fits in int64 in practice
 					s.MemPerc, s.PIDs)
 				diskStr := "n/a"
 				if s.DiskUsed >= 0 {
 					diskStr = md.FormatBytes(s.DiskUsed)
 				}
 				fmt.Printf("  Net: rx=%s tx=%s  Block: r=%s w=%s  Disk: %s\n",
-					md.FormatBytes(int64(s.NetRx)), md.FormatBytes(int64(s.NetTx)),
-					md.FormatBytes(int64(s.BlockRead)), md.FormatBytes(int64(s.BlockWrite)),
+					md.FormatBytes(int64(s.NetRx)), md.FormatBytes(int64(s.NetTx)), //nolint:gosec // network counters fit in int64 in practice
+					md.FormatBytes(int64(s.BlockRead)), md.FormatBytes(int64(s.BlockWrite)), //nolint:gosec // block counters fit in int64 in practice
 					diskStr)
 			} else if s.DiskUsed >= 0 {
 				fmt.Printf("  Disk: %s\n", md.FormatBytes(s.DiskUsed))
@@ -955,7 +955,7 @@ func cmdFork(ctx context.Context, args []string) error {
 			return err
 		}
 	}
-	githubToken, err := resolveGithubToken(sourceCt.Client, *github)
+	githubToken, err := resolveGithubToken(ctx, sourceCt.Client, *github)
 	if err != nil {
 		return err
 	}
@@ -991,7 +991,7 @@ func cmdFork(ctx context.Context, args []string) error {
 	}
 	if !*noSSH {
 		sshArgs := fork.SSHCommand(nil, "")
-		cmd := exec.CommandContext(ctx, sshArgs[0], sshArgs[1:]...)
+		cmd := exec.CommandContext(ctx, sshArgs[0], sshArgs[1:]...) //nolint:gosec // args are from trusted SSH config
 		cmd.Stdin = os.Stdin
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
@@ -1027,12 +1027,12 @@ func cmdVNC(ctx context.Context, args []string) error {
 
 	switch runtime.GOOS {
 	case "darwin":
-		return exec.Command("open", vncURL).Run()
+		return exec.CommandContext(ctx, "open", vncURL).Run() //nolint:gosec // vncURL is constructed from trusted port
 	case "linux":
-		if err := exec.Command("xdg-open", vncURL).Run(); err == nil {
+		if err := exec.CommandContext(ctx, "xdg-open", vncURL).Run(); err == nil { //nolint:gosec // vncURL is constructed from trusted port
 			return nil
 		}
-		if err := exec.Command("vncviewer", fmt.Sprintf("127.0.0.1:%d", vncPort)).Run(); err == nil {
+		if err := exec.CommandContext(ctx, "vncviewer", fmt.Sprintf("127.0.0.1:%d", vncPort)).Run(); err == nil { //nolint:gosec // vncPort is from trusted container
 			return nil
 		}
 		fmt.Println("\nNo VNC client found. Connect manually:")
@@ -1044,7 +1044,7 @@ func cmdVNC(ctx context.Context, args []string) error {
 		fmt.Println("  Or use any remote desktop client (Remmina, RealVNC, TigerVNC, etc.)")
 		return nil
 	case "windows":
-		return exec.Command("cmd", "/c", "start", vncURL).Run()
+		return exec.CommandContext(ctx, "cmd", "/c", "start", vncURL).Run() //nolint:gosec // vncURL is constructed from trusted port
 	default:
 		return fmt.Errorf("unsupported platform: %s", runtime.GOOS)
 	}
@@ -1101,7 +1101,7 @@ func cmdBuildImage(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	ensureGithubToken(c)
+	ensureGithubToken(ctx, c)
 	return c.BuildImage(ctx, os.Stdout, os.Stderr)
 }
 

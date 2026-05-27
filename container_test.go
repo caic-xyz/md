@@ -14,6 +14,7 @@ import (
 )
 
 func TestShellQuote(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		in   string
@@ -33,6 +34,7 @@ func TestShellQuote(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			if got := shellQuote(tt.in); got != tt.want {
 				t.Errorf("shellQuote(%q) = %q, want %q", tt.in, got, tt.want)
 			}
@@ -41,7 +43,9 @@ func TestShellQuote(t *testing.T) {
 }
 
 func TestUnmarshalContainer(t *testing.T) {
+	t.Parallel()
 	t.Run("valid", func(t *testing.T) {
+		t.Parallel()
 		raw := `{"Names":"md-repo-main","State":"running","CreatedAt":"2025-06-15 10:30:00 +0000 UTC"}`
 		ct, err := unmarshalContainer([]byte(raw))
 		if err != nil {
@@ -62,6 +66,7 @@ func TestUnmarshalContainer(t *testing.T) {
 		}
 	})
 	t.Run("with_labels", func(t *testing.T) {
+		t.Parallel()
 		reposData, _ := json.Marshal([]Repo{{GitRoot: "/home/user/repo", Branch: "main"}})
 		reposB64 := base64.StdEncoding.EncodeToString(reposData)
 		raw := `{"Names":"md-repo-main","State":"running","CreatedAt":"2025-06-15 10:30:00 +0000 UTC","Labels":"md.repos=` + reposB64 + `,other=ignored"}`
@@ -80,6 +85,7 @@ func TestUnmarshalContainer(t *testing.T) {
 		}
 	})
 	t.Run("no_labels", func(t *testing.T) {
+		t.Parallel()
 		raw := `{"Names":"md-repo-main","State":"running","CreatedAt":"2025-06-15 10:30:00 +0000 UTC","Labels":""}`
 		ct, err := unmarshalContainer([]byte(raw))
 		if err != nil {
@@ -90,6 +96,7 @@ func TestUnmarshalContainer(t *testing.T) {
 		}
 	})
 	t.Run("empty_repos", func(t *testing.T) {
+		t.Parallel()
 		// No-repo containers encode md.repos as an empty JSON array.
 		reposData, _ := json.Marshal([]Repo{})
 		reposB64 := base64.StdEncoding.EncodeToString(reposData)
@@ -103,6 +110,7 @@ func TestUnmarshalContainer(t *testing.T) {
 		}
 	})
 	t.Run("podman_rfc3339", func(t *testing.T) {
+		t.Parallel()
 		raw := `{"Names":"md-repo-main","State":"running","CreatedAt":"2025-06-15T10:30:00.123456789Z"}`
 		ct, err := unmarshalContainer([]byte(raw))
 		if err != nil {
@@ -114,6 +122,7 @@ func TestUnmarshalContainer(t *testing.T) {
 		}
 	})
 	t.Run("podman_rfc3339_no_frac", func(t *testing.T) {
+		t.Parallel()
 		raw := `{"Names":"md-repo-main","State":"running","CreatedAt":"2025-06-15T10:30:00Z"}`
 		ct, err := unmarshalContainer([]byte(raw))
 		if err != nil {
@@ -125,6 +134,7 @@ func TestUnmarshalContainer(t *testing.T) {
 		}
 	})
 	t.Run("podman_rfc3339_offset", func(t *testing.T) {
+		t.Parallel()
 		raw := `{"Names":"md-repo-main","State":"running","CreatedAt":"2025-06-15T10:30:00+02:00"}`
 		ct, err := unmarshalContainer([]byte(raw))
 		if err != nil {
@@ -136,6 +146,7 @@ func TestUnmarshalContainer(t *testing.T) {
 		}
 	})
 	t.Run("bad_created_at", func(t *testing.T) {
+		t.Parallel()
 		raw := `{"Names":"x","State":"running","CreatedAt":"not-a-date"}`
 		_, err := unmarshalContainer([]byte(raw))
 		if err == nil {
@@ -143,12 +154,14 @@ func TestUnmarshalContainer(t *testing.T) {
 		}
 	})
 	t.Run("empty_input", func(t *testing.T) {
+		t.Parallel()
 		_, err := unmarshalContainer([]byte(""))
 		if err == nil {
 			t.Fatal("expected error for empty input")
 		}
 	})
 	t.Run("bad_json", func(t *testing.T) {
+		t.Parallel()
 		_, err := unmarshalContainer([]byte("{not json}"))
 		if err == nil {
 			t.Fatal("expected error for bad JSON")
@@ -157,7 +170,9 @@ func TestUnmarshalContainer(t *testing.T) {
 }
 
 func TestParseStatsLine(t *testing.T) {
+	t.Parallel()
 	t.Run("normal", func(t *testing.T) {
+		t.Parallel()
 		line := `{"Name":"md-repo-main","CPUPerc":"1.23%","MemUsage":"150MiB / 7.5GiB","MemPerc":"1.95%","PIDs":"12","NetIO":"1.5kB / 500B","BlockIO":"10MB / 2MB"}`
 		s, name, err := parseStatsLine(line)
 		if err != nil {
@@ -177,6 +192,7 @@ func TestParseStatsLine(t *testing.T) {
 		}
 	})
 	t.Run("na_values", func(t *testing.T) {
+		t.Parallel()
 		// docker stats returns N/A when cgroup metrics are unavailable (e.g. DinD).
 		line := `{"Name":"md-repo-main","CPUPerc":"N/A","MemUsage":"N/A / N/A","MemPerc":"N/A","PIDs":"N/A","NetIO":"N/A / N/A","BlockIO":"N/A / N/A"}`
 		s, name, err := parseStatsLine(line)
@@ -191,6 +207,7 @@ func TestParseStatsLine(t *testing.T) {
 		}
 	})
 	t.Run("error", func(t *testing.T) {
+		t.Parallel()
 		tests := []struct {
 			name string
 			in   string
@@ -201,6 +218,7 @@ func TestParseStatsLine(t *testing.T) {
 		}
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {
+				t.Parallel()
 				_, _, err := parseStatsLine(tt.in)
 				if err == nil {
 					t.Errorf("parseStatsLine(%q) should return error", tt.in)
@@ -211,7 +229,9 @@ func TestParseStatsLine(t *testing.T) {
 }
 
 func TestParseByteSize(t *testing.T) {
+	t.Parallel()
 	t.Run("valid", func(t *testing.T) {
+		t.Parallel()
 		tests := []struct {
 			name string
 			in   string
@@ -230,6 +250,7 @@ func TestParseByteSize(t *testing.T) {
 		}
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {
+				t.Parallel()
 				got, err := parseByteSize(tt.in)
 				if err != nil {
 					t.Fatal(err)
@@ -242,6 +263,7 @@ func TestParseByteSize(t *testing.T) {
 	})
 
 	t.Run("error", func(t *testing.T) {
+		t.Parallel()
 		tests := []struct {
 			name string
 			in   string
@@ -253,6 +275,7 @@ func TestParseByteSize(t *testing.T) {
 		}
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {
+				t.Parallel()
 				_, err := parseByteSize(tt.in)
 				if err == nil {
 					t.Errorf("parseByteSize(%q) should return error", tt.in)
@@ -263,7 +286,9 @@ func TestParseByteSize(t *testing.T) {
 }
 
 func TestParseMemUsage(t *testing.T) {
+	t.Parallel()
 	t.Run("valid", func(t *testing.T) {
+		t.Parallel()
 		used, limit, err := parseMemUsage("150MiB / 7.5GiB")
 		if err != nil {
 			t.Fatal(err)
@@ -277,6 +302,7 @@ func TestParseMemUsage(t *testing.T) {
 	})
 
 	t.Run("na", func(t *testing.T) {
+		t.Parallel()
 		used, limit, err := parseMemUsage("N/A / N/A")
 		if err != nil {
 			t.Fatal(err)
@@ -287,6 +313,7 @@ func TestParseMemUsage(t *testing.T) {
 	})
 
 	t.Run("error", func(t *testing.T) {
+		t.Parallel()
 		tests := []struct {
 			name string
 			in   string
@@ -297,6 +324,7 @@ func TestParseMemUsage(t *testing.T) {
 		}
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {
+				t.Parallel()
 				_, _, err := parseMemUsage(tt.in)
 				if err == nil {
 					t.Errorf("parseMemUsage(%q) should return error", tt.in)
@@ -307,7 +335,9 @@ func TestParseMemUsage(t *testing.T) {
 }
 
 func TestParseIOPair(t *testing.T) {
+	t.Parallel()
 	t.Run("valid", func(t *testing.T) {
+		t.Parallel()
 		a, b, err := parseIOPair("1.5kB / 500B")
 		if err != nil {
 			t.Fatal(err)
@@ -321,6 +351,7 @@ func TestParseIOPair(t *testing.T) {
 	})
 
 	t.Run("na", func(t *testing.T) {
+		t.Parallel()
 		a, b, err := parseIOPair("N/A / N/A")
 		if err != nil {
 			t.Fatal(err)
@@ -331,6 +362,7 @@ func TestParseIOPair(t *testing.T) {
 	})
 
 	t.Run("error", func(t *testing.T) {
+		t.Parallel()
 		tests := []struct {
 			name string
 			in   string
@@ -341,6 +373,7 @@ func TestParseIOPair(t *testing.T) {
 		}
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {
+				t.Parallel()
 				_, _, err := parseIOPair(tt.in)
 				if err == nil {
 					t.Errorf("parseIOPair(%q) should return error", tt.in)
@@ -351,7 +384,9 @@ func TestParseIOPair(t *testing.T) {
 }
 
 func TestMergePaths(t *testing.T) {
+	t.Parallel()
 	t.Run("empty", func(t *testing.T) {
+		t.Parallel()
 		got := mergePaths(nil)
 		// Should return alwaysPaths base.
 		if len(got.XDGConfigPaths) < 2 {
@@ -360,6 +395,7 @@ func TestMergePaths(t *testing.T) {
 	})
 
 	t.Run("merge", func(t *testing.T) {
+		t.Parallel()
 		input := []AgentPaths{
 			{HomePaths: []string{".foo"}, XDGConfigPaths: []string{"bar"}},
 			{HomePaths: []string{".baz"}, LocalSharePaths: []string{"qux"}},
@@ -377,6 +413,7 @@ func TestMergePaths(t *testing.T) {
 	})
 
 	t.Run("does_not_mutate_global", func(t *testing.T) {
+		t.Parallel()
 		before := len(alwaysPaths.XDGConfigPaths)
 		_ = mergePaths([]AgentPaths{{XDGConfigPaths: []string{"extra1", "extra2"}}})
 		after := len(alwaysPaths.XDGConfigPaths)
@@ -387,6 +424,7 @@ func TestMergePaths(t *testing.T) {
 }
 
 func TestFillFromInspect(t *testing.T) {
+	t.Parallel()
 	// Both Docker and Podman inspect return a JSON array.
 	inspect := `[{
   "Name": "/md-caic-caic-3",
@@ -441,6 +479,7 @@ func TestFillFromInspect(t *testing.T) {
 }
 
 func TestParseCreatedAt(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		in      string
@@ -456,6 +495,7 @@ func TestParseCreatedAt(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			_, err := parseCreatedAt(tt.in)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("parseCreatedAt(%q) error = %v, wantErr %v", tt.in, err, tt.wantErr)
@@ -465,8 +505,11 @@ func TestParseCreatedAt(t *testing.T) {
 }
 
 func TestRepo(t *testing.T) {
+	t.Parallel()
 	t.Run("Name", func(t *testing.T) {
+		t.Parallel()
 		t.Run("valid", func(t *testing.T) {
+			t.Parallel()
 			tests := []struct {
 				name string
 				r    Repo
@@ -500,6 +543,7 @@ func TestRepo(t *testing.T) {
 			}
 			for _, tt := range tests {
 				t.Run(tt.name, func(t *testing.T) {
+					t.Parallel()
 					if err := tt.r.Validate(); err != nil {
 						t.Fatal(err)
 					}
@@ -511,7 +555,9 @@ func TestRepo(t *testing.T) {
 		})
 	})
 	t.Run("Validate", func(t *testing.T) {
+		t.Parallel()
 		t.Run("valid", func(t *testing.T) {
+			t.Parallel()
 			tests := []struct {
 				name string
 				r    Repo
@@ -522,6 +568,7 @@ func TestRepo(t *testing.T) {
 			}
 			for _, tt := range tests {
 				t.Run(tt.name, func(t *testing.T) {
+					t.Parallel()
 					if err := tt.r.Validate(); err != nil {
 						t.Fatal(err)
 					}
@@ -529,6 +576,7 @@ func TestRepo(t *testing.T) {
 			}
 		})
 		t.Run("error", func(t *testing.T) {
+			t.Parallel()
 			tests := []struct {
 				name string
 				r    Repo
@@ -540,6 +588,7 @@ func TestRepo(t *testing.T) {
 			}
 			for _, tt := range tests {
 				t.Run(tt.name, func(t *testing.T) {
+					t.Parallel()
 					err := tt.r.Validate()
 					if err == nil {
 						t.Fatal("expected error, got nil")
@@ -554,7 +603,9 @@ func TestRepo(t *testing.T) {
 }
 
 func TestValidateRepoNames(t *testing.T) {
+	t.Parallel()
 	t.Run("valid", func(t *testing.T) {
+		t.Parallel()
 		tests := []struct {
 			name  string
 			repos []Repo
@@ -580,6 +631,7 @@ func TestValidateRepoNames(t *testing.T) {
 		}
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {
+				t.Parallel()
 				for i := range tt.repos {
 					if err := tt.repos[i].Validate(); err != nil {
 						t.Fatal(err)
@@ -593,6 +645,7 @@ func TestValidateRepoNames(t *testing.T) {
 	})
 
 	t.Run("error", func(t *testing.T) {
+		t.Parallel()
 		// Two repos with the same basename but no MountedPath disambiguation.
 		// Both resolve to MountedPath == "/home/user/src/website".
 		repos := []Repo{

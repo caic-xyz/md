@@ -10,6 +10,7 @@ import (
 )
 
 func Test_extractPath(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		line string
@@ -25,6 +26,7 @@ func Test_extractPath(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			got := extractPath(tt.line)
 			if got != tt.want {
 				t.Errorf("extractPath(%q) = %q, want %q", tt.line, got, tt.want)
@@ -34,6 +36,7 @@ func Test_extractPath(t *testing.T) {
 }
 
 func Test_isTestFile(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		path string
@@ -48,6 +51,7 @@ func Test_isTestFile(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			got := isTestFile(tt.path)
 			if got != tt.want {
 				t.Errorf("isTestFile(%q) = %v, want %v", tt.path, got, tt.want)
@@ -57,6 +61,7 @@ func Test_isTestFile(t *testing.T) {
 }
 
 func Test_isDataFile(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		path string
@@ -71,6 +76,7 @@ func Test_isDataFile(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			got := isDataFile(tt.path)
 			if got != tt.want {
 				t.Errorf("isDataFile(%q) = %v, want %v", tt.path, got, tt.want)
@@ -80,6 +86,7 @@ func Test_isDataFile(t *testing.T) {
 }
 
 func Test_isGeneratedFile(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		path string
@@ -104,6 +111,7 @@ func Test_isGeneratedFile(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			got := isGeneratedFile(tt.path)
 			if got != tt.want {
 				t.Errorf("isGeneratedFile(%q) = %v, want %v", tt.path, got, tt.want)
@@ -113,6 +121,7 @@ func Test_isGeneratedFile(t *testing.T) {
 }
 
 func Test_filterDiff(t *testing.T) {
+	t.Parallel()
 	diff := strings.Join([]string{
 		"diff --git a/main.go b/main.go",
 		"--- a/main.go",
@@ -137,6 +146,7 @@ func Test_filterDiff(t *testing.T) {
 	}, "\n")
 
 	t.Run("filter test files", func(t *testing.T) {
+		t.Parallel()
 		got := filterDiff(diff, isTestFile)
 		if strings.Contains(got, "main_test.go") {
 			t.Error("expected test file to be removed")
@@ -150,6 +160,7 @@ func Test_filterDiff(t *testing.T) {
 	})
 
 	t.Run("filter data files", func(t *testing.T) {
+		t.Parallel()
 		got := filterDiff(diff, isDataFile)
 		if strings.Contains(got, "data.json") {
 			t.Error("expected data file to be removed")
@@ -160,6 +171,7 @@ func Test_filterDiff(t *testing.T) {
 	})
 
 	t.Run("no match", func(t *testing.T) {
+		t.Parallel()
 		got := filterDiff(diff, func(string) bool { return false })
 		if got != diff {
 			t.Error("expected no change when nothing excluded")
@@ -167,6 +179,7 @@ func Test_filterDiff(t *testing.T) {
 	})
 
 	t.Run("all match", func(t *testing.T) {
+		t.Parallel()
 		got := filterDiff(diff, func(string) bool { return true })
 		// Should be empty or just newlines.
 		if strings.Contains(got, "diff --git") {
@@ -176,7 +189,9 @@ func Test_filterDiff(t *testing.T) {
 }
 
 func Test_reduceDiffContext(t *testing.T) {
+	t.Parallel()
 	t.Run("single hunk long context", func(t *testing.T) {
+		t.Parallel()
 		// Build a hunk with 10 context lines before and after a change.
 		lines := make([]string, 0, 24)
 		lines = append(lines,
@@ -210,6 +225,7 @@ func Test_reduceDiffContext(t *testing.T) {
 	})
 
 	t.Run("already short", func(t *testing.T) {
+		t.Parallel()
 		diff := "diff --git a/f.go b/f.go\n--- a/f.go\n+++ b/f.go\n@@ -1,5 +1,5 @@\n ctx1\n ctx2\n-old\n+new\n ctx3\n"
 		got := reduceDiffContext(diff)
 		// Should be unchanged since context is already <= 3.
@@ -219,6 +235,7 @@ func Test_reduceDiffContext(t *testing.T) {
 	})
 
 	t.Run("empty diff", func(t *testing.T) {
+		t.Parallel()
 		got := reduceDiffContext("")
 		if got != "" {
 			t.Errorf("expected empty, got %q", got)
@@ -226,6 +243,7 @@ func Test_reduceDiffContext(t *testing.T) {
 	})
 
 	t.Run("multi file", func(t *testing.T) {
+		t.Parallel()
 		diff := strings.Join([]string{
 			"diff --git a/a.go b/a.go",
 			"--- a/a.go",
@@ -255,7 +273,9 @@ func Test_reduceDiffContext(t *testing.T) {
 }
 
 func Test_trimHunkContext(t *testing.T) {
+	t.Parallel()
 	t.Run("trim leading and trailing", func(t *testing.T) {
+		t.Parallel()
 		body := []string{
 			" a", " b", " c", " d", " e",
 			"-old",
@@ -274,6 +294,7 @@ func Test_trimHunkContext(t *testing.T) {
 	})
 
 	t.Run("empty body", func(t *testing.T) {
+		t.Parallel()
 		got, removed := trimHunkContext(nil, 3)
 		if len(got) != 0 || removed != 0 {
 			t.Errorf("expected empty result, got %v, %d", got, removed)
@@ -281,6 +302,7 @@ func Test_trimHunkContext(t *testing.T) {
 	})
 
 	t.Run("no context lines", func(t *testing.T) {
+		t.Parallel()
 		body := []string{"-a", "+b", "-c", "+d"}
 		got, removed := trimHunkContext(body, 3)
 		if removed != 0 {
@@ -293,7 +315,9 @@ func Test_trimHunkContext(t *testing.T) {
 }
 
 func Test_splitDiff(t *testing.T) {
+	t.Parallel()
 	t.Run("single file", func(t *testing.T) {
+		t.Parallel()
 		diff := "diff --git a/f.go b/f.go\n-old\n+new"
 		chunks := splitDiff(diff, 10000)
 		if len(chunks) != 1 {
@@ -302,6 +326,7 @@ func Test_splitDiff(t *testing.T) {
 	})
 
 	t.Run("multi file grouping", func(t *testing.T) {
+		t.Parallel()
 		parts := make([]string, 0, 10)
 		for i := range 5 {
 			parts = append(parts,
@@ -324,6 +349,7 @@ func Test_splitDiff(t *testing.T) {
 	})
 
 	t.Run("oversized single file", func(t *testing.T) {
+		t.Parallel()
 		diff := "diff --git a/huge.go b/huge.go\n" + strings.Repeat("x", 10000)
 		chunks := splitDiff(diff, 100)
 		if len(chunks) != 1 {
@@ -332,6 +358,7 @@ func Test_splitDiff(t *testing.T) {
 	})
 
 	t.Run("empty", func(t *testing.T) {
+		t.Parallel()
 		chunks := splitDiff("", 1000)
 		if len(chunks) != 0 {
 			t.Errorf("expected 0 chunks, got %d", len(chunks))
@@ -340,13 +367,16 @@ func Test_splitDiff(t *testing.T) {
 }
 
 func Test_filteredAnnotation(t *testing.T) {
+	t.Parallel()
 	t.Run("empty", func(t *testing.T) {
+		t.Parallel()
 		got := filteredAnnotation(nil)
 		if got != "" {
 			t.Errorf("expected empty, got %q", got)
 		}
 	})
 	t.Run("single file", func(t *testing.T) {
+		t.Parallel()
 		got := filteredAnnotation([]string{"foo_test.go"})
 		if !strings.Contains(got, "foo_test.go") {
 			t.Error("expected file name in annotation")
@@ -359,6 +389,7 @@ func Test_filteredAnnotation(t *testing.T) {
 		}
 	})
 	t.Run("multiple files", func(t *testing.T) {
+		t.Parallel()
 		got := filteredAnnotation([]string{"a_test.go", "b.yaml", "go.sum"})
 		if !strings.Contains(got, "a_test.go") || !strings.Contains(got, "b.yaml") || !strings.Contains(got, "go.sum") {
 			t.Errorf("expected all file names in annotation, got %q", got)
@@ -367,6 +398,7 @@ func Test_filteredAnnotation(t *testing.T) {
 }
 
 func Test_buildContext(t *testing.T) {
+	t.Parallel()
 	got := buildContext("meta\n", "diff\n")
 	want := "meta\n=== Changes ===\ndiff\n"
 	if got != want {
@@ -375,7 +407,9 @@ func Test_buildContext(t *testing.T) {
 }
 
 func Test_parseDiff(t *testing.T) {
+	t.Parallel()
 	t.Run("single file single hunk", func(t *testing.T) {
+		t.Parallel()
 		diff := strings.Join([]string{
 			"diff --git a/main.go b/main.go",
 			"--- a/main.go",
@@ -407,6 +441,7 @@ func Test_parseDiff(t *testing.T) {
 	})
 
 	t.Run("multiple files", func(t *testing.T) {
+		t.Parallel()
 		diff := strings.Join([]string{
 			"diff --git a/a.go b/a.go",
 			"--- a/a.go",
@@ -434,6 +469,7 @@ func Test_parseDiff(t *testing.T) {
 	})
 
 	t.Run("multiple hunks", func(t *testing.T) {
+		t.Parallel()
 		diff := strings.Join([]string{
 			"diff --git a/f.go b/f.go",
 			"--- a/f.go",
@@ -455,6 +491,7 @@ func Test_parseDiff(t *testing.T) {
 	})
 
 	t.Run("empty", func(t *testing.T) {
+		t.Parallel()
 		files := parseDiff("")
 		if len(files) != 0 {
 			t.Errorf("expected 0 files, got %d", len(files))
@@ -462,6 +499,7 @@ func Test_parseDiff(t *testing.T) {
 	})
 
 	t.Run("index and mode lines in header", func(t *testing.T) {
+		t.Parallel()
 		diff := strings.Join([]string{
 			"diff --git a/f.go b/f.go",
 			"index abc1234..def5678 100644",
@@ -482,6 +520,7 @@ func Test_parseDiff(t *testing.T) {
 }
 
 func TestRenderDiff(t *testing.T) {
+	t.Parallel()
 	tests := []string{
 		// Single file, single hunk.
 		strings.Join([]string{
@@ -521,6 +560,7 @@ func TestRenderDiff(t *testing.T) {
 }
 
 func TestRenderDiffLen(t *testing.T) {
+	t.Parallel()
 	diffs := []string{
 		"diff --git a/f.go b/f.go\n--- a/f.go\n+++ b/f.go\n@@ -1,2 +1,2 @@\n-old\n+new",
 		strings.Join([]string{
@@ -550,6 +590,7 @@ func TestRenderDiffLen(t *testing.T) {
 }
 
 func TestReduceFileDiffContext(t *testing.T) {
+	t.Parallel()
 	diff := strings.Join([]string{
 		"diff --git a/f.go b/f.go",
 		"--- a/f.go",
@@ -586,6 +627,7 @@ func TestReduceFileDiffContext(t *testing.T) {
 }
 
 func Test_filterFiles(t *testing.T) {
+	t.Parallel()
 	diff := strings.Join([]string{
 		"diff --git a/main.go b/main.go",
 		"--- a/main.go",
@@ -609,6 +651,7 @@ func Test_filterFiles(t *testing.T) {
 	files := parseDiff(diff)
 
 	t.Run("exclude tests", func(t *testing.T) {
+		t.Parallel()
 		kept, removed := filterFiles(files, isTestFile)
 		if len(kept) != 2 {
 			t.Errorf("kept = %d, want 2", len(kept))
@@ -619,6 +662,7 @@ func Test_filterFiles(t *testing.T) {
 	})
 
 	t.Run("exclude none", func(t *testing.T) {
+		t.Parallel()
 		kept, removed := filterFiles(files, func(string) bool { return false })
 		if len(kept) != 3 {
 			t.Errorf("kept = %d, want 3", len(kept))
@@ -629,6 +673,7 @@ func Test_filterFiles(t *testing.T) {
 	})
 
 	t.Run("exclude all", func(t *testing.T) {
+		t.Parallel()
 		kept, removed := filterFiles(files, func(string) bool { return true })
 		if len(kept) != 0 {
 			t.Errorf("kept = %d, want 0", len(kept))
@@ -640,6 +685,7 @@ func Test_filterFiles(t *testing.T) {
 }
 
 func TestProgressiveFilter(t *testing.T) {
+	t.Parallel()
 	makeTestOnlyDiff := func() []fileDiff {
 		return parseDiff(strings.Join([]string{
 			"diff --git a/foo_test.go b/foo_test.go",
@@ -658,6 +704,7 @@ func TestProgressiveFilter(t *testing.T) {
 	}
 
 	t.Run("skip filter when all files would be removed", func(t *testing.T) {
+		t.Parallel()
 		files := makeTestOnlyDiff()
 		// A very small budget forces the filter to be applied.
 		kept, removed := progressiveFilter(files, []func(string) bool{isTestFile}, 0)
@@ -670,6 +717,7 @@ func TestProgressiveFilter(t *testing.T) {
 	})
 
 	t.Run("filter applied when some files remain", func(t *testing.T) {
+		t.Parallel()
 		files := parseDiff(strings.Join([]string{
 			"diff --git a/main.go b/main.go",
 			"--- a/main.go",
@@ -695,6 +743,7 @@ func TestProgressiveFilter(t *testing.T) {
 	})
 
 	t.Run("no filter needed when diff fits budget", func(t *testing.T) {
+		t.Parallel()
 		files := makeTestOnlyDiff()
 		kept, removed := progressiveFilter(files, []func(string) bool{isTestFile}, 1_000_000)
 		if len(kept) != len(files) {
@@ -707,7 +756,9 @@ func TestProgressiveFilter(t *testing.T) {
 }
 
 func TestSplitFiles(t *testing.T) {
+	t.Parallel()
 	t.Run("single chunk", func(t *testing.T) {
+		t.Parallel()
 		files := parseDiff(strings.Join([]string{
 			"diff --git a/f.go b/f.go",
 			"--- a/f.go",
@@ -723,6 +774,7 @@ func TestSplitFiles(t *testing.T) {
 	})
 
 	t.Run("multiple chunks", func(t *testing.T) {
+		t.Parallel()
 		parts := make([]string, 0, 10)
 		for i := range 5 {
 			parts = append(parts,
@@ -743,6 +795,7 @@ func TestSplitFiles(t *testing.T) {
 	})
 
 	t.Run("empty", func(t *testing.T) {
+		t.Parallel()
 		chunks := splitFiles(nil, 1000)
 		if len(chunks) != 0 {
 			t.Errorf("expected 0 chunks, got %d", len(chunks))
@@ -750,6 +803,7 @@ func TestSplitFiles(t *testing.T) {
 	})
 
 	t.Run("directory grouping", func(t *testing.T) {
+		t.Parallel()
 		// Files from the same directory should end up in the same chunk
 		// even if the input order is interleaved.
 		diff := strings.Join([]string{

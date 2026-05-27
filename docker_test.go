@@ -15,6 +15,7 @@ import (
 )
 
 func TestFormatBytes(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		in   int64
 		want string
@@ -35,6 +36,7 @@ func TestFormatBytes(t *testing.T) {
 }
 
 func TestFormatCount(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		in   int64
 		want string
@@ -55,6 +57,7 @@ func TestFormatCount(t *testing.T) {
 }
 
 func TestResolveHostPath(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		path, home, want string
 	}{
@@ -74,8 +77,9 @@ func TestResolveHostPath(t *testing.T) {
 }
 
 func TestDirStats(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(dir, "sub"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(dir, "sub"), 0o750); err != nil {
 		t.Fatal(err)
 	}
 	files := []struct {
@@ -86,7 +90,7 @@ func TestDirStats(t *testing.T) {
 		{"sub/c.txt", "foo"},
 	}
 	for _, f := range files {
-		if err := os.WriteFile(filepath.Join(dir, f.name), []byte(f.content), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, f.name), []byte(f.content), 0o644); err != nil { //nolint:gosec // test data, world-readable is fine
 			t.Fatal(err)
 		}
 	}
@@ -106,18 +110,20 @@ func TestDirStats(t *testing.T) {
 }
 
 func TestKeysSHA(t *testing.T) {
+	t.Parallel()
 	keysDir := t.TempDir()
 	for _, f := range []struct{ name, content string }{
 		{"ssh_host_ed25519_key", "hostkey"},
 		{"ssh_host_ed25519_key.pub", "hostkey.pub"},
 		{"authorized_keys", "authkeys"},
 	} {
-		if err := os.WriteFile(filepath.Join(keysDir, f.name), []byte(f.content), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(keysDir, f.name), []byte(f.content), 0o644); err != nil { //nolint:gosec // test data
 			t.Fatal(err)
 		}
 	}
 
 	t.Run("deterministic", func(t *testing.T) {
+		t.Parallel()
 		got1, err := keysSHA(keysDir)
 		if err != nil {
 			t.Fatal(err)
@@ -132,11 +138,12 @@ func TestKeysSHA(t *testing.T) {
 	})
 
 	t.Run("changes_with_keys", func(t *testing.T) {
+		t.Parallel()
 		sha1, err := keysSHA(keysDir)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(keysDir, "authorized_keys"), []byte("different"), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(keysDir, "authorized_keys"), []byte("different"), 0o644); err != nil { //nolint:gosec // test data
 			t.Fatal(err)
 		}
 		sha2, err := keysSHA(keysDir)
@@ -150,17 +157,21 @@ func TestKeysSHA(t *testing.T) {
 }
 
 func TestCacheSpecKey(t *testing.T) {
+	t.Parallel()
 	t.Run("nil_returns_empty", func(t *testing.T) {
+		t.Parallel()
 		if got := cacheSpecKey(nil); got != "" {
 			t.Errorf("cacheSpecKey(nil) = %q, want \"\"", got)
 		}
 	})
 	t.Run("empty_returns_empty", func(t *testing.T) {
+		t.Parallel()
 		if got := cacheSpecKey([]CacheMount{}); got != "" {
 			t.Errorf("cacheSpecKey([]) = %q, want \"\"", got)
 		}
 	})
 	t.Run("non_empty_returns_hex", func(t *testing.T) {
+		t.Parallel()
 		cm := []CacheMount{{Name: "go-mod", HostPath: "~/go/pkg/mod", ContainerPath: "/home/user/go/pkg/mod"}}
 		got := cacheSpecKey(cm)
 		if len(got) != 16 {
@@ -168,6 +179,7 @@ func TestCacheSpecKey(t *testing.T) {
 		}
 	})
 	t.Run("order_independent", func(t *testing.T) {
+		t.Parallel()
 		a := []CacheMount{
 			{Name: "go-mod", ContainerPath: "/home/user/go/pkg/mod"},
 			{Name: "go-build", ContainerPath: "/home/user/.cache/go-build"},
@@ -181,6 +193,7 @@ func TestCacheSpecKey(t *testing.T) {
 		}
 	})
 	t.Run("different_specs_differ", func(t *testing.T) {
+		t.Parallel()
 		a := cacheSpecKey([]CacheMount{{Name: "go-mod", ContainerPath: "/home/user/go/pkg/mod"}})
 		b := cacheSpecKey([]CacheMount{{Name: "cargo", ContainerPath: "/home/user/.cargo/registry"}})
 		if a == b {
@@ -188,6 +201,7 @@ func TestCacheSpecKey(t *testing.T) {
 		}
 	})
 	t.Run("shallow_differs_from_recursive", func(t *testing.T) {
+		t.Parallel()
 		a := cacheSpecKey([]CacheMount{{Name: "android-keys", ContainerPath: "/home/user/.android"}})
 		b := cacheSpecKey([]CacheMount{{Name: "android-keys", ContainerPath: "/home/user/.android", Shallow: true}})
 		if a == b {
@@ -197,9 +211,11 @@ func TestCacheSpecKey(t *testing.T) {
 }
 
 func TestResolveCaches(t *testing.T) {
+	t.Parallel()
 	t.Run("existing_cache_resolved", func(t *testing.T) {
+		t.Parallel()
 		cacheDir := t.TempDir()
-		if err := os.WriteFile(filepath.Join(cacheDir, "file.txt"), []byte("data"), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(cacheDir, "file.txt"), []byte("data"), 0o644); err != nil { //nolint:gosec // test data
 			t.Fatal(err)
 		}
 
@@ -223,6 +239,7 @@ func TestResolveCaches(t *testing.T) {
 	})
 
 	t.Run("missing_cache_skipped", func(t *testing.T) {
+		t.Parallel()
 		caches := []CacheMount{{
 			Name:          "missing",
 			HostPath:      "/nonexistent/path/that/does/not/exist",
@@ -239,6 +256,7 @@ func TestResolveCaches(t *testing.T) {
 	})
 
 	t.Run("mount_paths_included", func(t *testing.T) {
+		t.Parallel()
 		mountPaths := []string{"/home/user/.amp", "/home/user/.claude"}
 		_, dirs, activeKey := resolveCaches(nil, "/home/user", mountPaths)
 
@@ -253,6 +271,7 @@ func TestResolveCaches(t *testing.T) {
 	})
 
 	t.Run("no_caches_no_mount_paths", func(t *testing.T) {
+		t.Parallel()
 		active, dirs, activeKey := resolveCaches(nil, "/home/user", nil)
 		if len(active) != 0 {
 			t.Errorf("active = %v, want empty", active)
@@ -266,18 +285,19 @@ func TestResolveCaches(t *testing.T) {
 	})
 
 	t.Run("shallow_copies_only_files", func(t *testing.T) {
+		t.Parallel()
 		cacheDir := t.TempDir()
 		// Create top-level files and a subdirectory with a file.
-		if err := os.WriteFile(filepath.Join(cacheDir, "debug.keystore"), []byte("ks"), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(cacheDir, "debug.keystore"), []byte("ks"), 0o644); err != nil { //nolint:gosec // test data
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(cacheDir, "adbkey"), []byte("key"), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(cacheDir, "adbkey"), []byte("key"), 0o644); err != nil { //nolint:gosec // test data
 			t.Fatal(err)
 		}
-		if err := os.MkdirAll(filepath.Join(cacheDir, "avd", "Pixel_8"), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Join(cacheDir, "avd", "Pixel_8"), 0o750); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(cacheDir, "avd", "Pixel_8", "config.ini"), []byte("big"), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(cacheDir, "avd", "Pixel_8", "config.ini"), []byte("big"), 0o644); err != nil { //nolint:gosec // test data
 			t.Fatal(err)
 		}
 
@@ -308,9 +328,10 @@ func TestResolveCaches(t *testing.T) {
 	})
 
 	t.Run("shallow_skipped_when_no_files", func(t *testing.T) {
+		t.Parallel()
 		cacheDir := t.TempDir()
 		// Only a subdirectory, no top-level files.
-		if err := os.MkdirAll(filepath.Join(cacheDir, "avd"), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Join(cacheDir, "avd"), 0o750); err != nil {
 			t.Fatal(err)
 		}
 
@@ -327,6 +348,7 @@ func TestResolveCaches(t *testing.T) {
 	})
 
 	t.Run("activeKey_differs_from_requested_when_dir_missing", func(t *testing.T) {
+		t.Parallel()
 		requested := []CacheMount{{
 			Name:          "missing",
 			HostPath:      "/nonexistent/path",
@@ -341,7 +363,9 @@ func TestResolveCaches(t *testing.T) {
 }
 
 func TestGenerateDockerfile(t *testing.T) {
+	t.Parallel()
 	t.Run("no_caches_no_dirs", func(t *testing.T) {
+		t.Parallel()
 		got := generateDockerfile("mybase:latest", nil, nil, "sha256:abc", "ctxsha", "", "")
 		if !strings.Contains(got, "FROM mybase:latest\n") {
 			t.Error("missing FROM line")
@@ -361,6 +385,7 @@ func TestGenerateDockerfile(t *testing.T) {
 	})
 
 	t.Run("recursive_cache", func(t *testing.T) {
+		t.Parallel()
 		active := []activeCM{{
 			cm: CacheMount{Name: "go-mod", ContainerPath: "/home/user/go/pkg/mod"},
 		}}
@@ -374,6 +399,7 @@ func TestGenerateDockerfile(t *testing.T) {
 	})
 
 	t.Run("shallow_cache", func(t *testing.T) {
+		t.Parallel()
 		active := []activeCM{{
 			cm:    CacheMount{Name: "android-keys", ContainerPath: "/home/user/.android"},
 			files: []string{"debug.keystore", "adbkey"},
@@ -388,6 +414,7 @@ func TestGenerateDockerfile(t *testing.T) {
 	})
 
 	t.Run("filename_with_spaces", func(t *testing.T) {
+		t.Parallel()
 		active := []activeCM{{
 			cm:    CacheMount{Name: "keys", ContainerPath: "/home/user/.keys"},
 			files: []string{"my key.pem"},
@@ -400,6 +427,7 @@ func TestGenerateDockerfile(t *testing.T) {
 	})
 
 	t.Run("dir_with_spaces", func(t *testing.T) {
+		t.Parallel()
 		dirs := []string{"/home/user/my cache"}
 		got := generateDockerfile("base:v1", nil, dirs, "", "", "", "")
 		if !strings.Contains(got, "'/home/user/my cache'") {
@@ -408,6 +436,7 @@ func TestGenerateDockerfile(t *testing.T) {
 	})
 
 	t.Run("labels_set", func(t *testing.T) {
+		t.Parallel()
 		got := generateDockerfile("img", nil, nil, "dig", "ctx", "ckey", "mdig")
 		for _, want := range []string{
 			`LABEL md.base_digest="dig"`,
@@ -423,6 +452,7 @@ func TestGenerateDockerfile(t *testing.T) {
 }
 
 func TestIsExecutable(t *testing.T) {
+	t.Parallel()
 	// Walk the embedded rsc filesystem and verify that the executable-bit
 	// heuristic (suffix .sh/xstartup, path contains /bin/, or shebang #!)
 	// covers the files we expect to be executable.
@@ -487,6 +517,7 @@ func TestIsExecutable(t *testing.T) {
 }
 
 func TestConvertGitURLToHTTPS(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		in   string
@@ -501,6 +532,7 @@ func TestConvertGitURLToHTTPS(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			if got := convertGitURLToHTTPS(tt.in); got != tt.want {
 				t.Errorf("convertGitURLToHTTPS(%q) = %q, want %q", tt.in, got, tt.want)
 			}

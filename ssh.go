@@ -5,6 +5,7 @@
 package md
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/pem"
@@ -46,7 +47,7 @@ func ensureEd25519Key(w io.Writer, path, comment string) error {
 		return fmt.Errorf("creating SSH public key: %w", err)
 	}
 	pubLine := string(ssh.MarshalAuthorizedKey(sshPub))
-	return os.WriteFile(path+".pub", []byte(pubLine), 0o644)
+	return os.WriteFile(path+".pub", []byte(pubLine), 0o644) //nolint:gosec // public key is intentionally world-readable
 }
 
 // ensurePublicKey regenerates the .pub file from the private key if missing.
@@ -55,7 +56,7 @@ func ensurePublicKey(privPath string) error {
 	if _, err := os.Stat(pubPath); err == nil {
 		return nil
 	}
-	privBytes, err := os.ReadFile(privPath)
+	privBytes, err := os.ReadFile(privPath) //nolint:gosec // privPath is from trusted config
 	if err != nil {
 		return err
 	}
@@ -113,7 +114,7 @@ func writeKnownHosts(knownHostsPath string, port int32, hostPubKey string) error
 func ensureSSHConfigInclude(w io.Writer, sshDir string) error {
 	configPath := filepath.Join(sshDir, "config")
 	needle := "Include config.d/*.conf"
-	data, err := os.ReadFile(configPath)
+	data, err := os.ReadFile(configPath) //nolint:gosec // configPath is from trusted SSH dir
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
@@ -134,19 +135,19 @@ func ensureSSHConfigInclude(w io.Writer, sshDir string) error {
 
 // removeSSHConfig removes SSH config and known_hosts files for a container.
 // It also closes any active ControlMaster connection and removes the socket.
-func removeSSHConfig(configDir, containerName string) {
-	cleanupControlSocket(containerName)
+func removeSSHConfig(ctx context.Context, configDir, containerName string) {
+	cleanupControlSocket(ctx, containerName)
 	_ = os.Remove(filepath.Join(configDir, containerName+".conf"))
 	_ = os.Remove(filepath.Join(configDir, containerName+".known_hosts"))
 }
 
 // cleanupControlSocket closes an active ControlMaster connection and removes
 // the socket file. Safe to call even when ControlMaster is not in use.
-func cleanupControlSocket(containerName string) {
+func cleanupControlSocket(ctx context.Context, containerName string) {
 	sock := controlSocketPath(containerName)
 	if _, err := os.Stat(sock); err != nil {
 		return
 	}
-	_ = exec.Command("ssh", "-O", "exit", "-S", sock, "x").Run()
+	_ = exec.CommandContext(ctx, "ssh", "-O", "exit", "-S", sock, "x").Run() //nolint:gosec // sock is from trusted container name
 	_ = os.Remove(sock)
 }

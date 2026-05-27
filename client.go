@@ -138,6 +138,8 @@ func newClient(home, rt string, stdout io.Writer) (*Client, error) {
 
 // setupSSH ensures SSH keys, authorized_keys, and ~/.ssh/config.d exist.
 // Called once by New(); idempotent.
+//
+//nolint:funcorder // called only by newClient above
 func (c *Client) setupSSH(stdout io.Writer) error {
 	for _, d := range []string{
 		filepath.Dir(c.HostKeyPath), // ~/.config/md/
@@ -162,7 +164,7 @@ func (c *Client) setupSSH(stdout io.Writer) error {
 		return err
 	}
 	authKeysPath := filepath.Join(c.keysDir, "authorized_keys")
-	if existing, _ := os.ReadFile(authKeysPath); bytes.Equal(existing, pubKey) {
+	if existing, _ := os.ReadFile(authKeysPath); bytes.Equal(existing, pubKey) { //nolint:gosec // path is from trusted config dir
 		return nil
 	}
 	return os.WriteFile(authKeysPath, pubKey, 0o600) //nolint:gosec // path is constructed from trusted config dir

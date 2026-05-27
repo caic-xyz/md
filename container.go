@@ -120,6 +120,7 @@ type StartResult struct {
 // and restored by [unmarshalContainer] when listing containers.
 type Container struct {
 	*Client
+
 	// Repos are the git repositories in this container. Repos[0] is the
 	// primary; the rest are pushed alongside it. Each repo's MountedPath
 	// gives the absolute destination path.
@@ -179,6 +180,8 @@ func (c *Container) SSHCommand(opts []string, cmd string) []string {
 }
 
 // populateMountPath sets MountedPath from GitRoot if not already set.
+//
+//nolint:funcorder // private helper used only by Validate below
 func (r *Repo) populateMountPath() {
 	if r.MountedPath == "" {
 		r.MountedPath = "/home/user/src/" + strings.TrimSuffix(filepath.Base(r.GitRoot), ".git")
@@ -242,6 +245,8 @@ func (r *Repo) resolveDefaults(ctx context.Context) error {
 // prepare creates harness-specific config directories on the host so they can
 // be bind-mounted into the container. Always-mounted directories
 // (~/.config/agents, ~/.config/md) are created regardless.
+//
+//nolint:funcorder // called only by Launch below
 func (c *Container) prepare(paths []AgentPaths) error {
 	combined := mergePaths(paths)
 	dirs := make([]string, 0, len(combined.HomePaths)+len(combined.XDGConfigPaths)+len(combined.LocalSharePaths)+len(combined.LocalStatePaths))
@@ -464,7 +469,7 @@ func (c *Container) Revive(ctx context.Context, stdout, stderr io.Writer) error 
 	// Rewrite SSH config with the new port. The known_hosts file also
 	// needs rewriting because entries are keyed by [127.0.0.1]:port.
 	sshConfigDir := filepath.Join(c.Home, ".ssh", "config.d")
-	removeSSHConfig(sshConfigDir, c.Name)
+	removeSSHConfig(ctx, sshConfigDir, c.Name)
 	c.sshConfigPath = filepath.Join(sshConfigDir, c.Name+".conf")
 	knownHostsPath := filepath.Join(sshConfigDir, c.Name+".known_hosts")
 	hostPubKey, err := os.ReadFile(c.HostKeyPath + ".pub")
@@ -495,11 +500,13 @@ func (c *Container) Revive(ctx context.Context, stdout, stderr io.Writer) error 
 // waitForSSH runs a trivial SSH command in a retry loop until it succeeds or
 // the deadline is exceeded. This confirms SSH is fully operational after the
 // TCP socket opens (sshd may need a few more milliseconds to accept auth).
+//
+//nolint:funcorder // called only by provisionContainer below
 func (c *Container) waitForSSH(ctx context.Context, deadline time.Time) error {
 	var lastErr error
 	for {
 		sshArgs := c.SSHCommand(nil, "true")
-		cmd := exec.CommandContext(ctx, sshArgs[0], sshArgs[1:]...)
+		cmd := exec.CommandContext(ctx, sshArgs[0], sshArgs[1:]...) //nolint:gosec // args are from trusted SSH config
 		cmd.Env = append(os.Environ(), c.env...)
 		if out, err := cmd.CombinedOutput(); err == nil {
 			return nil
@@ -526,7 +533,7 @@ func (c *Container) Stop(ctx context.Context) error {
 	}
 	// Clean up stale ControlMaster socket (if any). The SSH connection is
 	// dead now that the container is stopped.
-	cleanupControlSocket(c.Name)
+	cleanupControlSocket(ctx, c.Name)
 	c.State = "exited"
 	return nil
 }
@@ -734,6 +741,8 @@ func (c *Container) Pull(ctx context.Context, stdout, stderr io.Writer, repoIdx 
 
 // gatherGitMetadata runs SSH commands to collect branch, stat, and log from
 // the container. This data is always small.
+//
+//nolint:funcorder // called only by execGitGather below
 func (c *Container) gatherGitMetadata(ctx context.Context, repo string) string {
 	r := shellQuote(repo)
 	cmd := "cd " + r + " && echo '=== Branch ===' && git rev-parse --abbrev-ref HEAD && echo && echo '=== Files Changed ===' && git diff --stat --cached base -- . && echo && echo '=== Recent Commits ===' && git log -5 base -- ."
@@ -742,6 +751,8 @@ func (c *Container) gatherGitMetadata(ctx context.Context, repo string) string {
 }
 
 // gatherGitDiff runs SSH to get the full patience diff from the container.
+//
+//nolint:funcorder // called only by execGitGather below
 func (c *Container) gatherGitDiff(ctx context.Context, repo string) string {
 	r := shellQuote(repo)
 	cmd := "cd " + r + " && git diff --patience -U10 --cached base -- ."
@@ -777,7 +788,7 @@ func (c *Container) Diff(ctx context.Context, stdout, stderr io.Writer, repoIdx 
 		isTTY = true
 	}
 	sshArgs := c.SSHCommand(opts, "cd "+mp+" && git add . && git diff base "+strings.Join(quotedArgs, " ")+" -- .")
-	cmd := exec.CommandContext(ctx, sshArgs[0])
+	cmd := exec.CommandContext(ctx, sshArgs[0]) //nolint:gosec // args are from trusted SSH config
 	cmd.Env = append(os.Environ(), c.env...)
 	if isTTY {
 		cmd.Stdin = os.Stdin
@@ -997,7 +1008,7 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 	}
 	sshEnvArgs := fork.SSHCommand(nil, "cat > /home/user/.env")
 	for {
-		cmd := exec.CommandContext(ctx, sshEnvArgs[0], sshEnvArgs[1:]...)
+		cmd := exec.CommandContext(ctx, sshEnvArgs[0], sshEnvArgs[1:]...) //nolint:gosec // args are from trusted SSH config
 		cmd.Env = append(os.Environ(), fork.env...)
 		cmd.Stdin = bytes.NewReader(envContent)
 		out, err := cmd.CombinedOutput()
@@ -1422,7 +1433,7 @@ func (c *Container) ensureImage(ctx context.Context, stdout, stderr io.Writer, b
 }
 
 func (c *Container) cleanup(ctx context.Context) {
-	removeSSHConfig(filepath.Join(c.Home, ".ssh", "config.d"), c.Name)
+	removeSSHConfig(ctx, filepath.Join(c.Home, ".ssh", "config.d"), c.Name)
 	if len(c.Repos) > 0 {
 		_, _ = c.runCmd(ctx, c.Repos[0].GitRoot, []string{"git", "remote", "remove", c.Name})
 		for _, repo := range c.Repos[1:] {
@@ -1598,7 +1609,7 @@ func parseByteSize(s string) (uint64, error) {
 // If dir is non-empty, the command runs in that directory.
 func (c *Client) runCmd(ctx context.Context, dir string, args []string) (string, error) {
 	slog.DebugContext(ctx, "md", "msg", "exec", "cmd", args)
-	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+	cmd := exec.CommandContext(ctx, args[0], args[1:]...) //nolint:gosec // args are from trusted callers
 	cmd.Dir = dir
 	env := append(os.Environ(), c.env...)
 	env = append(env, "LANG=C")
@@ -1624,7 +1635,7 @@ func cmdErrWithStderr(prefix string, err error) error {
 // If dir is non-empty, the command runs in that directory.
 func (c *Client) runCmdOut(ctx context.Context, dir string, args []string, stdout, stderr io.Writer) error {
 	slog.DebugContext(ctx, "md", "msg", "exec", "cmd", args)
-	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+	cmd := exec.CommandContext(ctx, args[0], args[1:]...) //nolint:gosec // args are from trusted callers
 	cmd.Dir = dir
 	env := append(os.Environ(), c.env...)
 	env = append(env, "LANG=C")
@@ -1825,7 +1836,7 @@ func parsePercent(s string) (float64, error) {
 
 // parseMemUsage parses "150MiB / 7.5GiB" into (used, limit) in bytes.
 // Returns (0, 0) for "N/A / N/A" (unavailable cgroup metrics).
-func parseMemUsage(s string) (uint64, uint64, error) {
+func parseMemUsage(s string) (used, limit uint64, err error) {
 	if strings.TrimSpace(s) == "N/A / N/A" {
 		return 0, 0, nil
 	}
@@ -1833,11 +1844,11 @@ func parseMemUsage(s string) (uint64, uint64, error) {
 	if len(parts) != 2 {
 		return 0, 0, fmt.Errorf("expected 'used / limit', got %q", s)
 	}
-	used, err := parseByteSize(strings.TrimSpace(parts[0]))
+	used, err = parseByteSize(strings.TrimSpace(parts[0]))
 	if err != nil {
 		return 0, 0, err
 	}
-	limit, err := parseByteSize(strings.TrimSpace(parts[1]))
+	limit, err = parseByteSize(strings.TrimSpace(parts[1]))
 	if err != nil {
 		return 0, 0, err
 	}
@@ -1846,7 +1857,7 @@ func parseMemUsage(s string) (uint64, uint64, error) {
 
 // parseIOPair parses "1.23kB / 456B" (docker NetIO / BlockIO) into two byte counts.
 // Returns (0, 0) for "N/A / N/A" (unavailable cgroup metrics).
-func parseIOPair(s string) (uint64, uint64, error) {
+func parseIOPair(s string) (a, b uint64, err error) {
 	if strings.TrimSpace(s) == "N/A / N/A" {
 		return 0, 0, nil
 	}
@@ -1854,11 +1865,11 @@ func parseIOPair(s string) (uint64, uint64, error) {
 	if len(parts) != 2 {
 		return 0, 0, fmt.Errorf("expected 'a / b', got %q", s)
 	}
-	a, err := parseByteSize(strings.TrimSpace(parts[0]))
+	a, err = parseByteSize(strings.TrimSpace(parts[0]))
 	if err != nil {
 		return 0, 0, err
 	}
-	b, err := parseByteSize(strings.TrimSpace(parts[1]))
+	b, err = parseByteSize(strings.TrimSpace(parts[1]))
 	if err != nil {
 		return 0, 0, err
 	}
@@ -1871,7 +1882,7 @@ func parseIOPair(s string) (uint64, uint64, error) {
 // GIT_WORK_TREE so git never tries to chdir to a non-existent
 // submodule worktree.
 func (c *Client) runGitDir(ctx context.Context, dir, gitDir string, args ...string) error {
-	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd := exec.CommandContext(ctx, "git", args...) //nolint:gosec // args are from trusted callers
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "GIT_DIR="+gitDir, "GIT_WORK_TREE="+dir, "LANG=C")
 	cmd.Env = append(cmd.Env, c.env...)

@@ -44,6 +44,20 @@ func ensureImages(t *testing.T, ctx context.Context, c *Client) string {
 	return "md-user-local"
 }
 
+// prebuildSpecializedImage builds the specialized image (with SSH keys and no
+// caches) so that subsequent subtests can reuse it without racing on the build.
+func prebuildSpecializedImage(t *testing.T, ctx context.Context, c *Client, baseImage string) {
+	ct, err := c.Container()
+	if err != nil {
+		t.Fatalf("Container: %v", err)
+	}
+	ct.Name = "md-smoke-prebuild"
+	opts := &StartOpts{BaseImage: baseImage, Quiet: true}
+	if _, err := ct.ensureImage(ctx, io.Discard, io.Discard, baseImage, opts.Caches, true); err != nil {
+		t.Fatalf("prebuild specialized image: %v", err)
+	}
+}
+
 // launchSmokeContainer creates a Container with the given name suffix and
 // calls Launch+Connect with -sudo. Returns the live container (caller must
 // Purge via t.Cleanup).
@@ -142,30 +156,147 @@ func TestSmoke(t *testing.T) {
 			// Error: "newuidmap: write to uid_map failed: Operation not permitted"
 			nestedOK := rt != "podman" || os.Getuid() == 0
 
+			// Fetch md-user upfront so all subtests can reuse it.
 			baseImage := ensureImages(t, t.Context(), client)
 
-			t.Run("launch", func(t *testing.T) {
-				ct := launchSmokeContainer(t, t.Context(), client, baseImage, rt+"-launch")
+			// Pre-build the specialized image once so the serialized
+			// subtests (launch, nested, lifecycle) don't race on the
+			// build. The cache subtest uses different caches so it
+			// produces a different image and runs in parallel.
+			prebuildSpecializedImage(t, t.Context(), client, baseImage)
 
-				t.Run("sudo", func(t *testing.T) {
-					out, err := ct.runCmd(t.Context(), "", ct.SSHCommand(nil, "echo '"+ct.sudoPassword+"' | sudo -S whoami"))
-					if err != nil {
-						t.Fatalf("sudo whoami: %v", err)
-					}
-					if got := strings.TrimSpace(out); got != "root" {
-						t.Fatalf("sudo whoami expected 'root', got %q", got)
-					}
-					t.Log("sudo works inside the container")
+			// Serialized group: these subtests share the same
+			// specialized image, so running them sequentially avoids
+			// redundant image-build checks.
+			t.Run("serialized", func(t *testing.T) {
+				t.Run("launch", func(t *testing.T) {
+					ct := launchSmokeContainer(t, t.Context(), client, baseImage, rt+"-launch")
+
+					t.Run("sudo", func(t *testing.T) {
+						out, err := ct.runCmd(t.Context(), "", ct.SSHCommand(nil, "echo '"+ct.sudoPassword+"' | sudo -S whoami"))
+						if err != nil {
+							t.Fatalf("sudo whoami: %v", err)
+						}
+						if got := strings.TrimSpace(out); got != "root" {
+							t.Fatalf("sudo whoami expected 'root', got %q", got)
+						}
+						t.Log("sudo works inside the container")
+					})
+
+					t.Run("file_io", func(t *testing.T) {
+						if _, err := ct.runCmd(t.Context(), "", ct.SSHCommand(nil, "echo hello > /tmp/smoke-test && cat /tmp/smoke-test")); err != nil {
+							t.Fatalf("file I/O: %v", err)
+						}
+					})
 				})
 
-				t.Run("file_io", func(t *testing.T) {
-					if _, err := ct.runCmd(t.Context(), "", ct.SSHCommand(nil, "echo hello > /tmp/smoke-test && cat /tmp/smoke-test")); err != nil {
-						t.Fatalf("file I/O: %v", err)
+				t.Run("nested", func(t *testing.T) {
+					if !nestedOK {
+						t.Skip("skipping: nested newuidmap fails with rootless podman (user namespace stacking)")
+					}
+					ct := launchSmokeContainer(t, t.Context(), client, baseImage, rt+"-nested")
+
+					t.Run("version", func(t *testing.T) {
+						out, err := ct.runCmd(t.Context(), "", ct.SSHCommand(nil, "podman version --format '{{.Version}}'"))
+						if err != nil {
+							t.Fatalf("podman version: %v", err)
+						}
+						if out == "" {
+							t.Fatal("podman returned empty version")
+						} else {
+							t.Logf("nested podman version: %s", out)
+						}
+					})
+
+					t.Run("info", func(t *testing.T) {
+						out, err := ct.runCmd(t.Context(), "", ct.SSHCommand(nil, "podman info --format '{{.Host.RemoteSocket.Path}}'"))
+						if err != nil {
+							t.Fatalf("podman info: %v", err)
+						}
+						t.Logf("nested podman socket: %s", out)
+					})
+
+					t.Run("run_alpine", func(t *testing.T) {
+						subCtx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
+						defer cancel()
+						out, err := ct.runCmd(subCtx, "", ct.SSHCommand(nil, "podman run --rm docker.io/alpine:latest echo hello-from-nested-podman"))
+						if err != nil {
+							t.Fatalf("podman run alpine: %v", err)
+						}
+						if out != "hello-from-nested-podman" {
+							t.Fatalf("expected 'hello-from-nested-podman', got %q", out)
+						}
+						t.Logf("nested podman run: %s", out)
+					})
+
+					t.Run("run_alpine_id", func(t *testing.T) {
+						subCtx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
+						defer cancel()
+						out, err := ct.runCmd(subCtx, "", ct.SSHCommand(nil, "podman run --rm docker.io/alpine:latest id -u"))
+						if err != nil {
+							t.Fatalf("podman run id: %v", err)
+						}
+						got := strings.TrimSpace(out)
+						if got != "0" {
+							t.Logf("nested container UID: %s (may be 0 via user namespace)", got)
+						}
+					})
+
+					t.Run("pull_busybox", func(t *testing.T) {
+						subCtx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
+						defer cancel()
+						out, err := ct.runCmd(subCtx, "", ct.SSHCommand(nil, "podman pull docker.io/busybox:latest"))
+						if err != nil {
+							t.Fatalf("podman pull busybox: %v", err)
+						}
+						t.Logf("pull output: %s", out)
+					})
+
+					t.Run("run_busybox", func(t *testing.T) {
+						subCtx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+						defer cancel()
+						out, err := ct.runCmd(subCtx, "", ct.SSHCommand(nil, "podman run --rm docker.io/busybox:latest echo ok"))
+						if err != nil {
+							t.Fatalf("podman run busybox: %v", err)
+						}
+						if out != "ok" {
+							t.Fatalf("expected 'ok', got %q", out)
+						}
+					})
+				})
+
+				t.Run("lifecycle", func(t *testing.T) {
+					ct := launchSmokeContainer(t, t.Context(), client, baseImage, rt+"-lifecycle")
+
+					if _, err := ct.runCmd(t.Context(), "", ct.SSHCommand(nil, "echo persisted > /tmp/smoke-test")); err != nil {
+						t.Fatalf("write file: %v", err)
+					}
+
+					t.Log("stopping container ...")
+					if err := ct.Stop(t.Context()); err != nil {
+						t.Fatalf("Stop: %v", err)
+					}
+
+					t.Log("reviving container ...")
+					if err := ct.Revive(t.Context(), io.Discard, io.Discard); err != nil {
+						t.Fatalf("Revive: %v", err)
+					}
+
+					out, err := ct.runCmd(t.Context(), "", ct.SSHCommand(nil, "cat /tmp/smoke-test"))
+					if err != nil {
+						t.Fatalf("read file after revive: %v", err)
+					}
+					if got := strings.TrimSpace(out); got != "persisted" {
+						t.Fatalf("expected 'persisted', got %q", got)
 					}
 				})
 			})
 
+			// Cache subtest: creates a different specialized image
+			// (with cache mounts), so it runs in parallel with the
+			// serialized group.
 			t.Run("cache", func(t *testing.T) {
+				t.Parallel()
 				src := t.TempDir()
 				if err := os.WriteFile(filepath.Join(src, "hello.txt"), []byte("cache-works"), 0o644); err != nil {
 					t.Fatal(err)
@@ -186,108 +317,9 @@ func TestSmoke(t *testing.T) {
 				t.Log("cache injection works")
 			})
 
-			t.Run("nested", func(t *testing.T) {
-				if !nestedOK {
-					t.Skip("skipping: nested newuidmap fails with rootless podman (user namespace stacking)")
-				}
-				ct := launchSmokeContainer(t, t.Context(), client, baseImage, rt+"-nested")
-
-				t.Run("version", func(t *testing.T) {
-					out, err := ct.runCmd(t.Context(), "", ct.SSHCommand(nil, "podman version --format '{{.Version}}'"))
-					if err != nil {
-						t.Fatalf("podman version: %v", err)
-					}
-					if out == "" {
-						t.Fatal("podman returned empty version")
-					} else {
-						t.Logf("nested podman version: %s", out)
-					}
-				})
-
-				t.Run("info", func(t *testing.T) {
-					out, err := ct.runCmd(t.Context(), "", ct.SSHCommand(nil, "podman info --format '{{.Host.RemoteSocket.Path}}'"))
-					if err != nil {
-						t.Fatalf("podman info: %v", err)
-					}
-					t.Logf("nested podman socket: %s", out)
-				})
-
-				t.Run("run_alpine", func(t *testing.T) {
-					subCtx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
-					defer cancel()
-					out, err := ct.runCmd(subCtx, "", ct.SSHCommand(nil, "podman run --rm docker.io/alpine:latest echo hello-from-nested-podman"))
-					if err != nil {
-						t.Fatalf("podman run alpine: %v", err)
-					}
-					if out != "hello-from-nested-podman" {
-						t.Fatalf("expected 'hello-from-nested-podman', got %q", out)
-					}
-					t.Logf("nested podman run: %s", out)
-				})
-
-				t.Run("run_alpine_id", func(t *testing.T) {
-					subCtx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
-					defer cancel()
-					out, err := ct.runCmd(subCtx, "", ct.SSHCommand(nil, "podman run --rm docker.io/alpine:latest id -u"))
-					if err != nil {
-						t.Fatalf("podman run id: %v", err)
-					}
-					got := strings.TrimSpace(out)
-					if got != "0" {
-						t.Logf("nested container UID: %s (may be 0 via user namespace)", got)
-					}
-				})
-
-				t.Run("pull_busybox", func(t *testing.T) {
-					subCtx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
-					defer cancel()
-					out, err := ct.runCmd(subCtx, "", ct.SSHCommand(nil, "podman pull docker.io/busybox:latest"))
-					if err != nil {
-						t.Fatalf("podman pull busybox: %v", err)
-					}
-					t.Logf("pull output: %s", out)
-				})
-
-				t.Run("run_busybox", func(t *testing.T) {
-					subCtx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
-					defer cancel()
-					out, err := ct.runCmd(subCtx, "", ct.SSHCommand(nil, "podman run --rm docker.io/busybox:latest echo ok"))
-					if err != nil {
-						t.Fatalf("podman run busybox: %v", err)
-					}
-					if out != "ok" {
-						t.Fatalf("expected 'ok', got %q", out)
-					}
-				})
-			})
-
-			t.Run("lifecycle", func(t *testing.T) {
-				ct := launchSmokeContainer(t, t.Context(), client, baseImage, rt+"-lifecycle")
-
-				if _, err := ct.runCmd(t.Context(), "", ct.SSHCommand(nil, "echo persisted > /tmp/smoke-test")); err != nil {
-					t.Fatalf("write file: %v", err)
-				}
-
-				t.Log("stopping container ...")
-				if err := ct.Stop(t.Context()); err != nil {
-					t.Fatalf("Stop: %v", err)
-				}
-
-				t.Log("reviving container ...")
-				if err := ct.Revive(t.Context(), io.Discard, io.Discard); err != nil {
-					t.Fatalf("Revive: %v", err)
-				}
-
-				out, err := ct.runCmd(t.Context(), "", ct.SSHCommand(nil, "cat /tmp/smoke-test"))
-				if err != nil {
-					t.Fatalf("read file after revive: %v", err)
-				}
-				if got := strings.TrimSpace(out); got != "persisted" {
-					t.Fatalf("expected 'persisted', got %q", got)
-				}
-			})
-
+			// Clean rebuild test: independent, runs in parallel.
 			t.Run("build_image", func(t *testing.T) {
+				t.Parallel()
 				if testing.Short() {
 					t.Skip("skipping: clean rebuild in short mode")
 				}

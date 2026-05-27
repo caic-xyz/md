@@ -22,7 +22,7 @@ import (
 // newGitCmd creates an exec.Cmd for git with LANG=C set so that output is
 // always in English regardless of the system locale.
 func newGitCmd(ctx context.Context, dir string, args []string) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd := exec.CommandContext(ctx, "git", args...) //nolint:gosec // args are from trusted callers
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "LANG=C")
 	return cmd

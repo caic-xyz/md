@@ -11,6 +11,7 @@ import (
 )
 
 func TestResolveCaches(t *testing.T) {
+	t.Parallel()
 	allNames := func(caches []md.CacheMount) []string {
 		names := make([]string, len(caches))
 		for i, c := range caches {
@@ -20,6 +21,7 @@ func TestResolveCaches(t *testing.T) {
 	}
 
 	t.Run("default_includes_all_well_known", func(t *testing.T) {
+		t.Parallel()
 		got, err := resolveCaches(nil, nil, false)
 		if err != nil {
 			t.Fatal(err)
@@ -43,6 +45,7 @@ func TestResolveCaches(t *testing.T) {
 	})
 
 	t.Run("no_caches_returns_empty_non_nil", func(t *testing.T) {
+		t.Parallel()
 		got, err := resolveCaches(nil, nil, true)
 		if err != nil {
 			t.Fatal(err)
@@ -56,6 +59,7 @@ func TestResolveCaches(t *testing.T) {
 	})
 
 	t.Run("no_cache_excludes_named", func(t *testing.T) {
+		t.Parallel()
 		got, err := resolveCaches(nil, []string{"go-mod"}, false)
 		if err != nil {
 			t.Fatal(err)
@@ -83,6 +87,7 @@ func TestResolveCaches(t *testing.T) {
 	})
 
 	t.Run("no_cache_unknown_name_errors", func(t *testing.T) {
+		t.Parallel()
 		_, err := resolveCaches(nil, []string{"nonexistent"}, false)
 		if err == nil {
 			t.Fatal("expected error for unknown --no-cache name")
@@ -90,6 +95,7 @@ func TestResolveCaches(t *testing.T) {
 	})
 
 	t.Run("custom_cache_added", func(t *testing.T) {
+		t.Parallel()
 		got, err := resolveCaches([]string{"/host/path:/container/path"}, nil, true)
 		if err != nil {
 			t.Fatal(err)
@@ -100,6 +106,7 @@ func TestResolveCaches(t *testing.T) {
 	})
 
 	t.Run("no_caches_plus_cache_readds_well_known", func(t *testing.T) {
+		t.Parallel()
 		got, err := resolveCaches([]string{"go-mod"}, nil, true)
 		if err != nil {
 			t.Fatal(err)
@@ -127,6 +134,7 @@ func TestResolveCaches(t *testing.T) {
 	})
 
 	t.Run("no_duplicate_when_cache_already_default", func(t *testing.T) {
+		t.Parallel()
 		got, err := resolveCaches([]string{"go-mod"}, nil, false)
 		if err != nil {
 			t.Fatal(err)
@@ -143,6 +151,7 @@ func TestResolveCaches(t *testing.T) {
 	})
 
 	t.Run("custom_cache_ro", func(t *testing.T) {
+		t.Parallel()
 		got, err := resolveCaches([]string{"/host:/cnt:ro"}, nil, true)
 		if err != nil {
 			t.Fatal(err)
@@ -153,6 +162,7 @@ func TestResolveCaches(t *testing.T) {
 	})
 
 	t.Run("invalid_custom_spec_errors", func(t *testing.T) {
+		t.Parallel()
 		_, err := resolveCaches([]string{"notapath"}, nil, true)
 		if err == nil {
 			t.Fatal("expected error for invalid custom spec")
@@ -161,7 +171,9 @@ func TestResolveCaches(t *testing.T) {
 }
 
 func TestShellSplit(t *testing.T) {
+	t.Parallel()
 	t.Run("simple", func(t *testing.T) {
+		t.Parallel()
 		got, err := shellSplit("--memory 4g")
 		if err != nil {
 			t.Fatal(err)
@@ -173,6 +185,7 @@ func TestShellSplit(t *testing.T) {
 	})
 
 	t.Run("single_arg", func(t *testing.T) {
+		t.Parallel()
 		got, err := shellSplit("--privileged")
 		if err != nil {
 			t.Fatal(err)
@@ -183,6 +196,7 @@ func TestShellSplit(t *testing.T) {
 	})
 
 	t.Run("equals_form", func(t *testing.T) {
+		t.Parallel()
 		got, err := shellSplit("--memory=4g")
 		if err != nil {
 			t.Fatal(err)
@@ -193,6 +207,7 @@ func TestShellSplit(t *testing.T) {
 	})
 
 	t.Run("single_quotes", func(t *testing.T) {
+		t.Parallel()
 		got, err := shellSplit("-v '/path with spaces:/container'")
 		if err != nil {
 			t.Fatal(err)
@@ -203,6 +218,7 @@ func TestShellSplit(t *testing.T) {
 	})
 
 	t.Run("double_quotes", func(t *testing.T) {
+		t.Parallel()
 		got, err := shellSplit(`-e "FOO=hello world"`)
 		if err != nil {
 			t.Fatal(err)
@@ -213,6 +229,7 @@ func TestShellSplit(t *testing.T) {
 	})
 
 	t.Run("backslash_escape", func(t *testing.T) {
+		t.Parallel()
 		got, err := shellSplit(`--label key=val\ ue`)
 		if err != nil {
 			t.Fatal(err)
@@ -223,6 +240,7 @@ func TestShellSplit(t *testing.T) {
 	})
 
 	t.Run("empty", func(t *testing.T) {
+		t.Parallel()
 		got, err := shellSplit("")
 		if err != nil {
 			t.Fatal(err)
@@ -233,6 +251,7 @@ func TestShellSplit(t *testing.T) {
 	})
 
 	t.Run("unterminated_single_quote", func(t *testing.T) {
+		t.Parallel()
 		_, err := shellSplit("--flag 'oops")
 		if err == nil {
 			t.Fatal("expected error")
@@ -240,6 +259,7 @@ func TestShellSplit(t *testing.T) {
 	})
 
 	t.Run("unterminated_double_quote", func(t *testing.T) {
+		t.Parallel()
 		_, err := shellSplit(`--flag "oops`)
 		if err == nil {
 			t.Fatal("expected error")

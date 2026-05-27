@@ -14,12 +14,13 @@ import (
 )
 
 func TestListSubmodules(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	dir := t.TempDir()
 
 	run := func(d string, args ...string) {
 		t.Helper()
-		cmd := exec.CommandContext(ctx, "git", args...)
+		cmd := exec.CommandContext(ctx, "git", args...) //nolint:gosec // args are from test code
 		if d != "" {
 			cmd.Dir = d
 		}
@@ -74,6 +75,7 @@ func TestListSubmodules(t *testing.T) {
 }
 
 func TestFindModuleDirs(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 
 	// mkBare creates a minimal bare repo layout under .git/modules/<parts...>.
@@ -85,7 +87,7 @@ func TestFindModuleDirs(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		if err := os.WriteFile(filepath.Join(base, "HEAD"), []byte("ref: refs/heads/main\n"), 0o640); err != nil {
+		if err := os.WriteFile(filepath.Join(base, "HEAD"), []byte("ref: refs/heads/main\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -127,6 +129,7 @@ func TestFindModuleDirs(t *testing.T) {
 }
 
 func TestDiscoverRepos(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 
 	// Create repos at various depths.
@@ -170,6 +173,7 @@ func TestDiscoverRepos(t *testing.T) {
 }
 
 func TestDiscoverReposDepthZero(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 
 	// Root itself is a repo.
@@ -187,6 +191,7 @@ func TestDiscoverReposDepthZero(t *testing.T) {
 }
 
 func TestDiscoverReposEmpty(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	repos, err := DiscoverRepos(root, 3)
 	if err != nil {
@@ -198,6 +203,7 @@ func TestDiscoverReposEmpty(t *testing.T) {
 }
 
 func TestDiscoverReposBare(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 
 	// mkBare creates a minimal bare repo layout (HEAD file + objects/ + refs/).
@@ -209,7 +215,7 @@ func TestDiscoverReposBare(t *testing.T) {
 		if err := os.MkdirAll(filepath.Join(base, "refs"), 0o750); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(base, "HEAD"), []byte("ref: refs/heads/main\n"), 0o640); err != nil {
+		if err := os.WriteFile(filepath.Join(base, "HEAD"), []byte("ref: refs/heads/main\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -246,6 +252,7 @@ func TestDiscoverReposBare(t *testing.T) {
 }
 
 func TestDefaultBranch(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	dir := t.TempDir()
 	bare := filepath.Join(dir, "remote.git")
@@ -262,7 +269,7 @@ func TestDefaultBranch(t *testing.T) {
 		{clone, []string{"-c", "user.name=Test", "-c", "user.email=test@test", "commit", "--allow-empty", "-m", "init"}},
 		{clone, []string{"push", "origin", "main"}},
 	} {
-		cmd := exec.CommandContext(ctx, "git", c.args...)
+		cmd := exec.CommandContext(ctx, "git", c.args...) //nolint:gosec // args are from test code
 		if c.dir != "" {
 			cmd.Dir = c.dir
 		}
@@ -310,6 +317,7 @@ func TestDefaultBranch(t *testing.T) {
 }
 
 func TestPushRef(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	dir := t.TempDir()
 	bare := filepath.Join(dir, "remote.git")
@@ -327,7 +335,7 @@ func TestPushRef(t *testing.T) {
 		{clone, []string{"push", "origin", "main"}},
 		{clone, []string{"checkout", "-b", "caic-0"}},
 	} {
-		cmd := exec.CommandContext(ctx, "git", c.args...)
+		cmd := exec.CommandContext(ctx, "git", c.args...) //nolint:gosec // args are from test code
 		if c.dir != "" {
 			cmd.Dir = c.dir
 		}
@@ -369,6 +377,7 @@ func TestPushRef(t *testing.T) {
 }
 
 func TestRemoteToHTTPS(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		in   string
 		want string
@@ -392,6 +401,7 @@ func TestRemoteToHTTPS(t *testing.T) {
 }
 
 func TestSquashOnto(t *testing.T) {
+	t.Parallel()
 	// Helper: set up a bare remote + clone with an initial commit on main.
 	setup := func(t *testing.T) (bare, clone string) {
 		t.Helper()
@@ -411,7 +421,7 @@ func TestSquashOnto(t *testing.T) {
 			{clone, []string{"commit", "--allow-empty", "-m", "init"}},
 			{clone, []string{"push", "origin", "main"}},
 		} {
-			cmd := exec.CommandContext(ctx, "git", c.args...)
+			cmd := exec.CommandContext(ctx, "git", c.args...) //nolint:gosec // args are from test code
 			if c.dir != "" {
 				cmd.Dir = c.dir
 			}
@@ -425,7 +435,7 @@ func TestSquashOnto(t *testing.T) {
 	// Helper: run a git command in dir.
 	run := func(t *testing.T, dir string, args ...string) string {
 		t.Helper()
-		cmd := exec.CommandContext(t.Context(), "git", args...)
+		cmd := exec.CommandContext(t.Context(), "git", args...) //nolint:gosec // args are from test code
 		cmd.Dir = dir
 		out, err := cmd.CombinedOutput()
 		if err != nil {
@@ -435,6 +445,7 @@ func TestSquashOnto(t *testing.T) {
 	}
 
 	t.Run("Basic", func(t *testing.T) {
+		t.Parallel()
 		bare, clone := setup(t)
 		ctx := t.Context()
 
@@ -468,7 +479,7 @@ func TestSquashOnto(t *testing.T) {
 
 		// Both files should be present.
 		for _, name := range []string{"a.txt", "b.txt"} {
-			cmd := exec.CommandContext(ctx, "git", "cat-file", "-e", "main:"+name)
+			cmd := exec.CommandContext(ctx, "git", "cat-file", "-e", "main:"+name) //nolint:gosec // name is from test code
 			cmd.Dir = bare
 			if err := cmd.Run(); err != nil {
 				t.Errorf("file %s missing on main after squash", name)
@@ -477,6 +488,7 @@ func TestSquashOnto(t *testing.T) {
 	})
 
 	t.Run("NonFastForward", func(t *testing.T) {
+		t.Parallel()
 		_, clone := setup(t)
 		ctx := t.Context()
 
@@ -506,7 +518,8 @@ func TestSquashOnto(t *testing.T) {
 	})
 }
 
-func TestIsReachable(t *testing.T) {
+func TestIsReachable(t *testing.T) { //nolint:tparallel // subtests share git repo
+	t.Parallel()
 	ctx := t.Context()
 	dir := t.TempDir()
 	bare := filepath.Join(dir, "remote.git")
@@ -514,7 +527,7 @@ func TestIsReachable(t *testing.T) {
 
 	run := func(t *testing.T, d string, args ...string) string {
 		t.Helper()
-		cmd := exec.CommandContext(ctx, "git", args...)
+		cmd := exec.CommandContext(ctx, "git", args...) //nolint:gosec // args are from test code
 		cmd.Dir = d
 		out, err := cmd.CombinedOutput()
 		if err != nil {
@@ -551,7 +564,7 @@ func TestIsReachable(t *testing.T) {
 	// The initial commit is on origin/main — reachable.
 	initCommit := run(t, clone, "rev-parse", "origin/main")
 
-	t.Run("Reachable", func(t *testing.T) {
+	t.Run("Reachable", func(t *testing.T) { //nolint:paralleltest // subtests share git repo
 		ok, err := IsReachable(ctx, clone, initCommit)
 		if err != nil {
 			t.Fatal(err)
@@ -561,7 +574,7 @@ func TestIsReachable(t *testing.T) {
 		}
 	})
 
-	t.Run("Unreachable", func(t *testing.T) {
+	t.Run("Unreachable", func(t *testing.T) { //nolint:paralleltest // subtests share git repo
 		ok, err := IsReachable(ctx, clone, containerCommit)
 		if err != nil {
 			t.Fatal(err)
@@ -571,7 +584,7 @@ func TestIsReachable(t *testing.T) {
 		}
 	})
 
-	t.Run("ReachableViaLocalBranch", func(t *testing.T) {
+	t.Run("ReachableViaLocalBranch", func(t *testing.T) { //nolint:paralleltest // subtests share git repo
 		// Create a local branch pointing at the container commit.
 		run(t, clone, "branch", "local-backup", containerCommit)
 		defer func() {
@@ -587,13 +600,14 @@ func TestIsReachable(t *testing.T) {
 	})
 }
 
-func TestCreateBranch(t *testing.T) {
+func TestCreateBranch(t *testing.T) { //nolint:tparallel // subtests share git repo
+	t.Parallel()
 	ctx := t.Context()
 	dir := t.TempDir()
 
 	run := func(t *testing.T, d string, args ...string) string {
 		t.Helper()
-		cmd := exec.CommandContext(ctx, "git", args...)
+		cmd := exec.CommandContext(ctx, "git", args...) //nolint:gosec // args are from test code
 		cmd.Dir = d
 		out, err := cmd.CombinedOutput()
 		if err != nil {
@@ -608,7 +622,7 @@ func TestCreateBranch(t *testing.T) {
 	run(t, dir, "commit", "--allow-empty", "-m", "init")
 	startCommit := run(t, dir, "rev-parse", "HEAD")
 
-	t.Run("DoesNotChangeWorkingTree", func(t *testing.T) {
+	t.Run("DoesNotChangeWorkingTree", func(t *testing.T) { //nolint:paralleltest // subtests share git repo
 		if err := CreateBranch(ctx, dir, "caic-1", "main"); err != nil {
 			t.Fatal(err)
 		}
@@ -624,7 +638,7 @@ func TestCreateBranch(t *testing.T) {
 		}
 	})
 
-	t.Run("AlreadyExists", func(t *testing.T) {
+	t.Run("AlreadyExists", func(t *testing.T) { //nolint:paralleltest // subtests share git repo
 		if err := CreateBranch(ctx, dir, "caic-1", "main"); err == nil {
 			t.Error("expected error for duplicate branch")
 		}

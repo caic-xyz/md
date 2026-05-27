@@ -15,6 +15,7 @@ import (
 )
 
 func TestSanitizeDockerName(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		in   string
@@ -34,6 +35,7 @@ func TestSanitizeDockerName(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			if got := SanitizeDockerName(tt.in); got != tt.want {
 				t.Errorf("SanitizeDockerName(%q) = %q, want %q", tt.in, got, tt.want)
 			}
@@ -42,6 +44,7 @@ func TestSanitizeDockerName(t *testing.T) {
 }
 
 func TestContainerName(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name         string
 		repo, branch string
@@ -52,6 +55,7 @@ func TestContainerName(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			if got := containerName(tt.repo, tt.branch); got != tt.want {
 				t.Errorf("containerName(%q, %q) = %q, want %q", tt.repo, tt.branch, got, tt.want)
 			}
@@ -60,6 +64,7 @@ func TestContainerName(t *testing.T) {
 }
 
 func TestHarnessMounts(t *testing.T) {
+	t.Parallel()
 	if len(HarnessMounts) == 0 {
 		t.Fatal("HarnessMounts must not be empty")
 	}
@@ -71,6 +76,7 @@ func TestHarnessMounts(t *testing.T) {
 }
 
 func TestWellKnownCaches(t *testing.T) {
+	t.Parallel()
 	if len(WellKnownCaches) == 0 {
 		t.Fatal("WellKnownCaches must not be empty")
 	}
@@ -95,8 +101,9 @@ func TestWellKnownCaches(t *testing.T) {
 	}
 }
 
-func TestClient(t *testing.T) {
+func TestClient(t *testing.T) { //nolint:tparallel // subtests use t.Setenv
 	t.Run("Container", func(t *testing.T) {
+		t.Parallel()
 		c := &Client{}
 		tests := []struct {
 			name     string
@@ -110,6 +117,7 @@ func TestClient(t *testing.T) {
 		}
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {
+				t.Parallel()
 				ct, err := c.Container(Repo{GitRoot: tt.gitRoot, Branch: "main"})
 				if err != nil {
 					t.Fatal(err)
@@ -124,7 +132,9 @@ func TestClient(t *testing.T) {
 		}
 	})
 	t.Run("Runtime", func(t *testing.T) {
+		// Cannot use t.Parallel() because subtests use t.Setenv.
 		t.Run("new_defaults_to_docker", func(t *testing.T) {
+			// Cannot use t.Parallel() because t.Setenv is incompatible.
 			if rt := detectRuntime(); rt == "docker" {
 				if _, err := exec.LookPath("docker"); err != nil {
 					t.Skip("no container runtime available in PATH")
@@ -142,6 +152,7 @@ func TestClient(t *testing.T) {
 			}
 		})
 		t.Run("explicit", func(t *testing.T) {
+			t.Parallel()
 			c := &Client{Runtime: "podman"}
 			if c.Runtime != "podman" {
 				t.Errorf("Runtime = %q, want %q", c.Runtime, "podman")
@@ -151,7 +162,9 @@ func TestClient(t *testing.T) {
 }
 
 func TestDetectRuntime(t *testing.T) {
+	// Cannot use t.Parallel() because subtests use t.Setenv.
 	t.Run("fallback_to_docker", func(t *testing.T) {
+		// Cannot use t.Parallel() because t.Setenv is incompatible.
 		// Use empty PATH to test fallback when neither docker nor podman is found.
 		t.Setenv("PATH", t.TempDir())
 		if got := detectRuntime(); got != "docker" {
@@ -159,13 +172,14 @@ func TestDetectRuntime(t *testing.T) {
 		}
 	})
 	t.Run("finds_podman_when_no_docker", func(t *testing.T) {
+		// Cannot use t.Parallel() because t.Setenv is incompatible.
 		dir := t.TempDir()
 		name := "podman"
 		if runtime.GOOS == "windows" {
 			name = "podman.exe"
 		}
 		podmanPath := filepath.Join(dir, name)
-		if err := os.WriteFile(podmanPath, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		if err := os.WriteFile(podmanPath, []byte("#!/bin/sh\n"), 0o755); err != nil { //nolint:gosec // must be executable
 			t.Fatal(err)
 		}
 		t.Setenv("PATH", dir)
@@ -176,12 +190,15 @@ func TestDetectRuntime(t *testing.T) {
 }
 
 func TestIsRootlessPodman(t *testing.T) {
+	t.Parallel()
 	t.Run("docker", func(t *testing.T) {
+		t.Parallel()
 		if isRootlessPodman("docker") {
 			t.Error("isRootlessPodman(\"docker\") = true, want false")
 		}
 	})
 	t.Run("podman", func(t *testing.T) {
+		t.Parallel()
 		got := isRootlessPodman("podman")
 		if runtime.GOOS == "linux" {
 			// On Linux, result depends on whether tests run as root.
@@ -196,12 +213,15 @@ func TestIsRootlessPodman(t *testing.T) {
 }
 
 func TestRscFS(t *testing.T) {
+	t.Parallel()
 	t.Run("root_Dockerfile", func(t *testing.T) {
+		t.Parallel()
 		if _, err := rscFS.ReadFile("rsc/root/Dockerfile"); err != nil {
 			t.Fatalf("embedded rsc/root/Dockerfile not found: %v", err)
 		}
 	})
 	t.Run("user_Dockerfile", func(t *testing.T) {
+		t.Parallel()
 		if _, err := rscFS.ReadFile("rsc/user/Dockerfile"); err != nil {
 			t.Fatalf("embedded rsc/user/Dockerfile not found: %v", err)
 		}
