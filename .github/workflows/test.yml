@@ -162,6 +162,12 @@ jobs:
     env:
       PYTHONDONTWRITEBYTECODE: x
     steps:
+      - name: Maximize Docker Space
+        run: |
+          sudo systemctl stop docker
+          sudo mv /var/lib/docker /mnt/
+          sudo ln -s /mnt/docker /var/lib/docker
+          sudo systemctl start docker
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
         with:
