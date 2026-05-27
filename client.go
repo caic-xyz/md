@@ -204,7 +204,7 @@ func (c *Client) Container(repos ...Repo) (*Container, error) {
 	return &Container{
 		Client: c,
 		Repos:  repos,
-		Name:   containerName(repos[0].MountName(), repos[0].Branch),
+		Name:   containerName(SanitizeDockerName(filepath.Base(repos[0].MountedPath)), repos[0].Branch),
 	}, nil
 }
 

@@ -203,14 +203,6 @@ func (r *Repo) Validate() error {
 	return nil
 }
 
-// MountName returns the repository name component used for Docker
-// container naming (e.g. "github-caic" for "/home/user/src/github/caic").
-// It extracts the portion after "/home/user/src/", replacing slashes
-// with hyphens.
-func (r *Repo) MountName() string {
-	return SanitizeDockerName(strings.TrimPrefix(r.MountedPath, "/home/user/src/"))
-}
-
 // validateRepoNames checks that all repos have unique mount paths.
 //
 // Two repos with the same MountedPath would share a directory and
@@ -378,7 +370,7 @@ func (c *Container) Run(ctx context.Context, stdout, stderr io.Writer, baseImage
 	var tmpName string
 	if len(c.Repos) > 0 {
 		tmpRepos = c.Repos[:1]
-		tmpName = fmt.Sprintf("md-%s-run-%x", c.Repos[0].MountName(), buf)
+		tmpName = fmt.Sprintf("md-%s-run-%x", SanitizeDockerName(filepath.Base(c.Repos[0].MountedPath)), buf)
 	} else {
 		tmpName = fmt.Sprintf("md-run-%x", buf)
 	}
