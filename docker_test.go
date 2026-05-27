@@ -111,19 +111,25 @@ func TestDirStats(t *testing.T) {
 
 func TestKeysSHA(t *testing.T) {
 	t.Parallel()
-	keysDir := t.TempDir()
-	for _, f := range []struct{ name, content string }{
+	testKeys := []struct{ name, content string }{
 		{"ssh_host_ed25519_key", "hostkey"},
 		{"ssh_host_ed25519_key.pub", "hostkey.pub"},
 		{"authorized_keys", "authkeys"},
-	} {
-		if err := os.WriteFile(filepath.Join(keysDir, f.name), []byte(f.content), 0o644); err != nil { //nolint:gosec // test data
-			t.Fatal(err)
+	}
+	writeTestKeys := func(t *testing.T) string {
+		t.Helper()
+		dir := t.TempDir()
+		for _, f := range testKeys {
+			if err := os.WriteFile(filepath.Join(dir, f.name), []byte(f.content), 0o644); err != nil { //nolint:gosec // test data
+				t.Fatal(err)
+			}
 		}
+		return dir
 	}
 
 	t.Run("deterministic", func(t *testing.T) {
 		t.Parallel()
+		keysDir := writeTestKeys(t)
 		got1, err := keysSHA(keysDir)
 		if err != nil {
 			t.Fatal(err)
@@ -139,6 +145,7 @@ func TestKeysSHA(t *testing.T) {
 
 	t.Run("changes_with_keys", func(t *testing.T) {
 		t.Parallel()
+		keysDir := writeTestKeys(t)
 		sha1, err := keysSHA(keysDir)
 		if err != nil {
 			t.Fatal(err)
