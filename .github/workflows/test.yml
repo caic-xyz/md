@@ -170,6 +170,7 @@ jobs:
           sudo systemctl start docker
           sudo mkdir -p /mnt/user-containers
           sudo chown $USER:$USER /mnt/user-containers
+          mkdir -p ~/.local/share
           ln -s /mnt/user-containers ~/.local/share/containers
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
