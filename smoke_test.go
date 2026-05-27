@@ -148,7 +148,7 @@ func TestSmoke(t *testing.T) {
 				ct := launchSmokeContainer(t, t.Context(), client, baseImage, rt+"-launch")
 
 				t.Run("sudo", func(t *testing.T) {
-					out, err := ct.runCmd(t.Context(), "", ct.SSHCommand(ct.Name, "echo '"+ct.sudoPassword+"' | sudo -S whoami"))
+					out, err := ct.runCmd(t.Context(), "", ct.SSHCommand(nil, "echo '"+ct.sudoPassword+"' | sudo -S whoami"))
 					if err != nil {
 						t.Fatalf("sudo whoami: %v", err)
 					}
@@ -159,7 +159,7 @@ func TestSmoke(t *testing.T) {
 				})
 
 				t.Run("file_io", func(t *testing.T) {
-					if _, err := ct.runCmd(t.Context(), "", ct.SSHCommand(ct.Name, "echo hello > /tmp/smoke-test && cat /tmp/smoke-test")); err != nil {
+					if _, err := ct.runCmd(t.Context(), "", ct.SSHCommand(nil, "echo hello > /tmp/smoke-test && cat /tmp/smoke-test")); err != nil {
 						t.Fatalf("file I/O: %v", err)
 					}
 				})
@@ -176,7 +176,7 @@ func TestSmoke(t *testing.T) {
 					ContainerPath: "/home/user/.cache/smoke",
 				})
 
-				out, err := ct.runCmd(t.Context(), "", ct.SSHCommand(ct.Name, "cat /home/user/.cache/smoke/hello.txt"))
+				out, err := ct.runCmd(t.Context(), "", ct.SSHCommand(nil, "cat /home/user/.cache/smoke/hello.txt"))
 				if err != nil {
 					t.Fatalf("read cached file: %v", err)
 				}
@@ -193,7 +193,7 @@ func TestSmoke(t *testing.T) {
 				ct := launchSmokeContainer(t, t.Context(), client, baseImage, rt+"-nested")
 
 				t.Run("version", func(t *testing.T) {
-					out, err := ct.runCmd(t.Context(), "", ct.SSHCommand(ct.Name, "podman version --format '{{.Version}}'"))
+					out, err := ct.runCmd(t.Context(), "", ct.SSHCommand(nil, "podman version --format '{{.Version}}'"))
 					if err != nil {
 						t.Fatalf("podman version: %v", err)
 					}
@@ -205,7 +205,7 @@ func TestSmoke(t *testing.T) {
 				})
 
 				t.Run("info", func(t *testing.T) {
-					out, err := ct.runCmd(t.Context(), "", ct.SSHCommand(ct.Name, "podman info --format '{{.Host.RemoteSocket.Path}}'"))
+					out, err := ct.runCmd(t.Context(), "", ct.SSHCommand(nil, "podman info --format '{{.Host.RemoteSocket.Path}}'"))
 					if err != nil {
 						t.Fatalf("podman info: %v", err)
 					}
@@ -215,7 +215,7 @@ func TestSmoke(t *testing.T) {
 				t.Run("run_alpine", func(t *testing.T) {
 					subCtx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
 					defer cancel()
-					out, err := ct.runCmd(subCtx, "", ct.SSHCommand(ct.Name, "podman run --rm docker.io/alpine:latest echo hello-from-nested-podman"))
+					out, err := ct.runCmd(subCtx, "", ct.SSHCommand(nil, "podman run --rm docker.io/alpine:latest echo hello-from-nested-podman"))
 					if err != nil {
 						t.Fatalf("podman run alpine: %v", err)
 					}
@@ -228,7 +228,7 @@ func TestSmoke(t *testing.T) {
 				t.Run("run_alpine_id", func(t *testing.T) {
 					subCtx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
 					defer cancel()
-					out, err := ct.runCmd(subCtx, "", ct.SSHCommand(ct.Name, "podman run --rm docker.io/alpine:latest id -u"))
+					out, err := ct.runCmd(subCtx, "", ct.SSHCommand(nil, "podman run --rm docker.io/alpine:latest id -u"))
 					if err != nil {
 						t.Fatalf("podman run id: %v", err)
 					}
@@ -241,7 +241,7 @@ func TestSmoke(t *testing.T) {
 				t.Run("pull_busybox", func(t *testing.T) {
 					subCtx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 					defer cancel()
-					out, err := ct.runCmd(subCtx, "", ct.SSHCommand(ct.Name, "podman pull docker.io/busybox:latest"))
+					out, err := ct.runCmd(subCtx, "", ct.SSHCommand(nil, "podman pull docker.io/busybox:latest"))
 					if err != nil {
 						t.Fatalf("podman pull busybox: %v", err)
 					}
@@ -251,7 +251,7 @@ func TestSmoke(t *testing.T) {
 				t.Run("run_busybox", func(t *testing.T) {
 					subCtx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 					defer cancel()
-					out, err := ct.runCmd(subCtx, "", ct.SSHCommand(ct.Name, "podman run --rm docker.io/busybox:latest echo ok"))
+					out, err := ct.runCmd(subCtx, "", ct.SSHCommand(nil, "podman run --rm docker.io/busybox:latest echo ok"))
 					if err != nil {
 						t.Fatalf("podman run busybox: %v", err)
 					}
@@ -264,7 +264,7 @@ func TestSmoke(t *testing.T) {
 			t.Run("lifecycle", func(t *testing.T) {
 				ct := launchSmokeContainer(t, t.Context(), client, baseImage, rt+"-lifecycle")
 
-				if _, err := ct.runCmd(t.Context(), "", ct.SSHCommand(ct.Name, "echo persisted > /tmp/smoke-test")); err != nil {
+				if _, err := ct.runCmd(t.Context(), "", ct.SSHCommand(nil, "echo persisted > /tmp/smoke-test")); err != nil {
 					t.Fatalf("write file: %v", err)
 				}
 
@@ -278,7 +278,7 @@ func TestSmoke(t *testing.T) {
 					t.Fatalf("Revive: %v", err)
 				}
 
-				out, err := ct.runCmd(t.Context(), "", ct.SSHCommand(ct.Name, "cat /tmp/smoke-test"))
+				out, err := ct.runCmd(t.Context(), "", ct.SSHCommand(nil, "cat /tmp/smoke-test"))
 				if err != nil {
 					t.Fatalf("read file after revive: %v", err)
 				}

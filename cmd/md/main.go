@@ -445,7 +445,7 @@ func cmdStart(ctx context.Context, args []string) error {
 		}
 	}
 	if !*noSSH {
-		sshArgs := ct.SSHCommand(ct.Name)
+		sshArgs := ct.SSHCommand(nil, "")
 		cmd := exec.CommandContext(ctx, sshArgs[0], sshArgs[1:]...)
 		cmd.Stdin = os.Stdin
 		cmd.Stdout = os.Stdout
@@ -990,7 +990,7 @@ func cmdFork(ctx context.Context, args []string) error {
 		}
 	}
 	if !*noSSH {
-		sshArgs := fork.SSHCommand(fork.Name)
+		sshArgs := fork.SSHCommand(nil, "")
 		cmd := exec.CommandContext(ctx, sshArgs[0], sshArgs[1:]...)
 		cmd.Stdin = os.Stdin
 		cmd.Stdout = os.Stdout

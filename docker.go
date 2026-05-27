@@ -1090,7 +1090,7 @@ func (c *Container) provisionContainer(ctx context.Context, stdout, stderr io.Wr
 				mp := shellQuote(c.Repos[repoIdx].MountedPath)
 				rBranch := shellQuote(c.Repos[repoIdx].Branch)
 
-				if err := c.runCmdOut(egCtx, "", c.SSHCommand(c.Name, "git init -q "+mp), stdout, stderr); err != nil {
+				if err := c.runCmdOut(egCtx, "", c.SSHCommand(nil, "git init -q "+mp), stdout, stderr); err != nil {
 					return fmt.Errorf("init repo %s in container: %w", c.Repos[repoIdx].MountedPath, err)
 				}
 
@@ -1108,7 +1108,7 @@ func (c *Container) provisionContainer(ctx context.Context, stdout, stderr io.Wr
 				}, stdout, stderr); err != nil {
 					return fmt.Errorf("push repo %s: %w", c.Repos[repoIdx].MountedPath, err)
 				}
-				if err := c.runCmdOut(egCtx, "", c.SSHCommand(c.Name,
+				if err := c.runCmdOut(egCtx, "", c.SSHCommand(nil,
 					"cd "+mp+
 						" && git branch -q --track "+rBranch+" base"+
 						" && git switch -q "+rBranch), stdout, stderr); err != nil {
@@ -1130,7 +1130,7 @@ func (c *Container) provisionContainer(ctx context.Context, stdout, stderr io.Wr
 				originURL, err := c.runCmd(egCtx, c.Repos[repoIdx].GitRoot, []string{"git", "remote", "get-url", c.Repos[repoIdx].DefaultRemote})
 				if err == nil && originURL != "" {
 					httpsURL := convertGitURLToHTTPS(originURL)
-					_, _ = c.runCmd(egCtx, "", c.SSHCommand(c.Name, "cd "+mp+" && git remote add origin "+shellQuote(httpsURL)))
+					_, _ = c.runCmd(egCtx, "", c.SSHCommand(nil, "cd "+mp+" && git remote add origin "+shellQuote(httpsURL)))
 					if !opts.Quiet {
 						_, _ = fmt.Fprintf(stdout, "- Set %s origin to %s\n", c.Repos[repoIdx].MountedPath, httpsURL)
 					}
@@ -1180,7 +1180,7 @@ func (c *Container) sendEnv(ctx context.Context, stdout io.Writer, opts *StartOp
 	if len(envContent) > 0 && !opts.Quiet {
 		_, _ = fmt.Fprintln(stdout, "- sending .env into container ...")
 	}
-	sshEnvArgs := c.SSHCommand(c.Name, "cat > /home/user/.env")
+	sshEnvArgs := c.SSHCommand(nil, "cat > /home/user/.env")
 	cmd := exec.CommandContext(ctx, sshEnvArgs[0], sshEnvArgs[1:]...)
 	cmd.Env = append(os.Environ(), c.env...)
 	cmd.Stdin = bytes.NewReader(envContent)

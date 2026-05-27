@@ -161,14 +161,21 @@ type Container struct {
 	tailscaleEphemeral bool
 }
 
-// SSHCommand returns the base SSH command args for this container, including
-// -F <config-path> when sshConfigPath is set.
-func (c *Container) SSHCommand(extraArgs ...string) []string {
+// SSHCommand returns SSH command args for this container.
+// opts are SSH flags (e.g. "-q", "-t"); cmd is the remote command.
+// The container name is always included as the SSH host target.
+// If cmd is empty, only the base SSH args and host are returned (for interactive sessions).
+func (c *Container) SSHCommand(opts []string, cmd string) []string {
 	args := []string{"ssh"}
 	if c.sshConfigPath != "" {
 		args = append(args, "-F", c.sshConfigPath)
 	}
-	return append(args, extraArgs...)
+	args = append(args, opts...)
+	args = append(args, c.Name)
+	if cmd != "" {
+		args = append(args, cmd)
+	}
+	return args
 }
 
 // populateMountPath sets MountedPath from GitRoot if not already set.
@@ -405,7 +412,7 @@ func (c *Container) Run(ctx context.Context, stdout, stderr io.Writer, baseImage
 	} else {
 		sshCmd = cmdStr
 	}
-	err = c.runCmdOut(ctx, "", c.SSHCommand(tmp.Name, sshCmd), stdout, stderr)
+	err = c.runCmdOut(ctx, "", tmp.SSHCommand(nil, sshCmd), stdout, stderr)
 	exitCode := 0
 	if err != nil {
 		var exitErr *exec.ExitError
@@ -499,7 +506,7 @@ func (c *Container) Revive(ctx context.Context, stdout, stderr io.Writer) error 
 func (c *Container) waitForSSH(ctx context.Context, deadline time.Time) error {
 	var lastErr error
 	for {
-		sshArgs := c.SSHCommand(c.Name, "true")
+		sshArgs := c.SSHCommand(nil, "true")
 		cmd := exec.CommandContext(ctx, sshArgs[0], sshArgs[1:]...)
 		cmd.Env = append(os.Environ(), c.env...)
 		if out, err := cmd.CombinedOutput(); err == nil {
@@ -616,7 +623,7 @@ func (c *Container) Push(ctx context.Context, stdout, stderr io.Writer, repoIdx 
 	mp := shellQuote(r.MountedPath)
 	branch := shellQuote(r.Branch)
 	// Commit any pending changes in the container.
-	_, _ = c.runCmd(ctx, "", c.SSHCommand(c.Name, "cd "+mp+" && git add . && (git diff --quiet HEAD -- . || git commit -q -m 'Backup before push')"))
+	_, _ = c.runCmd(ctx, "", c.SSHCommand(nil, "cd "+mp+" && git add . && (git diff --quiet HEAD -- . || git commit -q -m 'Backup before push')"))
 	// Refuse if there are pending local changes on the branch being pushed.
 	currentBranch, _ := gitutil.RunGit(ctx, r.GitRoot, "branch", "--show-current")
 	if currentBranch == r.Branch {
@@ -625,13 +632,13 @@ func (c *Container) Push(ctx context.Context, stdout, stderr io.Writer, repoIdx 
 		}
 	}
 	// Save a backup branch of the current container state.
-	containerCommit, _ := c.runCmd(ctx, "", c.SSHCommand(c.Name, "cd "+mp+" && git rev-parse HEAD"))
+	containerCommit, _ := c.runCmd(ctx, "", c.SSHCommand(nil, "cd "+mp+" && git rev-parse HEAD"))
 	backupBranch := "backup-" + time.Now().Format("20060102-150405")
-	_, _ = c.runCmd(ctx, "", c.SSHCommand(c.Name, "cd "+mp+" && git branch -f "+backupBranch+" "+shellQuote(containerCommit)))
+	_, _ = c.runCmd(ctx, "", c.SSHCommand(nil, "cd "+mp+" && git branch -f "+backupBranch+" "+shellQuote(containerCommit)))
 	if err := c.runCmdOut(ctx, r.GitRoot, []string{"git", "push", "-q", "-f", "--tags", c.Name, r.Branch + ":base"}, stdout, stderr); err != nil {
 		return "", err
 	}
-	if err := c.runCmdOut(ctx, "", c.SSHCommand(c.Name, "cd "+mp+" && git switch -q -C "+branch+" base && git branch --set-upstream-to=base"), stdout, stderr); err != nil {
+	if err := c.runCmdOut(ctx, "", c.SSHCommand(nil, "cd "+mp+" && git switch -q -C "+branch+" base && git branch --set-upstream-to=base"), stdout, stderr); err != nil {
 		return "", err
 	}
 	// Update the local remote-tracking ref so it reflects the pushed state.
@@ -661,7 +668,7 @@ func (c *Container) Fetch(ctx context.Context, stdout, stderr io.Writer, repoIdx
 		return err
 	}
 	// Check if there are uncommitted changes in the container.
-	if _, err := c.runCmd(ctx, "", c.SSHCommand(c.Name, "cd "+mp+" && git add . && git diff --quiet HEAD -- .")); err != nil {
+	if _, err := c.runCmd(ctx, "", c.SSHCommand(nil, "cd "+mp+" && git add . && git diff --quiet HEAD -- .")); err != nil {
 		commitMsg := "Pull from md"
 		if p != nil {
 			metadata := c.gatherGitMetadata(ctx, r.MountedPath)
@@ -682,7 +689,7 @@ func (c *Container) Fetch(ctx context.Context, stdout, stderr io.Writer, repoIdx
 		}
 		gitAuthor := shellQuote(gitUserName + " <" + gitUserEmail + ">")
 		commitCmd := "cd " + mp + " && echo " + shellQuote(commitMsg) + " | git commit -a -q --author " + gitAuthor + " -F -"
-		if err := c.runCmdOut(ctx, "", c.SSHCommand(c.Name, commitCmd), stdout, stderr); err != nil {
+		if err := c.runCmdOut(ctx, "", c.SSHCommand(nil, commitCmd), stdout, stderr); err != nil {
 			return fmt.Errorf("committing in container: %w", err)
 		}
 	}
@@ -738,7 +745,7 @@ func (c *Container) Pull(ctx context.Context, stdout, stderr io.Writer, repoIdx 
 func (c *Container) gatherGitMetadata(ctx context.Context, repo string) string {
 	r := shellQuote(repo)
 	cmd := "cd " + r + " && echo '=== Branch ===' && git rev-parse --abbrev-ref HEAD && echo && echo '=== Files Changed ===' && git diff --stat --cached base -- . && echo && echo '=== Recent Commits ===' && git log -5 base -- ."
-	out, _ := c.runCmd(ctx, "", c.SSHCommand(c.Name, cmd))
+	out, _ := c.runCmd(ctx, "", c.SSHCommand(nil, cmd))
 	return out
 }
 
@@ -746,7 +753,7 @@ func (c *Container) gatherGitMetadata(ctx context.Context, repo string) string {
 func (c *Container) gatherGitDiff(ctx context.Context, repo string) string {
 	r := shellQuote(repo)
 	cmd := "cd " + r + " && git diff --patience -U10 --cached base -- ."
-	out, _ := c.runCmd(ctx, "", c.SSHCommand(c.Name, cmd))
+	out, _ := c.runCmd(ctx, "", c.SSHCommand(nil, cmd))
 	return out
 }
 
@@ -771,14 +778,18 @@ func (c *Container) Diff(ctx context.Context, stdout, stderr io.Writer, repoIdx 
 	}
 	repo := c.Repos[repoIdx]
 	mp := shellQuote(repo.MountedPath)
-	sshArgs := c.SSHCommand("-q")
+	opts := []string{"-q"}
+	isTTY := false
+	if f, ok := stdout.(*os.File); ok && term.IsTerminal(int(f.Fd())) {
+		opts = append(opts, "-t")
+		isTTY = true
+	}
+	sshArgs := c.SSHCommand(opts, "cd "+mp+" && git add . && git diff base "+strings.Join(quotedArgs, " ")+" -- .")
 	cmd := exec.CommandContext(ctx, sshArgs[0])
 	cmd.Env = append(os.Environ(), c.env...)
-	if f, ok := stdout.(*os.File); ok && term.IsTerminal(int(f.Fd())) {
-		sshArgs = append(sshArgs, "-t")
+	if isTTY {
 		cmd.Stdin = os.Stdin
 	}
-	sshArgs = append(sshArgs, c.Name, "cd "+mp+" && git add . && git diff base "+strings.Join(quotedArgs, " ")+" -- .")
 	var err error
 	cmd.Path, err = exec.LookPath(sshArgs[0])
 	if err != nil {
@@ -992,7 +1003,7 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 			envContent = append(envContent, []byte(kv+"\n")...)
 		}
 	}
-	sshEnvArgs := fork.SSHCommand(fork.Name, "cat > /home/user/.env")
+	sshEnvArgs := fork.SSHCommand(nil, "cat > /home/user/.env")
 	for {
 		cmd := exec.CommandContext(ctx, sshEnvArgs[0], sshEnvArgs[1:]...)
 		cmd.Env = append(os.Environ(), fork.env...)
@@ -1027,7 +1038,7 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 		renameCmd := "cd " + mp +
 			" && git branch -m " + oldBranch + " " + newBranch +
 			" && git branch --set-upstream-to=base"
-		if err := c.runCmdOut(ctx, "", fork.SSHCommand(fork.Name, renameCmd), stdout, stderr); err != nil {
+		if err := c.runCmdOut(ctx, "", fork.SSHCommand(nil, renameCmd), stdout, stderr); err != nil {
 			return nil, fmt.Errorf("renaming branch for %s: %w", r.MountedPath, err)
 		}
 		if err := c.runCmdOut(ctx, fork.Repos[i].GitRoot, []string{
@@ -1049,7 +1060,7 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 		mp := shellQuote(src.MountedPath)
 		dstBranch := shellQuote(dst.Branch)
 
-		if err := c.runCmdOut(ctx, "", fork.SSHCommand(fork.Name, "git init -q "+mp), stdout, stderr); err != nil {
+		if err := c.runCmdOut(ctx, "", fork.SSHCommand(nil, "git init -q "+mp), stdout, stderr); err != nil {
 			return nil, fmt.Errorf("init extra repo %s in container: %w", src.MountedPath, err)
 		}
 		if err := c.runCmdOut(ctx, src.GitRoot, []string{
@@ -1061,7 +1072,7 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 		setupCmd := "cd " + mp +
 			" && git branch --track " + dstBranch + " base" +
 			" && git switch -q " + dstBranch
-		if err := c.runCmdOut(ctx, "", fork.SSHCommand(fork.Name, setupCmd), stdout, stderr); err != nil {
+		if err := c.runCmdOut(ctx, "", fork.SSHCommand(nil, setupCmd), stdout, stderr); err != nil {
 			return nil, fmt.Errorf("setting up extra repo %s: %w", src.MountedPath, err)
 		}
 	}
@@ -1472,7 +1483,7 @@ func (c *Container) pushSubmodules(ctx context.Context, stdout, stderr io.Writer
 		initCmd := "git init -q --bare " + shellQuote(containerModuleDir) +
 			" && git -C " + shellQuote(containerModuleDir) + " config --unset core.bare" +
 			" && git -C " + shellQuote(containerModuleDir) + " config receive.denyCurrentBranch ignore"
-		if err := c.runCmdOut(ctx, "", c.SSHCommand(c.Name, initCmd), stdout, stderr); err != nil {
+		if err := c.runCmdOut(ctx, "", c.SSHCommand(nil, initCmd), stdout, stderr); err != nil {
 			return fmt.Errorf("init submodule %s: %w", relPath, err)
 		}
 		// Push all refs from host bare module repo to container.
@@ -1555,7 +1566,7 @@ func (c *Container) pushSubmodules(ctx context.Context, stdout, stderr io.Writer
   done
 }
 export -f __md_sm_fix && __md_sm_fix`
-	if err := c.runCmdOut(ctx, "", c.SSHCommand(c.Name, script), stdout, stderr); err != nil {
+	if err := c.runCmdOut(ctx, "", c.SSHCommand(nil, script), stdout, stderr); err != nil {
 		return fmt.Errorf("submodule update: %w", err)
 	}
 	return nil
