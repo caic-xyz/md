@@ -329,7 +329,7 @@ func (c *Container) Run(ctx context.Context, stdout, stderr io.Writer, baseImage
 	var tmpName string
 	if len(c.Repos) > 0 {
 		tmpRepos = c.Repos[:1]
-		tmpName = fmt.Sprintf("md-%s-run-%x", SanitizeDockerName(filepath.Base(c.Repos[0].MountedPath)), buf)
+		tmpName = fmt.Sprintf("md-%s-run-%x", sanitizeDockerName(filepath.Base(c.Repos[0].MountedPath)), buf)
 	} else {
 		tmpName = fmt.Sprintf("md-run-%x", buf)
 	}

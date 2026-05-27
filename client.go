@@ -179,7 +179,7 @@ func (c *Client) Container(repos ...Repo) (*Container, error) {
 	return &Container{
 		Client: c,
 		Repos:  repos,
-		Name:   containerName(SanitizeDockerName(filepath.Base(repos[0].MountedPath)), repos[0].Branch),
+		Name:   containerName(sanitizeDockerName(filepath.Base(repos[0].MountedPath)), repos[0].Branch),
 	}, nil
 }
 
@@ -1507,10 +1507,10 @@ func envOr(key, fallback string) string {
 	return fallback
 }
 
-// SanitizeDockerName sanitizes a string for use in a Docker container name.
+// sanitizeDockerName sanitizes a string for use in a Docker container name.
 //
 // Docker container names must match [a-zA-Z0-9][a-zA-Z0-9_.-].
-func SanitizeDockerName(name string) string {
+func sanitizeDockerName(name string) string {
 	s := reInvalid.ReplaceAllString(name, "-")
 	s = reStripRemaining.ReplaceAllString(s, "")
 	s = reCollapse.ReplaceAllString(s, "-")
@@ -1523,5 +1523,5 @@ func SanitizeDockerName(name string) string {
 
 // containerName returns the container name for a repo and branch.
 func containerName(repoName, branchName string) string {
-	return "md-" + SanitizeDockerName(repoName) + "-" + SanitizeDockerName(branchName)
+	return "md-" + sanitizeDockerName(repoName) + "-" + sanitizeDockerName(branchName)
 }

@@ -36,8 +36,8 @@ func TestSanitizeDockerName(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if got := SanitizeDockerName(tt.in); got != tt.want {
-				t.Errorf("SanitizeDockerName(%q) = %q, want %q", tt.in, got, tt.want)
+			if got := sanitizeDockerName(tt.in); got != tt.want {
+				t.Errorf("sanitizeDockerName(%q) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
 	}
