@@ -436,23 +436,6 @@ func (c *Client) PruneImages(ctx context.Context, stdout, stderr io.Writer) ([]s
 	return removed, nil
 }
 
-// gatherGitMetadata runs SSH commands to collect branch, stat, and log from
-// the container. This data is always small.
-func (c *Client) gatherGitMetadata(ctx context.Context, containerName, repo string) string {
-	r := shellQuote(repo)
-	cmd := "cd " + r + " && echo '=== Branch ===' && git rev-parse --abbrev-ref HEAD && echo && echo '=== Files Changed ===' && git diff --stat --cached base -- . && echo && echo '=== Recent Commits ===' && git log -5 base -- ."
-	out, _ := c.runCmd(ctx, "", c.SSHCommand(containerName, cmd))
-	return out
-}
-
-// gatherGitDiff runs SSH to get the full patience diff from the container.
-func (c *Client) gatherGitDiff(ctx context.Context, containerName, repo string) string {
-	r := shellQuote(repo)
-	cmd := "cd " + r + " && git diff --patience -U10 --cached base -- ."
-	out, _ := c.runCmd(ctx, "", c.SSHCommand(containerName, cmd))
-	return out
-}
-
 // Harness identifies an agent harness whose config directories are mounted
 // into a container.
 type Harness string

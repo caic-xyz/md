@@ -644,8 +644,8 @@ func (c *Container) Fetch(ctx context.Context, stdout, stderr io.Writer, repoIdx
 	if _, err := c.runCmd(ctx, "", c.SSHCommand(c.Name, "cd "+mp+" && git add . && git diff --quiet HEAD -- .")); err != nil {
 		commitMsg := "Pull from md"
 		if p != nil {
-			metadata := c.gatherGitMetadata(ctx, c.Name, r.MountedPath)
-			diff := c.gatherGitDiff(ctx, c.Name, r.MountedPath)
+			metadata := c.gatherGitMetadata(ctx, r.MountedPath)
+			diff := c.gatherGitDiff(ctx, r.MountedPath)
 			if msg, err := gitutil.GenerateCommitMsg(ctx, p, metadata, diff, nil); err != nil {
 				slog.WarnContext(ctx, "md", "msg", "failed to generate commit message", "err", err)
 			} else if msg != "" {
@@ -711,6 +711,23 @@ func (c *Container) Pull(ctx context.Context, stdout, stderr io.Writer, repoIdx 
 		}
 	}
 	return c.runCmdOut(ctx, r.GitRoot, []string{"git", "push", "-q", "-f", c.Name, r.Branch + ":base"}, stdout, stderr)
+}
+
+// gatherGitMetadata runs SSH commands to collect branch, stat, and log from
+// the container. This data is always small.
+func (c *Container) gatherGitMetadata(ctx context.Context, repo string) string {
+	r := shellQuote(repo)
+	cmd := "cd " + r + " && echo '=== Branch ===' && git rev-parse --abbrev-ref HEAD && echo && echo '=== Files Changed ===' && git diff --stat --cached base -- . && echo && echo '=== Recent Commits ===' && git log -5 base -- ."
+	out, _ := c.runCmd(ctx, "", c.SSHCommand(c.Name, cmd))
+	return out
+}
+
+// gatherGitDiff runs SSH to get the full patience diff from the container.
+func (c *Container) gatherGitDiff(ctx context.Context, repo string) string {
+	r := shellQuote(repo)
+	cmd := "cd " + r + " && git diff --patience -U10 --cached base -- ."
+	out, _ := c.runCmd(ctx, "", c.SSHCommand(c.Name, cmd))
+	return out
 }
 
 // Diff writes the diff between base and current for Repos[repoIdx] to stdout/stderr.
