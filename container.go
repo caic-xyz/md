@@ -17,18 +17,20 @@ import (
 	"log/slog"
 	"maps"
 	"math/big"
+	"net"
 	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/caic-xyz/md/gitutil"
 	"github.com/maruel/genai"
+	"golang.org/x/sync/errgroup"
 	"golang.org/x/term"
 )
 
@@ -1047,142 +1049,6 @@ func (c *Container) DiskUsage(ctx context.Context) (int64, error) {
 	return sz, nil
 }
 
-// StatsAll fetches resource usage for multiple containers in batch (2 docker
-// calls instead of 2N). Returns a map keyed by container name.
-func (c *Client) StatsAll(ctx context.Context, names []string) (map[string]*ContainerStats, error) {
-	result := make(map[string]*ContainerStats, len(names))
-	if len(names) == 0 {
-		return result, nil
-	}
-	var mu sync.Mutex
-	var statsErr, inspectErr error
-
-	var wg sync.WaitGroup
-
-	// Batch docker stats (one call). Stopped containers return zeros.
-	wg.Go(func() {
-		args := make([]string, 0, 6+len(names))
-		args = append(args, c.Runtime, "stats", "--no-stream", "--no-trunc", "--format", "{{json .}}")
-		args = append(args, names...)
-		out, err := c.runCmd(ctx, "", args)
-		if err != nil {
-			statsErr = fmt.Errorf("docker stats: %w", err)
-			return
-		}
-		for line := range strings.SplitSeq(out, "\n") {
-			line = strings.TrimSpace(line)
-			if line == "" {
-				continue
-			}
-			s, name, err := parseStatsLine(line)
-			if err != nil {
-				statsErr = fmt.Errorf("docker stats: %w", err)
-				return
-			}
-			mu.Lock()
-			if existing, ok := result[name]; ok {
-				// Inspect goroutine may have already set DiskUsed; preserve it.
-				s.DiskUsed = existing.DiskUsed
-			}
-			result[name] = s
-			mu.Unlock()
-		}
-	})
-
-	// Batch docker inspect --size (one call).
-	wg.Go(func() {
-		args := make([]string, 0, 5+len(names))
-		args = append(args, c.Runtime, "inspect", "--size", "--format", "{{.Name}}\t{{json .SizeRw}}")
-		args = append(args, names...)
-		out, err := c.runCmd(ctx, "", args)
-		if err != nil {
-			inspectErr = fmt.Errorf("docker inspect --size: %w", err)
-			return
-		}
-		for line := range strings.SplitSeq(out, "\n") {
-			line = strings.TrimSpace(line)
-			if line == "" {
-				continue
-			}
-			parts := strings.SplitN(line, "\t", 2)
-			if len(parts) != 2 {
-				continue
-			}
-			name := strings.TrimPrefix(parts[0], "/")
-			var sz int64
-			if err := json.Unmarshal([]byte(parts[1]), &sz); err != nil {
-				continue
-			}
-			mu.Lock()
-			if s, ok := result[name]; ok {
-				s.DiskUsed = sz
-			} else {
-				result[name] = &ContainerStats{DiskUsed: sz}
-			}
-			mu.Unlock()
-		}
-	})
-
-	wg.Wait()
-	return result, errors.Join(statsErr, inspectErr)
-}
-
-// parseStatsLine parses one JSON line from docker stats output into a
-// ContainerStats and returns the container name.
-func parseStatsLine(line string) (*ContainerStats, string, error) {
-	var raw struct {
-		Name     string `json:"Name"`
-		CPUPerc  string `json:"CPUPerc"`
-		MemUsage string `json:"MemUsage"`
-		MemPerc  string `json:"MemPerc"`
-		PIDs     string `json:"PIDs"`
-		NetIO    string `json:"NetIO"`
-		BlockIO  string `json:"BlockIO"`
-	}
-	if err := json.Unmarshal([]byte(line), &raw); err != nil {
-		return nil, "", fmt.Errorf("parsing stats JSON: %w", err)
-	}
-	cpuPerc, err := parsePercent(raw.CPUPerc)
-	if err != nil {
-		return nil, "", fmt.Errorf("parsing CPU%%: %w", err)
-	}
-	memPerc, err := parsePercent(raw.MemPerc)
-	if err != nil {
-		return nil, "", fmt.Errorf("parsing mem%%: %w", err)
-	}
-	memUsed, memLimit, err := parseMemUsage(raw.MemUsage)
-	if err != nil {
-		return nil, "", fmt.Errorf("parsing mem usage: %w", err)
-	}
-	var pids int
-	if raw.PIDs != "N/A" {
-		pids, err = strconv.Atoi(raw.PIDs)
-		if err != nil {
-			return nil, "", fmt.Errorf("parsing PIDs: %w", err)
-		}
-	}
-	netRx, netTx, err := parseIOPair(raw.NetIO)
-	if err != nil {
-		return nil, "", fmt.Errorf("parsing net I/O: %w", err)
-	}
-	blockRead, blockWrite, err := parseIOPair(raw.BlockIO)
-	if err != nil {
-		return nil, "", fmt.Errorf("parsing block I/O: %w", err)
-	}
-	return &ContainerStats{
-		CPUPerc:    cpuPerc,
-		MemUsed:    memUsed,
-		MemLimit:   memLimit,
-		MemPerc:    memPerc,
-		PIDs:       pids,
-		NetRx:      netRx,
-		NetTx:      netTx,
-		BlockRead:  blockRead,
-		BlockWrite: blockWrite,
-		DiskUsed:   -1,
-	}, raw.Name, nil
-}
-
 // GetHostPort returns the host port mapped to a container port (e.g.
 // "5901/tcp"). Returns 0 if the port is not mapped.
 func (c *Container) GetHostPort(ctx context.Context, containerPort string) (int32, error) {
@@ -1190,32 +1056,6 @@ func (c *Container) GetHostPort(ctx context.Context, containerPort string) (int3
 		return 0, fmt.Errorf("container %s is not running", c.Name)
 	}
 	return c.getHostPort(ctx, c.Name, containerPort)
-}
-
-// getHostPort extracts the host port for containerPort from a running
-// container. It uses JSON output instead of Go templates to work around
-// Docker 27's "index of untyped nil" bug when port bindings are nil.
-func (c *Client) getHostPort(ctx context.Context, container, containerPort string) (int32, error) {
-	raw, err := c.runCmd(ctx, "", []string{c.Runtime, "inspect", "--format", "{{json .NetworkSettings.Ports}}", container})
-	if err != nil {
-		return 0, err
-	}
-	var ports map[string][]struct {
-		HostIP   string `json:"HostIp"`
-		HostPort string `json:"HostPort"`
-	}
-	if err := json.Unmarshal([]byte(raw), &ports); err != nil {
-		return 0, fmt.Errorf("parsing port map: %w", err)
-	}
-	bindings := ports[containerPort]
-	if len(bindings) == 0 {
-		return 0, nil
-	}
-	port, err := strconv.ParseInt(bindings[0].HostPort, 10, 32)
-	if err != nil {
-		return 0, fmt.Errorf("parsing host port %q: %w", bindings[0].HostPort, err)
-	}
-	return int32(port), nil
 }
 
 // SudoPassword retrieves the random sudo password set at container startup,
@@ -1581,6 +1421,471 @@ var byteUnits = []struct {
 	{"B", 1},
 }
 
+// launchContainer starts the Docker container, queries mapped ports, writes
+// SSH config, and sets up host-side git remotes. It does NOT wait for SSH.
+// Port and creation-time results are stored directly on c (launchSSHPort,
+// launchVNCPort, CreatedAt) so that connectContainer can complete startup.
+func (c *Container) launchContainer(ctx context.Context, stdout, stderr io.Writer, opts *StartOpts, imageName string) error {
+	if len(c.Repos) > 1000 {
+		return fmt.Errorf("too many repositories: %d (max 1000)", len(c.Repos))
+	}
+	var dockerArgs []string
+	dockerArgs = append(dockerArgs, c.Runtime, "run", "-d",
+		"--name", c.Name, "--hostname", c.Name,
+		"-p", "127.0.0.1::22")
+
+	if opts.MaxCPUs > 0 {
+		dockerArgs = append(dockerArgs, "--cpus", strconv.Itoa(opts.MaxCPUs))
+	}
+
+	if opts.Display {
+		dockerArgs = append(dockerArgs, "-p", "127.0.0.1::5901", "-e", "MD_DISPLAY=1")
+	}
+
+	if kvmAvailable() {
+		dockerArgs = append(dockerArgs, "--device=/dev/kvm")
+	}
+	// Localtime.
+	if runtime.GOOS == "linux" {
+		dockerArgs = append(dockerArgs, "-v", "/etc/localtime:/etc/localtime:ro")
+	}
+	// Sandbox capabilities.
+	// - SYS_PTRACE: needed for strace/debuggers. Scoped to the container's
+	//   PID namespace — cannot attach to host processes.
+	// - seccomp=unconfined: disables the syscall allowlist so strace, bpf,
+	//   and Chrome's sandbox work. Does NOT grant capabilities — the
+	//   capability set still limits what the process can do.
+	dockerArgs = append(dockerArgs,
+		"--cap-add=SYS_PTRACE",
+		"--security-opt", "seccomp=unconfined")
+	// - apparmor=unconfined: disables AppArmor's mandatory-access-control
+	//   profile so Chrome can create namespaces and sandboxed processes can
+	//   access /proc. Docker-only; podman uses SELinux and passing this
+	//   option can hang on kernel security filesystem access.
+	if c.Runtime != "podman" {
+		dockerArgs = append(dockerArgs, "--security-opt", "apparmor=unconfined")
+	}
+
+	// Rootless podman: --userns=keep-id maps host UID to same UID inside the
+	// container so bind-mounted configs are writable. --user 0:0 keeps
+	// start.sh running as root for privileged setup (groupmod, sshd, dbus).
+	// Rootless Docker is handled inside start.sh via /proc/self/uid_map
+	// detection since Docker lacks --userns=keep-id.
+	if isRootlessPodman(c.Runtime) {
+		dockerArgs = append(dockerArgs, "--userns=keep-id", "--user", "0:0")
+	}
+
+	// NET_ADMIN and NET_RAW are always granted:
+	// - tcpdump uses AF_PACKET sockets which require NET_RAW.
+	// - Tailscale manipulates the network interface (route table changes)
+	//   which requires NET_ADMIN.
+	// Both are scoped to the container's network namespace.
+	dockerArgs = append(dockerArgs,
+		"--cap-add=NET_ADMIN", "--cap-add=NET_RAW")
+
+	// Pass through the host TUN device when Tailscale or rootless Podman
+	// (via -sudo) need to create network interfaces.
+	if opts.Tailscale || opts.Sudo {
+		dockerArgs = append(dockerArgs, "--device=/dev/net/tun:/dev/net/tun")
+	}
+
+	// Tailscale.
+	//
+	// Two approaches exist for providing /dev/net/tun to the container:
+	//
+	//   1. --device=/dev/net/tun:/dev/net/tun (chosen): passes the host's
+	//      pre-existing TUN device into the container. This is the approach
+	//      recommended by Tailscale's official Docker image and blog posts.
+	//      Pros: no MKNOD capability needed (MKNOD allows creating arbitrary
+	//      device nodes — a known container breakout vector per
+	//      hacktricks/angelica.gitbook.io). Avoids cgroup v2 device allowlist
+	//      issues with dynamically-created nodes (containerd/containerd#11078).
+	//      Cons: requires the host kernel to have the tun module loaded and
+	//      /dev/net/tun present before container start.
+	//
+	//   2. --cap-add=MKNOD + internal mknod (dropped): the container creates
+	//      its own /dev/net/tun with mknod c 10 200. Pros: works even if the
+	//      host lacks /dev/net/tun (uncommon on modern systems). Cons: MKNOD
+	//      is a security liability; dynamically-created device nodes may be
+	//      blocked by cgroup v2 DeviceAllow rules in newer containerd/runc
+	//      versions. Tailscale themselves moved away from this pattern.
+	//
+	// Ref: https://tailscale.com/kb/1282/docker (official Docker image docs)
+	// Ref: https://tailscale.com/blog/docker-tailscale-guide (blog post)
+	// Ref: https://github.com/containerd/containerd/issues/11078 (cgroup v2
+	//      breakage of internal mknod)
+	if opts.Tailscale {
+		dockerArgs = append(dockerArgs,
+			"-e", "MD_TAILSCALE=1")
+		if opts.TailscaleAuthKey != "" {
+			dockerArgs = append(dockerArgs, "-e", "TAILSCALE_AUTHKEY="+opts.TailscaleAuthKey)
+		}
+		if c.tailscaleEphemeral {
+			dockerArgs = append(dockerArgs, "-e", "MD_TAILSCALE_EPHEMERAL=1")
+		}
+	}
+
+	// USB passthrough (Linux only; Docker Desktop on macOS/Windows runs in a
+	// VM that cannot access host USB devices). Use a bind mount + cgroup
+	// rule so that devices plugged in after container start are visible.
+	if opts.USB {
+		if runtime.GOOS != "linux" {
+			return fmt.Errorf("--usb requires Linux; Docker Desktop on %s cannot pass through host USB devices", runtime.GOOS)
+		}
+		dockerArgs = append(dockerArgs,
+			"-v", "/dev/bus/usb:/dev/bus/usb",
+			"--device-cgroup-rule=c 189:* rwm")
+	}
+
+	// Agent config mounts: always-mounted paths plus caller-specified harness paths.
+	combined := mergePaths(opts.AgentPaths)
+	home := c.Home
+	xdgConfig := c.XDGConfigHome
+	xdgData := c.XDGDataHome
+	xdgState := c.XDGStateHome
+	for _, p := range combined.HomePaths {
+		dockerArgs = append(dockerArgs, "-v", filepath.Join(home, p)+":/home/user/"+p)
+	}
+	for _, p := range combined.XDGConfigPaths {
+		ro := ""
+		if p == "md" {
+			ro = ":ro"
+		}
+		dockerArgs = append(dockerArgs, "-v", filepath.Join(xdgConfig, p)+":/home/user/.config/"+p+ro)
+	}
+	for _, p := range combined.LocalSharePaths {
+		dockerArgs = append(dockerArgs, "-v", filepath.Join(xdgData, p)+":/home/user/.local/share/"+p)
+	}
+	for _, p := range combined.LocalStatePaths {
+		dockerArgs = append(dockerArgs, "-v", filepath.Join(xdgState, p)+":/home/user/.local/state/"+p)
+	}
+
+	// Set md metadata labels.
+	if opts.Sudo {
+		sudoPassword, err := generatePassword()
+		if err != nil {
+			return fmt.Errorf("generating sudo password: %w", err)
+		}
+		c.sudoPassword = sudoPassword
+		// SYS_ADMIN: allows start.sh to remount /proc and unmask Docker's
+		// /proc tmpfs mounts, both required for nested user namespaces.
+		// /dev/fuse:  required by fuse-overlayfs, the default rootless
+		// Podman storage driver.
+		// See: https://www.redhat.com/sysadmin/podman-inside-container
+		dockerArgs = append(dockerArgs,
+			"--label", "md.sudo=1",
+			"--label", "md.sudo-password="+sudoPassword,
+			"-e", "MD_SUDO_PASSWORD="+sudoPassword,
+			"--cap-add=SYS_ADMIN",
+			"--device=/dev/fuse")
+	}
+	if reposJSON, err := json.Marshal(c.Repos); err == nil {
+		// Base64-encode so commas in JSON don't corrupt the comma-separated
+		// label parsing in unmarshalContainer.
+		dockerArgs = append(dockerArgs, "--label", "md.repos="+base64.StdEncoding.EncodeToString(reposJSON))
+	}
+	if opts.Display {
+		dockerArgs = append(dockerArgs, "--label", "md.display=1")
+	}
+	if opts.Tailscale {
+		dockerArgs = append(dockerArgs, "--label", "md.tailscale=1")
+		if c.tailscaleEphemeral {
+			dockerArgs = append(dockerArgs, "--label", "md.tailscale_ephemeral=1")
+		}
+	}
+	if opts.USB {
+		dockerArgs = append(dockerArgs, "--label", "md.usb=1")
+	}
+	for _, l := range opts.Labels {
+		dockerArgs = append(dockerArgs, "--label", l)
+	}
+	dockerArgs = append(dockerArgs, opts.ExtraRunArgs...)
+	dockerArgs = append(dockerArgs, imageName)
+
+	if opts.Quiet {
+		if _, err := c.runCmd(ctx, "", dockerArgs); err != nil {
+			return fmt.Errorf("starting container: %w", err)
+		}
+	} else {
+		_, _ = fmt.Fprintf(stdout, "- Starting container %s ... ", c.Name)
+		if err := c.runCmdOut(ctx, "", dockerArgs, stdout, stderr); err != nil {
+			_, _ = fmt.Fprintln(stdout)
+			return fmt.Errorf("starting container: %w", err)
+		}
+	}
+
+	// Get SSH port and creation time.
+	port, err := c.getHostPort(ctx, c.Name, "22/tcp")
+	if err != nil {
+		return fmt.Errorf("getting SSH port: %w", err)
+	}
+	c.SSHPort = port
+	if !opts.Quiet {
+		_, _ = fmt.Fprintf(stdout, "- Found ssh port %d\n", port)
+	}
+	createdStr, err := c.runCmd(ctx, "", []string{c.Runtime, "inspect", "--format", "{{.Created}}", c.Name})
+	if err != nil {
+		return fmt.Errorf("getting container creation time: %w", err)
+	}
+	created, err := parseCreatedAt(createdStr)
+	if err != nil {
+		return fmt.Errorf("parsing container creation time %q: %w", createdStr, err)
+	}
+	c.CreatedAt = created
+
+	// Get VNC port if display enabled.
+	if opts.Display {
+		vncPort, _ := c.getHostPort(ctx, c.Name, "5901/tcp")
+		c.VNCPort = vncPort
+		if vncPort != 0 && !opts.Quiet {
+			_, _ = fmt.Fprintf(stdout, "- Found VNC port %d (display :1)\n", vncPort)
+		}
+	}
+
+	// Write SSH config.
+	sshConfigDir := filepath.Join(home, ".ssh", "config.d")
+	if err := os.MkdirAll(sshConfigDir, 0o700); err != nil {
+		return err
+	}
+	c.sshConfigPath = filepath.Join(sshConfigDir, c.Name+".conf")
+	knownHostsPath := filepath.Join(sshConfigDir, c.Name+".known_hosts")
+	hostPubKey, err := os.ReadFile(c.HostKeyPath + ".pub")
+	if err != nil {
+		return fmt.Errorf("reading host public key: %w", err)
+	}
+	if err := writeSSHConfig(sshConfigDir, c.Name, port, c.UserKeyPath, knownHostsPath, c.ControlMaster); err != nil {
+		return err
+	}
+	if err := writeKnownHosts(knownHostsPath, port, strings.TrimSpace(string(hostPubKey))); err != nil {
+		return err
+	}
+
+	// Set up git remotes for all repos before waiting for SSH, so they are
+	// ready to push as soon as the connection is established.
+	if len(c.Repos) > 0 {
+		for _, r := range c.Repos {
+			rPath := r.MountedPath
+			_, _ = c.runCmd(ctx, r.GitRoot, []string{"git", "remote", "rm", c.Name})
+			if err := c.runCmdOut(ctx, r.GitRoot, []string{"git", "remote", "add", c.Name, "user@" + c.Name + ":" + rPath}, stdout, stderr); err != nil {
+				return fmt.Errorf("adding git remote for %s: %w", rPath, err)
+			}
+		}
+	}
+	return nil
+}
+
+// waitForTCP polls until a TCP connection to addr succeeds or the deadline is
+// exceeded.
+func waitForTCP(ctx context.Context, addr string, deadline time.Time) error {
+	dialer := net.Dialer{Timeout: 500 * time.Millisecond}
+	for {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		conn, err := dialer.DialContext(ctx, "tcp", addr)
+		if err == nil {
+			_ = conn.Close()
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timed out waiting for TCP %s", addr)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// tryReadTailscaleAuthURL reads the Tailscale auth URL from the container.
+// A single docker exec runs a polling loop: jq validates the JSON file and
+// prints it compactly; if invalid or empty, sleep and retry. Go parses the
+// result with tailscaleUpStatus for validation.
+func (c *Container) tryReadTailscaleAuthURL(ctx context.Context, stdout io.Writer) (string, error) {
+	readCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	script := `while true; do
+  if jq -ce '.' /run/md/tailscale_auth_url.json 2>/dev/null; then exit 0; fi
+  sleep 0.1
+done`
+	out, err := c.runCmd(readCtx, "", []string{c.Runtime, "exec", c.Name, "sh", "-c", script})
+	if err != nil || out == "" {
+		return "", errors.New("timed out waiting for tailscale up --json output")
+	}
+
+	var status tailscaleUpStatus
+	if err := json.Unmarshal([]byte(out), &status); err != nil {
+		return "", fmt.Errorf("parsing tailscale up --json output: %w (%q)", err, out)
+	}
+	if status.AuthURL == "" {
+		return "", errors.New("tailscale up --json had no AuthURL field")
+	}
+	_, _ = fmt.Fprintf(stdout, "- Tailscale auth URL: %s\n", status.AuthURL)
+	return status.AuthURL, nil
+}
+
+// provisionContainer waits for SSH, pushes repos and submodules, sends .env,
+// and waits for Tailscale auth. Must be called after launchContainer.
+//
+// The task branch and default branch are pushed in parallel to reduce latency.
+func (c *Container) provisionContainer(ctx context.Context, stdout, stderr io.Writer, opts *StartOpts) (*StartResult, error) {
+	result := &StartResult{}
+
+	// Try to read the Tailscale auth URL via docker exec before SSH is up,
+	// so the user can authenticate even if SSHD is slow to start.
+	if opts.Tailscale && opts.TailscaleAuthKey == "" {
+		url, err := c.tryReadTailscaleAuthURL(ctx, stdout)
+		if err != nil {
+			return nil, fmt.Errorf("reading Tailscale auth URL: %w", err)
+		}
+		result.TailscaleAuthURL = url
+	}
+
+	// Phase 1: wait for SSH to accept connections.
+	addr := fmt.Sprintf("localhost:%d", c.SSHPort)
+	deadline := time.Now().Add(30 * time.Second)
+	if err := waitForTCP(ctx, addr, deadline); err != nil {
+		return nil, err
+	}
+	if err := c.waitForSSH(ctx, deadline); err != nil {
+		return nil, err
+	}
+
+	// Phase 2: push all repos into the container in parallel, including
+	// submodules. Each repo pushes to a distinct path (~/src/<name>).
+	if len(c.Repos) > 0 {
+		if !opts.Quiet {
+			_, _ = fmt.Fprintln(stdout, "- git clone into container ...")
+		}
+		eg, egCtx := errgroup.WithContext(ctx)
+		for repoIdx := range c.Repos {
+			eg.Go(func() error {
+				mp := shellQuote(c.Repos[repoIdx].MountedPath)
+				rBranch := shellQuote(c.Repos[repoIdx].Branch)
+
+				if err := c.runCmdOut(egCtx, "", c.SSHCommand(nil, "git init -q "+mp), stdout, stderr); err != nil {
+					return fmt.Errorf("init repo %s in container: %w", c.Repos[repoIdx].MountedPath, err)
+				}
+
+				// Resolve defaults concurrently with the base push (no git I/O to the
+				// container), but serialize the two pushes: concurrent receive-pack
+				// on the same repo can race on pack migration (.keep file conflicts).
+				resolveErr := make(chan error, 1)
+				go func() {
+					resolveErr <- c.Repos[repoIdx].resolveDefaults(egCtx)
+				}()
+
+				if err := c.runCmdOut(egCtx, c.Repos[repoIdx].GitRoot, []string{
+					"git", "push", "-q", c.Name,
+					c.Repos[repoIdx].Branch + ":refs/heads/base",
+				}, stdout, stderr); err != nil {
+					return fmt.Errorf("push repo %s: %w", c.Repos[repoIdx].MountedPath, err)
+				}
+				if err := c.runCmdOut(egCtx, "", c.SSHCommand(nil,
+					"cd "+mp+
+						" && git branch -q --track "+rBranch+" base"+
+						" && git switch -q "+rBranch), stdout, stderr); err != nil {
+					return err
+				}
+
+				if err := <-resolveErr; err != nil {
+					return fmt.Errorf("resolve defaults for %s: %w", c.Repos[repoIdx].MountedPath, err)
+				}
+				if err := c.SyncDefaultBranch(egCtx, repoIdx); err != nil {
+					return err
+				}
+
+				if err := c.pushSubmodules(egCtx, stdout, stderr, c.Repos[repoIdx].MountedPath, c.Repos[repoIdx].GitRoot, opts.Quiet); err != nil {
+					return fmt.Errorf("push submodules for %s: %w", c.Repos[repoIdx].MountedPath, err)
+				}
+
+				// resolveDefaults ran above, so DefaultRemote is set.
+				originURL, err := c.runCmd(egCtx, c.Repos[repoIdx].GitRoot, []string{"git", "remote", "get-url", c.Repos[repoIdx].DefaultRemote})
+				if err == nil && originURL != "" {
+					httpsURL := convertGitURLToHTTPS(originURL)
+					_, _ = c.runCmd(egCtx, "", c.SSHCommand(nil, "cd "+mp+" && git remote add origin "+shellQuote(httpsURL)))
+					if !opts.Quiet {
+						_, _ = fmt.Fprintf(stdout, "- Set %s origin to %s\n", c.Repos[repoIdx].MountedPath, httpsURL)
+					}
+				}
+				return nil
+			})
+		}
+		if err := eg.Wait(); err != nil {
+			return nil, err
+		}
+	}
+
+	// Phase 3: send .env into the container, combining per-repo .env files
+	// and extra environment variables from opts.
+	if err := c.sendEnv(ctx, stdout, opts); err != nil {
+		return nil, err
+	}
+
+	return result, nil
+}
+
+// sendEnv combines per-repo .env files and extra environment variables from
+// opts, then copies them into the container at /home/user/.env.
+func (c *Container) sendEnv(ctx context.Context, stdout io.Writer, opts *StartOpts) error {
+	var envContent []byte
+	for _, r := range c.Repos {
+		data, err := os.ReadFile(filepath.Join(r.GitRoot, ".env"))
+		if err != nil {
+			continue
+		}
+		if len(envContent) > 0 && envContent[len(envContent)-1] != '\n' {
+			envContent = append(envContent, '\n')
+		}
+		envContent = append(envContent, data...)
+	}
+	if len(opts.ExtraEnv) > 0 {
+		if len(envContent) > 0 && envContent[len(envContent)-1] != '\n' {
+			envContent = append(envContent, '\n')
+		}
+		for _, kv := range opts.ExtraEnv {
+			envContent = append(envContent, []byte(kv+"\n")...)
+		}
+		if !opts.Quiet {
+			_, _ = fmt.Fprintln(stdout, "- injecting extra env vars into container ...")
+		}
+	}
+	if len(envContent) > 0 && !opts.Quiet {
+		_, _ = fmt.Fprintln(stdout, "- sending .env into container ...")
+	}
+	sshEnvArgs := c.SSHCommand(nil, "cat > /home/user/.env")
+	cmd := exec.CommandContext(ctx, sshEnvArgs[0], sshEnvArgs[1:]...) //nolint:gosec // args are from trusted SSH config
+	cmd.Env = append(os.Environ(), c.env...)
+	cmd.Stdin = bytes.NewReader(envContent)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("copying .env: %w\n%s", err, out)
+	}
+	return nil
+}
+
+// convertGitURLToHTTPS converts a git URL to HTTPS format.
+//
+// Supports git@host:path, ssh://git@host/path, git://host/path, and
+// https:// (returned unchanged).
+func convertGitURLToHTTPS(url string) string {
+	url = strings.TrimSpace(url)
+	if strings.HasPrefix(url, "https://") {
+		return url
+	}
+	// Matches git@host:user/repo.git
+	if m := reGitAt.FindStringSubmatch(url); m != nil {
+		return fmt.Sprintf("https://%s/%s", m[1], m[2])
+	}
+	// Matches ssh://git@host/user/repo.git
+	if m := reSSHGit.FindStringSubmatch(url); m != nil {
+		return fmt.Sprintf("https://%s/%s", m[1], m[2])
+	}
+	// Matches git://host/user/repo.git
+	if m := reGitProto.FindStringSubmatch(url); m != nil {
+		return fmt.Sprintf("https://%s/%s", m[1], m[2])
+	}
+	return url
+}
+
 // parseByteSize parses a size string like "150MiB" or "7.5GiB" into bytes.
 func parseByteSize(s string) (uint64, error) {
 	for _, u := range byteUnits {
@@ -1593,46 +1898,6 @@ func parseByteSize(s string) (uint64, error) {
 		}
 	}
 	return 0, fmt.Errorf("unknown unit in %q", s)
-}
-
-// runCmd executes a command, captures its output, and returns (stdout, error).
-// If dir is non-empty, the command runs in that directory.
-func (c *Client) runCmd(ctx context.Context, dir string, args []string) (string, error) {
-	slog.DebugContext(ctx, "md", "msg", "exec", "cmd", args)
-	cmd := exec.CommandContext(ctx, args[0], args[1:]...) //nolint:gosec // args are from trusted callers
-	cmd.Dir = dir
-	env := append(os.Environ(), c.env...)
-	env = append(env, "LANG=C")
-	cmd.Env = env
-	out, err := cmd.Output()
-	return strings.TrimSpace(string(out)), err
-}
-
-// cmdErrWithStderr wraps err with the captured stderr from an *exec.ExitError
-// so that quiet-mode failures include actionable output.
-func cmdErrWithStderr(prefix string, err error) error {
-	if err == nil {
-		return nil
-	}
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {
-		return fmt.Errorf("%s: %w\n%s", prefix, err, strings.TrimSpace(string(exitErr.Stderr)))
-	}
-	return fmt.Errorf("%s: %w", prefix, err)
-}
-
-// runCmdOut executes a command, directing its stdout and stderr to the given writers.
-// If dir is non-empty, the command runs in that directory.
-func (c *Client) runCmdOut(ctx context.Context, dir string, args []string, stdout, stderr io.Writer) error {
-	slog.DebugContext(ctx, "md", "msg", "exec", "cmd", args)
-	cmd := exec.CommandContext(ctx, args[0], args[1:]...) //nolint:gosec // args are from trusted callers
-	cmd.Dir = dir
-	env := append(os.Environ(), c.env...)
-	env = append(env, "LANG=C")
-	cmd.Env = env
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
-	return cmd.Run()
 }
 
 // generatePassword creates a random 20-character alphanumeric password
@@ -1864,22 +2129,4 @@ func parseIOPair(s string) (a, b uint64, err error) {
 		return 0, 0, err
 	}
 	return a, b, nil
-}
-
-// runGitDir runs a git command with GIT_DIR and GIT_WORK_TREE
-// explicitly set, fully decoupling git from the repository config
-// (core.worktree). dir is the working directory and also used as
-// GIT_WORK_TREE so git never tries to chdir to a non-existent
-// submodule worktree.
-func (c *Client) runGitDir(ctx context.Context, dir, gitDir string, args ...string) error {
-	cmd := exec.CommandContext(ctx, "git", args...) //nolint:gosec // args are from trusted callers
-	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "GIT_DIR="+gitDir, "GIT_WORK_TREE="+dir, "LANG=C")
-	cmd.Env = append(cmd.Env, c.env...)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if _, err := cmd.Output(); err != nil {
-		return fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, stderr.String())
-	}
-	return nil
 }

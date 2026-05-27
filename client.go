@@ -15,15 +15,22 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"log/slog"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -380,6 +387,860 @@ func (c *Client) PruneImages(ctx context.Context, stdout, stderr io.Writer) ([]s
 	return removed, nil
 }
 
+// StatsAll fetches resource usage for multiple containers in batch (2 docker
+// calls instead of 2N). Returns a map keyed by container name.
+func (c *Client) StatsAll(ctx context.Context, names []string) (map[string]*ContainerStats, error) {
+	result := make(map[string]*ContainerStats, len(names))
+	if len(names) == 0 {
+		return result, nil
+	}
+	var mu sync.Mutex
+	var statsErr, inspectErr error
+
+	var wg sync.WaitGroup
+
+	// Batch docker stats (one call). Stopped containers return zeros.
+	wg.Go(func() {
+		args := make([]string, 0, 6+len(names))
+		args = append(args, c.Runtime, "stats", "--no-stream", "--no-trunc", "--format", "{{json .}}")
+		args = append(args, names...)
+		out, err := c.runCmd(ctx, "", args)
+		if err != nil {
+			statsErr = fmt.Errorf("docker stats: %w", err)
+			return
+		}
+		for line := range strings.SplitSeq(out, "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			s, name, err := parseStatsLine(line)
+			if err != nil {
+				statsErr = fmt.Errorf("docker stats: %w", err)
+				return
+			}
+			mu.Lock()
+			if existing, ok := result[name]; ok {
+				// Inspect goroutine may have already set DiskUsed; preserve it.
+				s.DiskUsed = existing.DiskUsed
+			}
+			result[name] = s
+			mu.Unlock()
+		}
+	})
+
+	// Batch docker inspect --size (one call).
+	wg.Go(func() {
+		args := make([]string, 0, 5+len(names))
+		args = append(args, c.Runtime, "inspect", "--size", "--format", "{{.Name}}\t{{json .SizeRw}}")
+		args = append(args, names...)
+		out, err := c.runCmd(ctx, "", args)
+		if err != nil {
+			inspectErr = fmt.Errorf("docker inspect --size: %w", err)
+			return
+		}
+		for line := range strings.SplitSeq(out, "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			parts := strings.SplitN(line, "\t", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			name := strings.TrimPrefix(parts[0], "/")
+			var sz int64
+			if err := json.Unmarshal([]byte(parts[1]), &sz); err != nil {
+				continue
+			}
+			mu.Lock()
+			if s, ok := result[name]; ok {
+				s.DiskUsed = sz
+			} else {
+				result[name] = &ContainerStats{DiskUsed: sz}
+			}
+			mu.Unlock()
+		}
+	})
+
+	wg.Wait()
+	return result, errors.Join(statsErr, inspectErr)
+}
+
+// getHostPort extracts the host port for containerPort from a running
+// container. It uses JSON output instead of Go templates to work around
+// Docker 27's "index of untyped nil" bug when port bindings are nil.
+func (c *Client) getHostPort(ctx context.Context, container, containerPort string) (int32, error) {
+	raw, err := c.runCmd(ctx, "", []string{c.Runtime, "inspect", "--format", "{{json .NetworkSettings.Ports}}", container})
+	if err != nil {
+		return 0, err
+	}
+	var ports map[string][]struct {
+		HostIP   string `json:"HostIp"`
+		HostPort string `json:"HostPort"`
+	}
+	if err := json.Unmarshal([]byte(raw), &ports); err != nil {
+		return 0, fmt.Errorf("parsing port map: %w", err)
+	}
+	bindings := ports[containerPort]
+	if len(bindings) == 0 {
+		return 0, nil
+	}
+	port, err := strconv.ParseInt(bindings[0].HostPort, 10, 32)
+	if err != nil {
+		return 0, fmt.Errorf("parsing host port %q: %w", bindings[0].HostPort, err)
+	}
+	return int32(port), nil
+}
+
+// runCmd executes a command, captures its output, and returns (stdout, error).
+// If dir is non-empty, the command runs in that directory.
+func (c *Client) runCmd(ctx context.Context, dir string, args []string) (string, error) {
+	slog.DebugContext(ctx, "md", "msg", "exec", "cmd", args)
+	cmd := exec.CommandContext(ctx, args[0], args[1:]...) //nolint:gosec // args are from trusted callers
+	cmd.Dir = dir
+	env := append(os.Environ(), c.env...)
+	env = append(env, "LANG=C")
+	cmd.Env = env
+	out, err := cmd.Output()
+	return strings.TrimSpace(string(out)), err
+}
+
+// runCmdOut executes a command, directing its stdout and stderr to the given writers.
+// If dir is non-empty, the command runs in that directory.
+func (c *Client) runCmdOut(ctx context.Context, dir string, args []string, stdout, stderr io.Writer) error {
+	slog.DebugContext(ctx, "md", "msg", "exec", "cmd", args)
+	cmd := exec.CommandContext(ctx, args[0], args[1:]...) //nolint:gosec // args are from trusted callers
+	cmd.Dir = dir
+	env := append(os.Environ(), c.env...)
+	env = append(env, "LANG=C")
+	cmd.Env = env
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	return cmd.Run()
+}
+
+// runGitDir runs a git command with GIT_DIR and GIT_WORK_TREE
+// explicitly set, fully decoupling git from the repository config
+// (core.worktree). dir is the working directory and also used as
+// GIT_WORK_TREE so git never tries to chdir to a non-existent
+// submodule worktree.
+func (c *Client) runGitDir(ctx context.Context, dir, gitDir string, args ...string) error {
+	cmd := exec.CommandContext(ctx, "git", args...) //nolint:gosec // args are from trusted callers
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GIT_DIR="+gitDir, "GIT_WORK_TREE="+dir, "LANG=C")
+	cmd.Env = append(cmd.Env, c.env...)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if _, err := cmd.Output(); err != nil {
+		return fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, stderr.String())
+	}
+	return nil
+}
+
+// parseStatsLine parses one JSON line from docker stats output into a
+// ContainerStats and returns the container name.
+func parseStatsLine(line string) (*ContainerStats, string, error) {
+	var raw struct {
+		Name     string `json:"Name"`
+		CPUPerc  string `json:"CPUPerc"`
+		MemUsage string `json:"MemUsage"`
+		MemPerc  string `json:"MemPerc"`
+		PIDs     string `json:"PIDs"`
+		NetIO    string `json:"NetIO"`
+		BlockIO  string `json:"BlockIO"`
+	}
+	if err := json.Unmarshal([]byte(line), &raw); err != nil {
+		return nil, "", fmt.Errorf("parsing stats JSON: %w", err)
+	}
+	cpuPerc, err := parsePercent(raw.CPUPerc)
+	if err != nil {
+		return nil, "", fmt.Errorf("parsing CPU%%: %w", err)
+	}
+	memPerc, err := parsePercent(raw.MemPerc)
+	if err != nil {
+		return nil, "", fmt.Errorf("parsing mem%%: %w", err)
+	}
+	memUsed, memLimit, err := parseMemUsage(raw.MemUsage)
+	if err != nil {
+		return nil, "", fmt.Errorf("parsing mem usage: %w", err)
+	}
+	var pids int
+	if raw.PIDs != "N/A" {
+		pids, err = strconv.Atoi(raw.PIDs)
+		if err != nil {
+			return nil, "", fmt.Errorf("parsing PIDs: %w", err)
+		}
+	}
+	netRx, netTx, err := parseIOPair(raw.NetIO)
+	if err != nil {
+		return nil, "", fmt.Errorf("parsing net I/O: %w", err)
+	}
+	blockRead, blockWrite, err := parseIOPair(raw.BlockIO)
+	if err != nil {
+		return nil, "", fmt.Errorf("parsing block I/O: %w", err)
+	}
+	return &ContainerStats{
+		CPUPerc:    cpuPerc,
+		MemUsed:    memUsed,
+		MemLimit:   memLimit,
+		MemPerc:    memPerc,
+		PIDs:       pids,
+		NetRx:      netRx,
+		NetTx:      netTx,
+		BlockRead:  blockRead,
+		BlockWrite: blockWrite,
+		DiskUsed:   -1,
+	}, raw.Name, nil
+}
+
+// cmdErrWithStderr wraps err with the captured stderr from an *exec.ExitError
+// so that quiet-mode failures include actionable output.
+func cmdErrWithStderr(prefix string, err error) error {
+	if err == nil {
+		return nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {
+		return fmt.Errorf("%s: %w\n%s", prefix, err, strings.TrimSpace(string(exitErr.Stderr)))
+	}
+	return fmt.Errorf("%s: %w", prefix, err)
+}
+
+// extractEmbeddedTree writes an embedded rsc/ subtree to a temp directory.
+//
+// prefix is the embedded path (e.g. "rsc/user"), tmpPattern is the os.MkdirTemp
+// pattern. Returns the temp dir path (caller must clean up).
+func extractEmbeddedTree(prefix, tmpPattern string) (dir string, retErr error) {
+	tmp, err := os.MkdirTemp("", tmpPattern)
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		if retErr != nil {
+			retErr = errors.Join(retErr, os.RemoveAll(tmp))
+		}
+	}()
+	err = fs.WalkDir(rscFS, prefix, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel := strings.TrimPrefix(path, prefix+"/")
+		if rel == "" || rel == path {
+			return nil
+		}
+		target := filepath.Join(tmp, rel)
+		if d.IsDir() {
+			return os.MkdirAll(target, 0o755) //nolint:gosec // matches embedded filesystem permissions
+		}
+		data, err := rscFS.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		// Preserve executable bits for scripts (by extension, shebang, or bin-directory location).
+		mode := os.FileMode(0o644)
+		if isExecutable(data) {
+			mode = 0o755
+		}
+		return os.WriteFile(target, data, mode)
+	})
+	if err != nil {
+		return "", fmt.Errorf("extracting %s: %w", prefix, err)
+	}
+	return tmp, nil
+}
+
+// isExecutable reports whether a file from the embedded rsc filesystem should
+// be written with execute permission. Matches files starting with a #! shebang.
+func isExecutable(data []byte) bool {
+	return bytes.HasPrefix(data, []byte("#!"))
+}
+
+// prepareBuildContext writes the embedded rsc/user/ tree to a temp directory.
+//
+// Returns the temp dir path (caller must clean up).
+func prepareBuildContext() (string, error) {
+	return extractEmbeddedTree("rsc/user", "md-build-*")
+}
+
+// prepareRootBuildContext writes the embedded rsc/root/ tree to a temp
+// directory.
+//
+// Returns the temp dir path (caller must clean up).
+func prepareRootBuildContext() (string, error) {
+	return extractEmbeddedTree("rsc/root", "md-build-root-*")
+}
+
+// keysSHA computes a deterministic SHA-256 hash over the SSH key files in
+// keysDir. This is used to detect when SSH keys change and trigger an image
+// rebuild.
+func keysSHA(keysDir string) (string, error) {
+	h := sha256.New()
+	for _, name := range []string{"ssh_host_ed25519_key", "ssh_host_ed25519_key.pub", "authorized_keys"} {
+		data, err := os.ReadFile(filepath.Join(keysDir, name)) //nolint:gosec // name is from a hardcoded list
+		if err != nil {
+			return "", err
+		}
+		_, _ = io.WriteString(h, name)
+		_, _ = h.Write(data)
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func (c *Client) dockerInspectFormat(ctx context.Context, name, format string) (string, error) {
+	return c.runCmd(ctx, "", []string{c.Runtime, "image", "inspect", name, "--format", format})
+}
+
+func (c *Client) getImageVersionLabel(ctx context.Context, imageName string) string {
+	out, err := c.dockerInspectFormat(ctx, imageName, `{{index .Config.Labels "org.opencontainers.image.version"}}`)
+	if err != nil || out == "" || out == "<no value>" {
+		return ""
+	}
+	return out
+}
+
+// getRemoteManifestDigest queries the registry for the per-architecture
+// manifest digest without downloading layers.
+//
+// For a multi-arch image the digest hierarchy is:
+//
+//	Image Index (manifest list)         sha256:AAA
+//	  └── Per-platform Manifest (amd64) sha256:BBB  ← manifest digest
+//	        ├── Config                  sha256:CCC  ← docker's {{.Id}}
+//	        └── Layers ...
+//
+// We compare manifest digests (sha256:BBB): this is what "docker pull" prints,
+// what {{index .RepoDigests 0}} stores as "repo@sha256:BBB", and what
+// "manifest inspect" returns in manifests[].digest. Any change to layers,
+// config, or manifest metadata produces a different manifest digest, making it
+// a reliable staleness signal.
+//
+// Both Docker schema v2 manifest lists and OCI image indexes share the same
+// "manifests[].{digest, platform}" JSON structure, so one parser covers both
+// runtimes and both formats.
+func (c *Client) getRemoteManifestDigest(ctx context.Context, image, arch string) (string, error) {
+	slog.DebugContext(ctx, "md", "msg", "fetching remote manifest digest", "image", image, "arch", arch)
+	out, err := c.runCmd(ctx, "", []string{c.Runtime, "manifest", "inspect", image})
+	if err != nil {
+		return "", err
+	}
+	var index manifestIndex
+	if err := json.Unmarshal([]byte(out), &index); err != nil {
+		return "", fmt.Errorf("parsing manifest inspect output: %w", err)
+	}
+	for _, m := range index.Manifests {
+		if m.Platform.Architecture == arch && m.Platform.OS == "linux" && m.Digest != "" {
+			return m.Digest, nil
+		}
+	}
+	if len(index.Manifests) == 1 && index.Manifests[0].Digest != "" {
+		return index.Manifests[0].Digest, nil
+	}
+	return "", fmt.Errorf("no manifest for linux/%s in %s", arch, image)
+}
+
+type remoteDigestEntry struct {
+	digest  string
+	err     error
+	expires time.Time
+}
+
+type manifestPlatform struct {
+	Architecture string `json:"architecture"`
+	OS           string `json:"os"`
+}
+
+type manifestEntry struct {
+	Digest   string           `json:"digest"`
+	Platform manifestPlatform `json:"platform"`
+}
+
+type manifestIndex struct {
+	Manifests []manifestEntry `json:"manifests"`
+}
+
+type activeCM struct {
+	cm       CacheMount
+	hostPath string
+	// files lists top-level filenames for Shallow caches. nil for recursive.
+	files []string
+}
+
+// imageBuildCacheEntry caches the result of imageBuildNeeded so that
+// back-to-back calls with the same inputs skip docker inspect exec calls.
+type imageBuildCacheEntry struct {
+	baseImage  string
+	contextSHA string
+	cacheKey   string
+	needed     bool
+}
+
+// cachedRemoteManifestDigest returns the remote per-architecture manifest digest.
+// When Client.DigestCacheTTL is non-zero, results are cached for that duration
+// to skip repeated registry round-trips. When zero, the registry is always queried.
+func (c *Client) cachedRemoteManifestDigest(ctx context.Context, image, arch string) (string, error) {
+	if c.DigestCacheTTL == 0 {
+		return c.getRemoteManifestDigest(ctx, image, arch)
+	}
+	key := c.Runtime + "\x00" + image + "\x00" + arch
+	c.mu.Lock()
+	if e, ok := c.digestCache[key]; ok && time.Now().Before(e.expires) {
+		c.mu.Unlock()
+		return e.digest, e.err
+	}
+	c.mu.Unlock()
+	digest, err := c.getRemoteManifestDigest(ctx, image, arch)
+	c.mu.Lock()
+	c.digestCache[key] = remoteDigestEntry{digest: digest, err: err, expires: time.Now().Add(c.DigestCacheTTL)}
+	c.mu.Unlock()
+	return digest, err
+}
+
+// activeCacheKey filters caches to those whose host directories exist and
+// returns the cache spec key for the active set.
+func activeCacheKey(caches []CacheMount, home string) string {
+	var active []CacheMount
+	for _, cm := range caches {
+		if _, err := os.Stat(resolveHostPath(cm.HostPath, home)); err == nil {
+			active = append(active, cm)
+		}
+	}
+	return cacheSpecKey(active)
+}
+
+// userImageName returns the Docker image name for a given base image and
+// active cache configuration. The name includes a content hash so that
+// different base images or cache sets produce distinct images without
+// clobbering each other.
+func userImageName(baseImage, cacheKey string) string {
+	h := sha256.Sum256([]byte(baseImage + "\x00" + cacheKey))
+	return "md-specialized-" + hex.EncodeToString(h[:16])
+}
+
+// cacheSpecKey returns a short hash over the requested cache names and
+// container paths. Returns empty string when caches is nil or empty.
+// Only the spec (name + path) is hashed, not the cache contents.
+func cacheSpecKey(caches []CacheMount) string {
+	if len(caches) == 0 {
+		return ""
+	}
+	specs := make([]string, len(caches))
+	for i, c := range caches {
+		s := c.Name + ":" + c.ContainerPath
+		if c.Shallow {
+			s += ":shallow"
+		}
+		specs[i] = s
+	}
+	sort.Strings(specs)
+	h := sha256.Sum256([]byte(strings.Join(specs, ",")))
+	return hex.EncodeToString(h[:8])
+}
+
+// imageBuildNeeded reports whether the specialized Docker image needs to be
+// rebuilt. It checks the base image digest, SSH keys hash, and cache spec
+// key against labels on the existing image. For remote base images it also
+// verifies the local copy matches the registry.
+// home is used to resolve "~/" in cache HostPaths so only caches whose host
+// directory currently exists are compared (matching what resolveCaches
+// would actually inject).
+func (c *Client) imageBuildNeeded(ctx context.Context, imageName, baseImage string, caches []CacheMount) bool {
+	// Compute cheap inputs first so we can check the cache.
+	contextSHA, err := keysSHA(c.keysDir)
+	if err != nil {
+		return true
+	}
+	var activeCaches []CacheMount
+	for _, cm := range caches {
+		if _, err := os.Stat(resolveHostPath(cm.HostPath, c.Home)); err == nil {
+			activeCaches = append(activeCaches, cm)
+		}
+	}
+	activeKey := cacheSpecKey(activeCaches)
+
+	// Check cached result from a previous call with the same inputs.
+	c.mu.Lock()
+	if e := c.imageBuildCache; e != nil && e.baseImage == baseImage && e.contextSHA == contextSHA && e.cacheKey == activeKey {
+		needed := e.needed
+		c.mu.Unlock()
+		return needed
+	}
+	c.mu.Unlock()
+
+	needed := c.imageBuildNeededSlow(ctx, imageName, baseImage, contextSHA, activeKey)
+
+	c.mu.Lock()
+	c.imageBuildCache = &imageBuildCacheEntry{
+		baseImage:  baseImage,
+		contextSHA: contextSHA,
+		cacheKey:   activeKey,
+		needed:     needed,
+	}
+	c.mu.Unlock()
+	return needed
+}
+
+// invalidateImageBuildCache clears the cached imageBuildNeeded result.
+// Must be called after a successful image build so the next check re-evaluates.
+func (c *Client) invalidateImageBuildCache() {
+	c.mu.Lock()
+	c.imageBuildCache = nil
+	c.mu.Unlock()
+}
+
+// imageBuildNeededSlow performs the full check with docker inspect calls.
+func (c *Client) imageBuildNeededSlow(ctx context.Context, imageName, baseImage, contextSHA, activeKey string) bool {
+	slog.DebugContext(ctx, "md", "msg", "checking if image build needed", "image", imageName, "base", baseImage)
+	// Quick check: does the specialized image have labels at all?
+	currentDigest, err := c.dockerInspectFormat(ctx, imageName, `{{index .Config.Labels "md.base_digest"}}`)
+	if err != nil || currentDigest == "" || currentDigest == "<no value>" {
+		slog.DebugContext(ctx, "md", "msg", "build needed: no base_digest label", "image", imageName)
+		return true
+	}
+	currentContext, err := c.dockerInspectFormat(ctx, imageName, `{{index .Config.Labels "md.context_sha"}}`)
+	if err != nil || currentContext == "" || currentContext == "<no value>" {
+		slog.DebugContext(ctx, "md", "msg", "build needed: no context_sha label", "image", imageName)
+		return true
+	}
+
+	// Get the base image digest.
+	var baseDigest string
+	if d, err := c.dockerInspectFormat(ctx, baseImage, "{{index .RepoDigests 0}}"); err == nil && d != "" {
+		baseDigest = d
+	} else if id, err := c.dockerInspectFormat(ctx, baseImage, "{{.Id}}"); err == nil {
+		baseDigest = id
+	} else {
+		slog.DebugContext(ctx, "md", "msg", "build needed: cannot get base image digest", "base", baseImage)
+		return true
+	}
+	if currentDigest != baseDigest {
+		slog.DebugContext(ctx, "md", "msg", "build needed: base digest changed", "current", currentDigest, "base", baseDigest)
+		return true
+	}
+
+	// For remote images, verify the local base is up to date with the registry.
+	// Compare the per-platform manifest digest stored during the last build
+	// against the current remote per-platform digest. This avoids the
+	// manifest-list-vs-platform-manifest mismatch that occurs when comparing
+	// RepoDigests[0] (manifest list digest) against the per-platform entry.
+	// Errors are intentionally ignored: a registry failure is not a reason to rebuild;
+	// the base digest label comparison above already catches locally-pulled updates.
+	isLocal := !strings.Contains(baseImage, "/")
+	if !isLocal {
+		slog.DebugContext(ctx, "md", "msg", "checking remote manifest digest", "base", baseImage)
+		storedManifest, err := c.dockerInspectFormat(ctx, imageName, `{{index .Config.Labels "md.base_manifest_digest"}}`)
+		if err == nil && storedManifest != "" && storedManifest != "<no value>" {
+			remoteDigest, err := c.cachedRemoteManifestDigest(ctx, baseImage, runtime.GOARCH)
+			if err == nil && remoteDigest != storedManifest {
+				slog.DebugContext(ctx, "md", "msg", "build needed: remote manifest changed", "stored", storedManifest, "remote", remoteDigest)
+				return true
+			}
+		}
+	}
+
+	if currentContext != contextSHA {
+		slog.DebugContext(ctx, "md", "msg", "build needed: context SHA changed", "current", currentContext, "expected", contextSHA)
+		return true
+	}
+
+	currentKey, err := c.dockerInspectFormat(ctx, imageName, `{{index .Config.Labels "md.cache_key"}}`)
+	if err != nil || currentKey == "<no value>" {
+		currentKey = ""
+	}
+	if activeKey != currentKey {
+		slog.DebugContext(ctx, "md", "msg", "build needed: cache key changed", "current", currentKey, "expected", activeKey)
+		return true
+	}
+
+	slog.DebugContext(ctx, "md", "msg", "image is up to date", "image", imageName)
+	return false
+}
+
+// resolveCaches determines which caches have existing host directories and
+// computes the set of container directories that need to be pre-created.
+// Returns the active caches (with resolved host paths), directories to
+// pre-create, and the cache spec key. Caches whose host path does not exist
+// are silently skipped.
+func resolveCaches(caches []CacheMount, home string, mountPaths []string) (active []activeCM, dirs []string, activeKey string) {
+	for _, cm := range caches {
+		hostPath := resolveHostPath(cm.HostPath, home)
+		if _, err := os.Stat(hostPath); err != nil {
+			continue
+		}
+		a := activeCM{cm: cm, hostPath: hostPath}
+		if cm.Shallow {
+			entries, err := os.ReadDir(hostPath)
+			if err != nil {
+				continue
+			}
+			for _, e := range entries {
+				if !e.IsDir() {
+					a.files = append(a.files, e.Name())
+				}
+			}
+			if len(a.files) == 0 {
+				continue
+			}
+		}
+		active = append(active, a)
+	}
+
+	// activeKey reflects only the caches actually injected, not all requested.
+	activeMounts := make([]CacheMount, len(active))
+	for i, a := range active {
+		activeMounts[i] = a.cm
+	}
+	activeKey = cacheSpecKey(activeMounts)
+
+	// Collect directories to pre-create:
+	// - For cache destinations: intermediaries and the leaf itself.
+	// - For runtime -v mount targets: the full path (leaf included).
+	const base = "/home/user"
+	seen := map[string]bool{}
+	for _, a := range active {
+		seen[a.cm.ContainerPath] = true
+		for dir := path.Dir(a.cm.ContainerPath); dir != base && dir != "." && dir != "/"; dir = path.Dir(dir) {
+			seen[dir] = true
+		}
+	}
+	for _, p := range mountPaths {
+		seen[p] = true
+	}
+	dirs = make([]string, 0, len(seen))
+	for d := range seen {
+		dirs = append(dirs, d)
+	}
+	sort.Strings(dirs)
+	return active, dirs, activeKey
+}
+
+// generateDockerfile produces the Dockerfile content for a specialized image.
+func generateDockerfile(baseImage string, active []activeCM, dirs []string, baseDigest, contextSHA, activeKey, manifestDigest string) string {
+	var df strings.Builder
+	fmt.Fprintf(&df, "FROM %s\n", baseImage)
+	df.WriteString("COPY --chown=root:root ssh_host_ed25519_key /etc/ssh/ssh_host_ed25519_key\n")
+	df.WriteString("COPY --chown=root:root ssh_host_ed25519_key.pub /etc/ssh/ssh_host_ed25519_key.pub\n")
+	df.WriteString("COPY --chown=user:user authorized_keys /home/user/.ssh/authorized_keys\n")
+	for _, a := range active {
+		if a.files != nil {
+			// Shallow: copy only top-level files, skip subdirectories.
+			// Flags must appear before the JSON array; the array contains only
+			// sources and destination.
+			for _, f := range a.files {
+				fmt.Fprintf(&df, "COPY --from=cache-%s --chown=user:user [%q, %q]\n", a.cm.Name, f, a.cm.ContainerPath+"/")
+			}
+		} else {
+			fmt.Fprintf(&df, "COPY --from=cache-%s --chown=user:user [\".\", %q]\n", a.cm.Name, a.cm.ContainerPath+"/")
+		}
+	}
+	// Single RUN layer for file permissions and directory pre-creation.
+	var run strings.Builder
+	run.WriteString("chmod 0600 /etc/ssh/ssh_host_ed25519_key")
+	run.WriteString(" && chmod 0644 /etc/ssh/ssh_host_ed25519_key.pub")
+	run.WriteString(" && chmod 0400 /home/user/.ssh/authorized_keys")
+	if len(dirs) > 0 {
+		quoted := make([]string, len(dirs))
+		for i, d := range dirs {
+			quoted[i] = shellQuote(d)
+		}
+		joined := strings.Join(quoted, " ")
+		fmt.Fprintf(&run, " && mkdir -p %s && chown user:user %s", joined, joined)
+	}
+	fmt.Fprintf(&df, "RUN %s\n", run.String())
+	fmt.Fprintf(&df, "LABEL md.base_image=%q\n", baseImage)
+	fmt.Fprintf(&df, "LABEL md.base_digest=%q\n", baseDigest)
+	fmt.Fprintf(&df, "LABEL md.context_sha=%q\n", contextSHA)
+	fmt.Fprintf(&df, "LABEL md.cache_key=%q\n", activeKey)
+	fmt.Fprintf(&df, "LABEL md.base_manifest_digest=%q\n", manifestDigest)
+	df.WriteString("CMD [\"/root/start.sh\"]\n")
+	return df.String()
+}
+
+// buildSpecializedImage builds the per-user Docker image by generating a
+// Dockerfile at build time and running "docker build".
+//
+// Design rationale — three approaches were evaluated:
+//
+//  1. docker create + docker cp + docker exec + docker commit: avoids BuildKit
+//     entirely but "docker cp" is significantly slower than Dockerfile COPY
+//     (API round-trips vs storage-driver-level tar streaming). Also requires
+//     starting the container to fix file ownership, adding latency.
+//
+//  2. Maintained Dockerfile in rsc/specialized/ with BuildKit: fast COPY but
+//     requires keeping the file in sync with runtime logic (which caches
+//     exist, what mount paths to create). BuildKit's persistent build cache
+//     also accumulates multi-GB of intermediate layers over repeated rebuilds,
+//     requiring periodic "docker builder prune" and slowing subsequent builds
+//     as the cache grows.
+//
+//  3. Maintained Dockerfile in rsc/specialized/ without BuildKit: avoids
+//     BuildKit cache growth but cannot adapt to dynamic inputs and still
+//     requires keeping the file in sync with runtime logic.
+//
+//  4. Generated Dockerfile + docker build (current): combines COPY's speed with
+//     dynamic generation. Uses --build-context per cache directory so large host
+//     trees are read in-place without copying into the build context. COPY
+//     --chown sets ownership at copy time, eliminating the container
+//     start/exec/stop cycle. --no-cache prevents stale layer reuse and keeps
+//     BuildKit's residual cache small.
+//
+// keysDir contains SSH host keys and authorized_keys. home resolves "~/" in
+// cache HostPaths. mountPaths lists container-side -v mount targets to
+// pre-create with user ownership.
+func (c *Client) buildSpecializedImage(ctx context.Context, stdout, stderr io.Writer, imageName, baseImage string, caches []CacheMount, mountPaths []string, quiet bool) error {
+	slog.DebugContext(ctx, "md", "msg", "building specialized image", "image", imageName, "base", baseImage)
+	arch := runtime.GOARCH
+	// Local-only images (no "/" in name) are never pulled from a registry.
+	// A tag (":latest") does not imply a registry; only a "/" does.
+	isLocal := !strings.Contains(baseImage, "/")
+	if isLocal {
+		if _, err := c.runCmd(ctx, "", []string{c.Runtime, "image", "inspect", "--format", "{{.Id}}", baseImage}); err != nil {
+			return fmt.Errorf("local image %s not found; build it first with 'md build-image'", baseImage)
+		}
+		if !quiet {
+			_, _ = fmt.Fprintf(stdout, "- Using local base image %s.\n", baseImage)
+		}
+	} else {
+		// Compare the local image ID before and after pull to detect changes.
+		idBefore, _ := c.runCmd(ctx, "", []string{c.Runtime, "image", "inspect", "--format", "{{.Id}}", baseImage})
+		if !quiet {
+			_, _ = fmt.Fprintf(stdout, "- Pulling base image %s ...\n", baseImage)
+		}
+		if quiet {
+			if _, err := c.runCmd(ctx, "", []string{c.Runtime, "pull", "--platform", "linux/" + arch, baseImage}); err != nil {
+				return cmdErrWithStderr("pulling base image", err)
+			}
+		} else {
+			if err := c.runCmdOut(ctx, "", []string{c.Runtime, "pull", "--platform", "linux/" + arch, baseImage}, stdout, stderr); err != nil {
+				return fmt.Errorf("pulling base image: %w", err)
+			}
+		}
+		idAfter, _ := c.runCmd(ctx, "", []string{c.Runtime, "image", "inspect", "--format", "{{.Id}}", baseImage})
+		if !quiet {
+			if idBefore != "" && idBefore == idAfter {
+				_, _ = fmt.Fprintf(stdout, "  Base image is up to date.\n")
+			} else if v := c.getImageVersionLabel(ctx, baseImage); strings.HasPrefix(v, "v") {
+				_, _ = fmt.Fprintf(stdout, "  Version: %s\n", v)
+			}
+		}
+	}
+
+	slog.DebugContext(ctx, "md", "msg", "pull complete, fetching base image digest")
+	// Get base image digest for label.
+	baseDigest, err := c.runCmd(ctx, "", []string{c.Runtime, "image", "inspect", "--format", "{{index .RepoDigests 0}}", baseImage})
+	if err != nil || baseDigest == "" {
+		baseDigest, _ = c.runCmd(ctx, "", []string{c.Runtime, "image", "inspect", "--format", "{{.Id}}", baseImage})
+	}
+	var manifestDigest string
+	if !isLocal {
+		manifestDigest, _ = c.getRemoteManifestDigest(ctx, baseImage, arch)
+	}
+
+	contextSHA, err := keysSHA(c.keysDir)
+	if err != nil {
+		return fmt.Errorf("computing keys SHA: %w", err)
+	}
+
+	active, dirs, activeKey := resolveCaches(caches, c.Home, mountPaths)
+
+	if !quiet {
+		_, _ = fmt.Fprintf(stdout, "- Building container image %s from %s ...\n", imageName, baseImage)
+		// Report skipped caches (host dir does not exist).
+		activeNames := make(map[string]bool, len(active))
+		for _, a := range active {
+			activeNames[a.cm.Name] = true
+		}
+		for _, cm := range caches {
+			if !activeNames[cm.Name] {
+				_, _ = fmt.Fprintf(stdout, "  Cache %s: %s not found, skipping\n", cm.Name, resolveHostPath(cm.HostPath, c.Home))
+			}
+		}
+		for _, a := range active {
+			var files int64
+			var size int64
+			if a.files != nil {
+				// Shallow: only top-level files are copied.
+				files = int64(len(a.files))
+				for _, f := range a.files {
+					if info, err := os.Stat(filepath.Join(a.hostPath, f)); err == nil {
+						size += info.Size()
+					}
+				}
+			} else {
+				files, size = dirStats(a.hostPath)
+			}
+			_, _ = fmt.Fprintf(stdout, "  Cache %s: %s files, %s\n", a.cm.Name, formatCount(files), FormatBytes(size))
+		}
+	}
+
+	// Generate a temporary build context containing SSH keys and a Dockerfile.
+	// Cache directories are mounted via --build-context so their contents are
+	// read directly from the host without copying into the context dir.
+	tmpDir, err := os.MkdirTemp("", "md-specialized-*")
+	if err != nil {
+		return fmt.Errorf("creating build context: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	for _, name := range []string{"ssh_host_ed25519_key", "ssh_host_ed25519_key.pub", "authorized_keys"} {
+		data, err := os.ReadFile(filepath.Join(c.keysDir, name)) //nolint:gosec // name is from a hardcoded list
+		if err != nil {
+			return fmt.Errorf("reading %s: %w", name, err)
+		}
+		if err := os.WriteFile(filepath.Join(tmpDir, filepath.Base(name)), data, 0o600); err != nil { //nolint:gosec // name is from a hardcoded list
+			return fmt.Errorf("staging %s: %w", name, err)
+		}
+	}
+
+	df := generateDockerfile(baseImage, active, dirs, baseDigest, contextSHA, activeKey, manifestDigest)
+	slog.DebugContext(ctx, "md", "msg", "generated Dockerfile", "content", df)
+
+	if err := os.WriteFile(filepath.Join(tmpDir, "Dockerfile"), []byte(df), 0o644); err != nil { //nolint:gosec // Dockerfile is ephemeral, world-readable is fine
+		return fmt.Errorf("writing Dockerfile: %w", err)
+	}
+
+	// Build the image. --no-cache forces all layers to rebuild (prevents stale
+	// results). We omit --pull so BuildKit won't re-pull the base (we already
+	// pulled above).
+	buildCmd := []string{c.Runtime, "build", "--no-cache", "--platform", "linux/" + arch, "-t", imageName}
+	for _, a := range active {
+		buildCmd = append(buildCmd, "--build-context", fmt.Sprintf("cache-%s=%s", a.cm.Name, a.hostPath))
+	}
+	buildCmd = append(buildCmd, tmpDir)
+
+	if quiet {
+		if _, err := c.runCmd(ctx, "", buildCmd); err != nil {
+			buildErr := cmdErrWithStderr("building image", err)
+			if isStaleBuilderCacheErr(buildErr) {
+				if _, pruneErr := c.runCmd(ctx, "", []string{c.Runtime, "builder", "prune", "-f"}); pruneErr != nil {
+					return buildErr
+				}
+				if _, err2 := c.runCmd(ctx, "", buildCmd); err2 != nil {
+					return cmdErrWithStderr("building image", err2)
+				}
+				return nil
+			}
+			return buildErr
+		}
+	} else {
+		if err := c.runCmdOut(ctx, "", buildCmd, stdout, stderr); err != nil {
+			buildErr := fmt.Errorf("building image: %w", err)
+			if isStaleBuilderCacheErr(buildErr) {
+				_, _ = fmt.Fprintln(stdout, "- Stale BuildKit cache detected; pruning and retrying ...")
+				if _, pruneErr := c.runCmd(ctx, "", []string{c.Runtime, "builder", "prune", "-f"}); pruneErr != nil {
+					return buildErr
+				}
+				if err2 := c.runCmdOut(ctx, "", buildCmd, stdout, stderr); err2 != nil {
+					return fmt.Errorf("building image: %w", err2)
+				}
+				return nil
+			}
+			return buildErr
+		}
+	}
+	return nil
+}
+
 // setupSSH ensures SSH keys, authorized_keys, and ~/.ssh/config.d exist.
 // Called once by New(); idempotent.
 func (c *Client) setupSSH(stdout io.Writer) error {
@@ -410,6 +1271,63 @@ func (c *Client) setupSSH(stdout io.Writer) error {
 		return nil
 	}
 	return os.WriteFile(authKeysPath, pubKey, 0o600) //nolint:gosec // path is constructed from trusted config dir
+}
+
+// isStaleBuilderCacheErr reports whether err looks like a BuildKit cache
+// corruption error caused by a file that existed in a previous build context
+// snapshot but has since been deleted from the host. This most commonly affects
+// shallow caches: because each file gets its own COPY instruction, BuildKit
+// stores per-file refs; if any of those files is later deleted, the next build
+// fails to checksum the stale ref. Non-shallow caches copy "." so deleted files
+// fall out naturally without leaving dangling refs.
+func isStaleBuilderCacheErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "failed to compute cache key") || strings.Contains(s, "failed to calculate checksum of ref")
+}
+
+// dirStats returns the number of regular files and total byte size under dir.
+// Unreadable entries are silently skipped.
+func dirStats(dir string) (files, n int64) {
+	_ = filepath.WalkDir(dir, func(_ string, d fs.DirEntry, err error) error {
+		if err == nil && !d.IsDir() {
+			if info, err := d.Info(); err == nil {
+				files++
+				n += info.Size()
+			}
+		}
+		return nil
+	})
+	return files, n
+}
+
+// formatCount formats n with comma thousands separators (e.g. 1234567 → "1,234,567").
+func formatCount(n int64) string {
+	s := strconv.FormatInt(n, 10)
+	start := len(s) % 3
+	var b strings.Builder
+	b.Grow(len(s) + len(s)/3)
+	if start > 0 {
+		b.WriteString(s[:start])
+	}
+	for i := start; i < len(s); i += 3 {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(s[i : i+3])
+	}
+	return b.String()
+}
+
+// resolveHostPath expands a leading "~/" (or "~\" on Windows) to home;
+// absolute paths are returned unchanged.
+func resolveHostPath(p, home string) string {
+	if strings.HasPrefix(p, "~/") || strings.HasPrefix(p, `~\`) {
+		return filepath.ToSlash(filepath.Join(home, p[2:]))
+	}
+	return p
 }
 
 // Harness identifies an agent harness whose config directories are mounted
