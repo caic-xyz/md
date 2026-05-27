@@ -88,6 +88,7 @@ func writeSSHConfig(configDir, containerName string, port int32, identityFile, k
 			"  StrictHostKeyChecking yes\n"+
 			"  AddressFamily inet\n"+
 			"  GSSAPIAuthentication no\n"+
+			"  ConnectTimeout 5\n"+
 			"  PreferredAuthentications publickey\n",
 		containerName, port, identityFile, knownHostsFile)
 	if controlMaster {

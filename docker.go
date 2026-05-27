@@ -976,6 +976,7 @@ func (c *Container) launchContainer(ctx context.Context, stdout, stderr io.Write
 	if err := os.MkdirAll(sshConfigDir, 0o700); err != nil {
 		return err
 	}
+	c.sshConfigPath = filepath.Join(sshConfigDir, c.Name+".conf")
 	knownHostsPath := filepath.Join(sshConfigDir, c.Name+".known_hosts")
 	hostPubKey, err := os.ReadFile(c.HostKeyPath + ".pub")
 	if err != nil {

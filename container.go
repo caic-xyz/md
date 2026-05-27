@@ -150,12 +150,25 @@ type Container struct {
 	// Set by Launch; available immediately after Launch returns. Zero if display is disabled.
 	VNCPort int32
 
+	// sshConfigPath is the SSH config file for this container (~/.ssh/config.d/<name>.conf).
+	// Set by Launch and Revive. Used by SSHCommand to pass -F directly.
+	sshConfigPath string
 	// sudoPassword is the random password set by Launch, cached
 	// so SudoPassword() doesn't need to docker inspect. Empty for
 	// containers loaded from docker list (fall back to label).
 	sudoPassword string
 	// tailscaleEphemeral is set by Launch and consumed by Connect.
 	tailscaleEphemeral bool
+}
+
+// SSHCommand returns the base SSH command args for this container, including
+// -F <config-path> when sshConfigPath is set.
+func (c *Container) SSHCommand(extraArgs ...string) []string {
+	args := []string{"ssh"}
+	if c.sshConfigPath != "" {
+		args = append(args, "-F", c.sshConfigPath)
+	}
+	return append(args, extraArgs...)
 }
 
 // populateMountPath sets MountedPath from GitRoot if not already set.
@@ -453,6 +466,7 @@ func (c *Container) Revive(ctx context.Context, stdout, stderr io.Writer) error 
 	// needs rewriting because entries are keyed by [127.0.0.1]:port.
 	sshConfigDir := filepath.Join(c.Home, ".ssh", "config.d")
 	removeSSHConfig(sshConfigDir, c.Name)
+	c.sshConfigPath = filepath.Join(sshConfigDir, c.Name+".conf")
 	knownHostsPath := filepath.Join(sshConfigDir, c.Name+".known_hosts")
 	hostPubKey, err := os.ReadFile(c.HostKeyPath + ".pub")
 	if err != nil {
@@ -483,15 +497,21 @@ func (c *Container) Revive(ctx context.Context, stdout, stderr io.Writer) error 
 // the deadline is exceeded. This confirms SSH is fully operational after the
 // TCP socket opens (sshd may need a few more milliseconds to accept auth).
 func (c *Container) waitForSSH(ctx context.Context, deadline time.Time) error {
+	var lastErr error
 	for {
-		if _, err := c.runCmd(ctx, "", c.SSHCommand(c.Name, "true")); err == nil {
+		sshArgs := c.SSHCommand(c.Name, "true")
+		cmd := exec.CommandContext(ctx, sshArgs[0], sshArgs[1:]...)
+		cmd.Env = append(os.Environ(), c.env...)
+		if out, err := cmd.CombinedOutput(); err == nil {
 			return nil
+		} else {
+			lastErr = fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
 		}
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("timed out waiting for SSH on %s", c.Name)
+			return fmt.Errorf("timed out waiting for SSH on %s: %w", c.Name, lastErr)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -1289,8 +1309,10 @@ func (c *Container) SudoPassword(ctx context.Context) (string, error) {
 	if c.sudoPassword != "" {
 		return c.sudoPassword, nil
 	}
-	out, err := c.runCmd(ctx, "", []string{c.Runtime, "inspect", "--format",
-		`{{index .Config.Labels "md.sudo-password"}}`, c.Name})
+	out, err := c.runCmd(ctx, "", []string{
+		c.Runtime, "inspect", "--format",
+		`{{index .Config.Labels "md.sudo-password"}}`, c.Name,
+	})
 	if err != nil {
 		return "", err
 	}

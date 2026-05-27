@@ -67,10 +67,6 @@ type Client struct {
 	// keysDir is the directory containing SSH host keys and authorized_keys
 	// (~/.config/md/), used as a named Docker build context.
 	keysDir string
-	// sshArgs is the base SSH command, set by New(). It includes
-	// "-o Include=~/.ssh/config.d/*.conf" when the user's ~/.ssh/config
-	// lacks the Include directive.
-	sshArgs []string
 
 	// env holds extra environment variables appended to subprocess
 	// environments (podman, ssh, git, etc.).
@@ -155,7 +151,6 @@ func (c *Client) setupSSH(stdout io.Writer) error {
 	if err := ensureSSHConfigInclude(stdout, sshDir); err != nil {
 		return err
 	}
-	c.sshArgs = []string{"ssh"}
 	if err := ensureEd25519Key(stdout, c.UserKeyPath, "md-user"); err != nil {
 		return err
 	}
@@ -211,25 +206,6 @@ func (c *Client) Container(repos ...Repo) (*Container, error) {
 		Repos:  repos,
 		Name:   containerName(repos[0].MountName(), repos[0].Branch),
 	}, nil
-}
-
-// SSHCommand returns the base SSH command args. Extra arguments (flags,
-// hostname, command) should be appended by the caller. The returned slice is a
-// fresh copy safe to modify.
-func (c *Client) SSHCommand(extraArgs ...string) []string {
-	args := make([]string, len(c.sshArgs), len(c.sshArgs)+len(extraArgs))
-	copy(args, c.sshArgs)
-	return append(args, extraArgs...)
-}
-
-// SCPCommand returns the base SCP command args with the same Include
-// workaround as [SSHCommand]. Extra arguments should be appended by the caller.
-func (c *Client) SCPCommand(extraArgs ...string) []string {
-	// sshArgs[0] is "ssh"; skip it, copy only the -o flags.
-	args := make([]string, 1, 1+len(c.sshArgs)-1+len(extraArgs))
-	args[0] = "scp"
-	args = append(args, c.sshArgs[1:]...)
-	return append(args, extraArgs...)
 }
 
 // List returns running md containers sorted by name.
