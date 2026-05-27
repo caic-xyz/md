@@ -168,7 +168,7 @@ jobs:
           sudo mv /var/lib/docker /mnt/
           sudo ln -s /mnt/docker /var/lib/docker
           sudo systemctl start docker
-          mv ~/.local/share/containers /mnt/user-containers
+          mkdir -p /mnt/user-containers
           ln -s /mnt/user-containers ~/.local/share/containers
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
