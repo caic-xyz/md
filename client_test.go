@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -101,7 +100,8 @@ func TestWellKnownCaches(t *testing.T) {
 	}
 }
 
-func TestClient(t *testing.T) { //nolint:tparallel // subtests use t.Setenv
+func TestClient(t *testing.T) {
+	t.Parallel()
 	t.Run("Container", func(t *testing.T) {
 		t.Parallel()
 		c := &Client{}
@@ -132,18 +132,11 @@ func TestClient(t *testing.T) { //nolint:tparallel // subtests use t.Setenv
 		}
 	})
 	t.Run("Runtime", func(t *testing.T) {
-		// Cannot use t.Parallel() because subtests use t.Setenv.
+		t.Parallel()
 		t.Run("new_defaults_to_docker", func(t *testing.T) {
-			// Cannot use t.Parallel() because t.Setenv is incompatible.
-			if rt := detectRuntime(); rt == "docker" {
-				if _, err := exec.LookPath("docker"); err != nil {
-					t.Skip("no container runtime available in PATH")
-				}
-			}
+			t.Parallel()
 			tmp := t.TempDir()
-			t.Setenv("HOME", tmp)
-			t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmp, ".config"))
-			c, err := New(io.Discard)
+			c, err := newClient(tmp, "", io.Discard)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -162,28 +155,25 @@ func TestClient(t *testing.T) { //nolint:tparallel // subtests use t.Setenv
 }
 
 func TestDetectRuntime(t *testing.T) {
-	// Cannot use t.Parallel() because subtests use t.Setenv.
+	t.Parallel()
 	t.Run("fallback_to_docker", func(t *testing.T) {
-		// Cannot use t.Parallel() because t.Setenv is incompatible.
-		// Use empty PATH to test fallback when neither docker nor podman is found.
-		t.Setenv("PATH", t.TempDir())
-		if got := detectRuntime(); got != "docker" {
+		t.Parallel()
+		lookPath := func(name string) (string, error) {
+			return "", exec.ErrNotFound
+		}
+		if got := detectRuntime(lookPath); got != "docker" {
 			t.Errorf("detectRuntime() = %q, want %q (fallback)", got, "docker")
 		}
 	})
 	t.Run("finds_podman_when_no_docker", func(t *testing.T) {
-		// Cannot use t.Parallel() because t.Setenv is incompatible.
-		dir := t.TempDir()
-		name := "podman"
-		if runtime.GOOS == "windows" {
-			name = "podman.exe"
+		t.Parallel()
+		lookPath := func(name string) (string, error) {
+			if name == "podman" {
+				return "/usr/bin/podman", nil
+			}
+			return "", exec.ErrNotFound
 		}
-		podmanPath := filepath.Join(dir, name)
-		if err := os.WriteFile(podmanPath, []byte("#!/bin/sh\n"), 0o755); err != nil { //nolint:gosec // must be executable
-			t.Fatal(err)
-		}
-		t.Setenv("PATH", dir)
-		if got := detectRuntime(); got != "podman" {
+		if got := detectRuntime(lookPath); got != "podman" {
 			t.Errorf("detectRuntime() = %q, want %q", got, "podman")
 		}
 	})

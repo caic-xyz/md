@@ -123,7 +123,7 @@ func newClient(home, rt string, stdout io.Writer) (*Client, error) {
 		xdgStateHome = envOr("XDG_STATE_HOME", xdgStateHome)
 	}
 	if rt == "" {
-		rt = detectRuntime()
+		rt = detectRuntime(exec.LookPath)
 	}
 	if rt != "docker" && rt != "podman" {
 		return nil, fmt.Errorf("unsupported container runtime %q; supported values: docker, podman", rt)
@@ -147,12 +147,12 @@ func newClient(home, rt string, stdout io.Writer) (*Client, error) {
 }
 
 // detectRuntime returns the container runtime to use.
-// Checks for docker, then podman in PATH.
-func detectRuntime() string {
-	if _, err := exec.LookPath("docker"); err == nil {
+// Checks for docker, then podman using the provided lookup function.
+func detectRuntime(lookPath func(string) (string, error)) string {
+	if _, err := lookPath("docker"); err == nil {
 		return "docker"
 	}
-	if _, err := exec.LookPath("podman"); err == nil {
+	if _, err := lookPath("podman"); err == nil {
 		return "podman"
 	}
 	return "docker"
