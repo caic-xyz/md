@@ -125,6 +125,9 @@ func newClient(home, rt string, stdout io.Writer) (*Client, error) {
 	if rt == "" {
 		rt = detectRuntime()
 	}
+	if rt != "docker" && rt != "podman" {
+		return nil, fmt.Errorf("unsupported container runtime %q; supported values: docker, podman", rt)
+	}
 	c := &Client{
 		Home:           home,
 		XDGConfigHome:  xdgConfigHome,

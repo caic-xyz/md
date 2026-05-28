@@ -153,6 +153,9 @@ func usage() {
 }
 
 func newClient() (*md.Client, error) {
+	if runtimeOverride != "" && runtimeOverride != "docker" && runtimeOverride != "podman" {
+		return nil, fmt.Errorf("--runtime must be \"docker\" or \"podman\", got %q", runtimeOverride)
+	}
 	c, err := md.New(os.Stdout)
 	if err != nil {
 		return nil, err
@@ -558,6 +561,9 @@ type containerListEntry struct {
 }
 
 func cmdList(ctx context.Context, args []string) error {
+	if runtimeOverride != "" && runtimeOverride != "docker" && runtimeOverride != "podman" {
+		return fmt.Errorf("--runtime must be \"docker\" or \"podman\", got %q", runtimeOverride)
+	}
 	fs := flag.NewFlagSet("list", flag.ExitOnError)
 	verbose := addVerboseFlag(fs)
 	jsonOut := fs.Bool("json", false, "Output in JSON format")
