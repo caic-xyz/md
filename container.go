@@ -244,7 +244,7 @@ func resolveMountPaths(repos []Repo) error {
 		if err != nil {
 			return fmt.Errorf("repos[%d]: cannot compute relative path from %q: %w", i, base, err)
 		}
-		repos[i].MountedPath = "/home/user/src/" + rel
+		repos[i].MountedPath = "/home/user/src/" + filepath.ToSlash(rel)
 	}
 
 	// Final validation: check for remaining duplicate mount paths.
