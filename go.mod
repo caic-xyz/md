@@ -1,12 +1,12 @@
 module github.com/caic-xyz/md
 
-go 1.25.7
+go 1.25.10
 
 require (
-	github.com/maruel/genai v0.5.3
-	golang.org/x/crypto v0.49.0
+	github.com/maruel/genai v0.5.5
+	golang.org/x/crypto v0.51.0
 	golang.org/x/sync v0.20.0
-	golang.org/x/term v0.41.0
+	golang.org/x/term v0.43.0
 )
 
 require (
@@ -16,9 +16,10 @@ require (
 	github.com/invopop/jsonschema v0.13.0 // indirect
 	github.com/klauspost/compress v1.18.4 // indirect
 	github.com/mailru/easyjson v0.9.2 // indirect
-	github.com/maruel/httpjson v0.5.0 // indirect
+	github.com/maruel/httpjson v0.5.2 // indirect
 	github.com/maruel/roundtrippers v0.5.0 // indirect
 	github.com/wk8/go-ordered-map/v2 v2.1.8 // indirect
-	golang.org/x/sys v0.42.0 // indirect
+	golang.org/x/net v0.55.0 // indirect
+	golang.org/x/sys v0.45.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
