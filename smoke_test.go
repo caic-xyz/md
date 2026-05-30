@@ -188,6 +188,35 @@ func TestSmoke(t *testing.T) {
 							t.Fatalf("file I/O: %v", err)
 						}
 					})
+
+					t.Run("list", func(t *testing.T) {
+						containers, err := client.List(t.Context())
+						if err != nil {
+							t.Fatalf("List: %v", err)
+						}
+						var found *Container
+						for _, c := range containers {
+							if c.Name == ct.Name {
+								found = c
+								break
+							}
+						}
+						if found == nil {
+							t.Fatalf("container %s not found in list output", ct.Name)
+						}
+						if found.SSHPort <= 0 {
+							t.Errorf("SSHPort is %d, expected positive", found.SSHPort)
+						} else {
+							t.Logf("SSHPort=%d", found.SSHPort)
+						}
+						if found.VNCPort > 0 {
+							t.Logf("VNCPort=%d", found.VNCPort)
+						}
+						if !found.Sudo {
+							t.Error("Sudo is false, expected true")
+						}
+						t.Logf("Sudo=%v", found.Sudo)
+					})
 				})
 
 				t.Run("nested", func(t *testing.T) {

@@ -2013,13 +2013,94 @@ func shellQuote(s string) string {
 	return s
 }
 
+// psName handles Docker's string format and Podman's array format for the
+// Names field in `docker ps --format '{{json .}}'`.
+type psName string
+
+func (n *psName) UnmarshalJSON(data []byte) error {
+	if len(data) == 0 || string(data) == "null" {
+		return nil
+	}
+	if data[0] == '[' {
+		var names []string
+		if err := json.Unmarshal(data, &names); err != nil {
+			return err
+		}
+		if len(names) > 0 {
+			*n = psName(names[0])
+		}
+		return nil
+	}
+	return json.Unmarshal(data, (*string)(n))
+}
+
+// psPorts handles Docker's string format and Podman's array format for the
+// Ports field in `docker ps --format '{{json .}}'`.
+type psPorts string
+
+type podmanPortMapping struct {
+	HostIP        string `json:"host_ip"`
+	HostPort      uint16 `json:"host_port"`
+	ContainerPort uint16 `json:"container_port"`
+	Proto         string `json:"proto"`
+}
+
+func (p *psPorts) UnmarshalJSON(data []byte) error {
+	if len(data) == 0 || string(data) == "null" {
+		return nil
+	}
+	if data[0] == '[' {
+		var mappings []podmanPortMapping
+		if err := json.Unmarshal(data, &mappings); err != nil {
+			return err
+		}
+		var parts []string
+		for _, m := range mappings {
+			host := m.HostIP
+			if host == "" {
+				host = "0.0.0.0"
+			}
+			parts = append(parts, fmt.Sprintf("%s:%d->%d/%s", host, m.HostPort, m.ContainerPort, m.Proto))
+		}
+		*p = psPorts(strings.Join(parts, ", "))
+		return nil
+	}
+	return json.Unmarshal(data, (*string)(p))
+}
+
+// psLabels handles Docker's comma-separated string format and Podman's JSON
+// object format for the Labels field in `docker ps --format '{{json .}}'`.
+type psLabels map[string]string
+
+func (l *psLabels) UnmarshalJSON(data []byte) error {
+	if len(data) == 0 || string(data) == "null" {
+		return nil
+	}
+	*l = make(map[string]string)
+	if data[0] == '{' {
+		return json.Unmarshal(data, (*map[string]string)(l))
+	}
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		return err
+	}
+	for kv := range strings.SplitSeq(s, ",") {
+		k, v, ok := strings.Cut(kv, "=")
+		if !ok {
+			continue
+		}
+		(*l)[k] = v
+	}
+	return nil
+}
+
 // containerJSON is the raw Docker ps JSON structure.
 type containerJSON struct {
-	Names     string `json:"Names"`
-	State     string `json:"State"`
-	CreatedAt string `json:"CreatedAt"`
-	Labels    string `json:"Labels"`
-	Ports     string `json:"Ports"`
+	Names     psName   `json:"Names"`
+	State     string   `json:"State"`
+	CreatedAt string   `json:"CreatedAt"`
+	Labels    psLabels `json:"Labels"`
+	Ports     psPorts  `json:"Ports"`
 }
 
 // containerInspectJSON is the subset of `docker inspect` output we parse.
@@ -2059,7 +2140,7 @@ func unmarshalContainer(data []byte) (Container, error) {
 		return Container{}, err
 	}
 	ct := Container{
-		Name:  raw.Names,
+		Name:  string(raw.Names),
 		State: raw.State,
 	}
 	if raw.CreatedAt != "" {
@@ -2069,12 +2150,7 @@ func unmarshalContainer(data []byte) (Container, error) {
 		}
 		ct.CreatedAt = t
 	}
-	// Docker ps outputs labels as comma-separated key=value pairs.
-	for kv := range strings.SplitSeq(raw.Labels, ",") {
-		k, v, ok := strings.Cut(kv, "=")
-		if !ok {
-			continue
-		}
+	for k, v := range raw.Labels {
 		switch k {
 		case "md.repos":
 			if data, err := base64.StdEncoding.DecodeString(v); err == nil {
@@ -2098,12 +2174,12 @@ func unmarshalContainer(data []byte) (Container, error) {
 		}
 	}
 	// Parse port mappings: "0.0.0.0:32768->22/tcp, 0.0.0.0:32769->5901/tcp"
-	for mapping := range strings.SplitSeq(raw.Ports, ",") {
+	for mapping := range strings.SplitSeq(string(raw.Ports), ",") {
 		mapping = strings.TrimSpace(mapping)
 		if mapping == "" {
 			continue
 		}
-		// Split on "->" to get host:port and containerPort/proto.
+		// Cut on "->" to get host:port and containerPort/proto.
 		hostPart, containerPart, ok := strings.Cut(mapping, "->")
 		if !ok {
 			continue
