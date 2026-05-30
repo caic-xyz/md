@@ -552,9 +552,12 @@ type containerListEntry struct {
 	Name      string             `json:"name"`
 	State     string             `json:"state"`
 	Uptime    string             `json:"uptime"`
+	SSHPort   int32              `json:"ssh_port"`
+	VNCPort   int32              `json:"vncPort,omitempty"`
 	Display   bool               `json:"display,omitempty"`
 	Tailscale bool               `json:"tailscale,omitempty"`
 	FQDN      string             `json:"fqdn,omitempty"`
+	Sudo      bool               `json:"sudo,omitempty"`
 	USB       bool               `json:"usb,omitempty"`
 	Repos     []md.Repo          `json:"repos,omitempty"`
 	Stats     *md.ContainerStats `json:"stats,omitempty"`
@@ -608,8 +611,11 @@ func cmdList(ctx context.Context, args []string) error {
 				Name:      ct.Name,
 				State:     ct.State,
 				Uptime:    time.Since(ct.CreatedAt).Truncate(time.Second).String(),
+				SSHPort:   ct.SSHPort,
+				VNCPort:   ct.VNCPort,
 				Display:   ct.Display,
 				Tailscale: ct.Tailscale,
+				Sudo:      ct.Sudo,
 				USB:       ct.USB,
 				Repos:     ct.Repos,
 				Stats:     allStats[ct.Name],

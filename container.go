@@ -2019,6 +2019,7 @@ type containerJSON struct {
 	State     string `json:"State"`
 	CreatedAt string `json:"CreatedAt"`
 	Labels    string `json:"Labels"`
+	Ports     string `json:"Ports"`
 }
 
 // containerInspectJSON is the subset of `docker inspect` output we parse.
@@ -2094,6 +2095,37 @@ func unmarshalContainer(data []byte) (Container, error) {
 			ct.USB = v == "1"
 		case "md.sudo":
 			ct.Sudo = v == "1"
+		}
+	}
+	// Parse port mappings: "0.0.0.0:32768->22/tcp, 0.0.0.0:32769->5901/tcp"
+	for _, mapping := range strings.Split(raw.Ports, ",") {
+		mapping = strings.TrimSpace(mapping)
+		if mapping == "" {
+			continue
+		}
+		// Split on "->" to get host:port and containerPort/proto.
+		hostPart, containerPart, ok := strings.Cut(mapping, "->")
+		if !ok {
+			continue
+		}
+		containerPortStr, _, _ := strings.Cut(containerPart, "/")
+		hostPortStr := hostPart
+		if idx := strings.LastIndex(hostPart, ":"); idx >= 0 {
+			hostPortStr = hostPart[idx+1:]
+		}
+		hostPort, err := strconv.ParseInt(hostPortStr, 10, 32)
+		if err != nil {
+			continue
+		}
+		containerPort, err := strconv.ParseInt(containerPortStr, 10, 32)
+		if err != nil {
+			continue
+		}
+		switch int32(containerPort) {
+		case 22:
+			ct.SSHPort = int32(hostPort)
+		case 5901:
+			ct.VNCPort = int32(hostPort)
 		}
 	}
 	return ct, nil
