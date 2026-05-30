@@ -435,16 +435,34 @@ func cmdStart(ctx context.Context, args []string) error {
 		MaxCPUs:          *cpus,
 		ExtraRunArgs:     dockerFlags.values,
 	}
-	if err := ct.Launch(ctx, os.Stdout, os.Stderr, &opts); err != nil {
-		return err
-	}
-	result, err := ct.Connect(ctx, os.Stdout, os.Stderr, &opts)
-	if err != nil {
-		return err
-	}
-	if !*quiet {
-		if err := printContainerSummary(ctx, ct, result, "- Created "+ct.Name); err != nil {
+	switch ct.Status(ctx) {
+	case "exited", "stopped":
+		if !*quiet {
+			_, _ = fmt.Fprintf(os.Stdout, "- Reviving stopped container %s ...\n", ct.Name)
+		}
+		if err := ct.Revive(ctx, os.Stdout, os.Stderr); err != nil {
+			return fmt.Errorf("reviving %s: %w", ct.Name, err)
+		}
+		if !*quiet {
+			if err := printContainerSummary(ctx, ct, nil, "- Revived "+ct.Name); err != nil {
+				return err
+			}
+		}
+	case "running":
+		return fmt.Errorf("container %s is already running. SSH in with: ssh %s", ct.Name, ct.Name)
+	default:
+		// Container does not exist, proceed with normal launch.
+		if err := ct.Launch(ctx, os.Stdout, os.Stderr, &opts); err != nil {
 			return err
+		}
+		result, err := ct.Connect(ctx, os.Stdout, os.Stderr, &opts)
+		if err != nil {
+			return err
+		}
+		if !*quiet {
+			if err := printContainerSummary(ctx, ct, result, "- Created "+ct.Name); err != nil {
+				return err
+			}
 		}
 	}
 	if !*noSSH {

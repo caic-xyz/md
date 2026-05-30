@@ -297,6 +297,11 @@ func TestSmoke(t *testing.T) {
 				t.Run("lifecycle", func(t *testing.T) {
 					ct := launchSmokeContainer(t, t.Context(), client, baseImage, rt+"-lifecycle")
 
+					// Verify Status returns "running" after launch.
+					if s := ct.Status(t.Context()); s != "running" {
+						t.Fatalf("Status after launch: expected 'running', got %q", s)
+					}
+
 					if _, err := ct.runCmd(t.Context(), "", ct.SSHCommand(nil, "echo persisted > /tmp/smoke-test")); err != nil {
 						t.Fatalf("write file: %v", err)
 					}
@@ -306,11 +311,22 @@ func TestSmoke(t *testing.T) {
 						t.Fatalf("Stop: %v", err)
 					}
 
-					t.Log("reviving container ...")
+					// Verify Status returns "exited" after stop.
+					if s := ct.Status(t.Context()); s != "exited" {
+						t.Fatalf("Status after stop: expected 'exited', got %q", s)
+					}
+
+					t.Log("reviving container (like md start on stopped container) ...")
 					if err := ct.Revive(t.Context(), io.Discard, io.Discard); err != nil {
 						t.Fatalf("Revive: %v", err)
 					}
 
+					// Verify Status returns "running" after revive.
+					if s := ct.Status(t.Context()); s != "running" {
+						t.Fatalf("Status after revive: expected 'running', got %q", s)
+					}
+
+					// Verify SSH works and container state is preserved.
 					out, err := ct.runCmd(t.Context(), "", ct.SSHCommand(nil, "cat /tmp/smoke-test"))
 					if err != nil {
 						t.Fatalf("read file after revive: %v", err)

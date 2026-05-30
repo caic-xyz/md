@@ -1123,6 +1123,18 @@ func (c *Container) DiskUsage(ctx context.Context) (int64, error) {
 	return sz, nil
 }
 
+// Status returns the Docker container state (e.g. "running", "exited", "").
+// Returns empty string when the container does not exist.
+func (c *Container) Status(ctx context.Context) string {
+	out, err := c.runCmd(ctx, "", []string{
+		c.Runtime, "inspect", "--format", "{{.State.Status}}", c.Name,
+	})
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(out)
+}
+
 // GetHostPort returns the host port mapped to a container port (e.g.
 // "5901/tcp"). Returns 0 if the port is not mapped.
 func (c *Container) GetHostPort(ctx context.Context, containerPort string) (int32, error) {
@@ -1855,8 +1867,7 @@ func (c *Container) provisionContainer(ctx context.Context, stdout, stderr io.Wr
 				}
 				if err := c.runCmdOut(egCtx, "", c.SSHCommand(nil,
 					"cd "+mp+
-						" && git branch -q --track "+rBranch+" base"+
-						" && git switch -q "+rBranch), stdout, stderr); err != nil {
+					" && git checkout -q -B "+rBranch+" base"), stdout, stderr); err != nil {
 					return err
 				}
 
