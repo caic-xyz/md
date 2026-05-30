@@ -70,7 +70,8 @@ func ensurePublicKey(privPath string) error {
 
 // controlSocketPath returns the ControlMaster socket path for a container.
 func controlSocketPath(containerName string) string {
-	return filepath.Join(os.TempDir(), "md-"+containerName+".sock")
+	// Use forward slashes: SSH expects POSIX paths for ControlPath.
+	return filepath.ToSlash(filepath.Join(os.TempDir(), "md-"+containerName+".sock"))
 }
 
 // writeSSHConfig writes the SSH config file for a container.
@@ -78,6 +79,8 @@ func controlSocketPath(containerName string) string {
 // directives are included for connection multiplexing.
 func writeSSHConfig(configDir, containerName string, port int32, identityFile, knownHostsFile string, controlMaster bool) error {
 	confPath := filepath.Join(configDir, containerName+".conf")
+	// Use forward slashes: SSH config format is POSIX convention;
+	// Windows OpenSSH accepts both but forward slashes are canonical.
 	content := fmt.Sprintf(
 		"Host %s\n"+
 			"  HostName 127.0.0.1\n"+
@@ -91,7 +94,7 @@ func writeSSHConfig(configDir, containerName string, port int32, identityFile, k
 			"  GSSAPIAuthentication no\n"+
 			"  ConnectTimeout 5\n"+
 			"  PreferredAuthentications publickey\n",
-		containerName, port, identityFile, knownHostsFile)
+		containerName, port, filepath.ToSlash(identityFile), filepath.ToSlash(knownHostsFile))
 	if controlMaster {
 		content += fmt.Sprintf(
 			"  ControlMaster auto\n"+

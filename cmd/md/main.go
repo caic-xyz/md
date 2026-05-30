@@ -1050,7 +1050,16 @@ func cmdVNC(ctx context.Context, args []string) error {
 		fmt.Println("  Or use any remote desktop client (Remmina, RealVNC, TigerVNC, etc.)")
 		return nil
 	case "windows":
-		return exec.CommandContext(ctx, "cmd", "/c", "start", vncURL).Run() //nolint:gosec // vncURL is constructed from trusted port
+		if err := exec.CommandContext(ctx, "cmd", "/c", "start", "", vncURL).Run(); err == nil { //nolint:gosec // vncURL is constructed from trusted port
+			return nil
+		}
+		fmt.Println("\nCannot launch VNC client automatically. Connect manually:")
+		fmt.Println("  Address: 127.0.0.1")
+		fmt.Printf("  Port: %d\n", vncPort)
+		fmt.Println("\nYou can use:")
+		fmt.Println("  - TigerVNC: https://tigervnc.org/")
+		fmt.Println("  - RealVNC: https://www.realvnc.com/")
+		return nil
 	default:
 		return fmt.Errorf("unsupported platform: %s", runtime.GOOS)
 	}

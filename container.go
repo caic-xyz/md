@@ -1429,11 +1429,15 @@ func (c *Container) launchContainer(ctx context.Context, stdout, stderr io.Write
 	if len(c.Repos) > 1000 {
 		return fmt.Errorf("too many repositories: %d (max 1000)", len(c.Repos))
 	}
-	var dockerArgs []string
-	dockerArgs = append(dockerArgs, c.Runtime, "run", "-d",
-		"--name", c.Name, "--hostname", c.Name,
-		"-p", "127.0.0.1::22")
-
+	dockerArgs := []string{
+		c.Runtime, "run", "-d",
+		"--name", c.Name,
+		"--hostname", c.Name,
+		"-p", "127.0.0.1::22",
+		// Localtime: mount the host timezone file. Docker Desktop on Windows/macOS provides
+		// a virtual /etc/localtime inside the VM, so the flag is universal.
+		"-v", "/etc/localtime:/etc/localtime:ro",
+	}
 	if opts.MaxCPUs > 0 {
 		dockerArgs = append(dockerArgs, "--cpus", strconv.Itoa(opts.MaxCPUs))
 	}
@@ -1444,10 +1448,6 @@ func (c *Container) launchContainer(ctx context.Context, stdout, stderr io.Write
 
 	if kvmAvailable() {
 		dockerArgs = append(dockerArgs, "--device=/dev/kvm")
-	}
-	// Localtime.
-	if runtime.GOOS == "linux" {
-		dockerArgs = append(dockerArgs, "-v", "/etc/localtime:/etc/localtime:ro")
 	}
 	// Sandbox capabilities.
 	// - SYS_PTRACE: needed for strace/debuggers. Scoped to the container's
@@ -1544,20 +1544,20 @@ func (c *Container) launchContainer(ctx context.Context, stdout, stderr io.Write
 	xdgData := c.XDGDataHome
 	xdgState := c.XDGStateHome
 	for _, p := range combined.HomePaths {
-		dockerArgs = append(dockerArgs, "-v", filepath.Join(home, p)+":/home/user/"+p)
+		dockerArgs = append(dockerArgs, "-v", filepath.ToSlash(filepath.Join(home, p))+":/home/user/"+p)
 	}
 	for _, p := range combined.XDGConfigPaths {
 		ro := ""
 		if p == "md" {
 			ro = ":ro"
 		}
-		dockerArgs = append(dockerArgs, "-v", filepath.Join(xdgConfig, p)+":/home/user/.config/"+p+ro)
+		dockerArgs = append(dockerArgs, "-v", filepath.ToSlash(filepath.Join(xdgConfig, p))+":/home/user/.config/"+p+ro)
 	}
 	for _, p := range combined.LocalSharePaths {
-		dockerArgs = append(dockerArgs, "-v", filepath.Join(xdgData, p)+":/home/user/.local/share/"+p)
+		dockerArgs = append(dockerArgs, "-v", filepath.ToSlash(filepath.Join(xdgData, p))+":/home/user/.local/share/"+p)
 	}
 	for _, p := range combined.LocalStatePaths {
-		dockerArgs = append(dockerArgs, "-v", filepath.Join(xdgState, p)+":/home/user/.local/state/"+p)
+		dockerArgs = append(dockerArgs, "-v", filepath.ToSlash(filepath.Join(xdgState, p))+":/home/user/.local/state/"+p)
 	}
 
 	// Set md metadata labels.

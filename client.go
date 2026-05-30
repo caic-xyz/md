@@ -1207,9 +1207,9 @@ func (c *Client) buildSpecializedImage(ctx context.Context, stdout, stderr io.Wr
 	// pulled above).
 	buildCmd := []string{c.Runtime, "build", "--no-cache", "--platform", "linux/" + arch, "-t", imageName}
 	for _, a := range active {
-		buildCmd = append(buildCmd, "--build-context", fmt.Sprintf("cache-%s=%s", a.cm.Name, a.hostPath))
+		buildCmd = append(buildCmd, "--build-context", fmt.Sprintf("cache-%s=%s", a.cm.Name, filepath.ToSlash(a.hostPath)))
 	}
-	buildCmd = append(buildCmd, tmpDir)
+	buildCmd = append(buildCmd, filepath.ToSlash(tmpDir))
 
 	if quiet {
 		if _, err := c.runCmd(ctx, "", buildCmd); err != nil {
