@@ -2098,7 +2098,7 @@ func unmarshalContainer(data []byte) (Container, error) {
 		}
 	}
 	// Parse port mappings: "0.0.0.0:32768->22/tcp, 0.0.0.0:32769->5901/tcp"
-	for _, mapping := range strings.Split(raw.Ports, ",") {
+	for mapping := range strings.SplitSeq(raw.Ports, ",") {
 		mapping = strings.TrimSpace(mapping)
 		if mapping == "" {
 			continue
