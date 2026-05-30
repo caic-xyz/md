@@ -1867,7 +1867,7 @@ func (c *Container) provisionContainer(ctx context.Context, stdout, stderr io.Wr
 				}
 				if err := c.runCmdOut(egCtx, "", c.SSHCommand(nil,
 					"cd "+mp+
-					" && git checkout -q -B "+rBranch+" base"), stdout, stderr); err != nil {
+						" && git checkout -q -B "+rBranch+" base"), stdout, stderr); err != nil {
 					return err
 				}
 
