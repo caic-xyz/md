@@ -165,7 +165,11 @@ func detectRuntime(lookPath func(string) (string, error)) string {
 // random name is generated automatically.
 // It doesn't start it, it is just a reference.
 func (c *Client) Container(repos ...Repo) (*Container, error) {
-	// Validate repos, auto-populating MountedPath from GitRoot.
+	// Set MountedPath from GitRoot (base name), disambiguating repos
+	// with the same basename using relative paths.
+	if err := resolveMountPaths(repos); err != nil {
+		return nil, err
+	}
 	for i := range repos {
 		if err := repos[i].Validate(); err != nil {
 			return nil, fmt.Errorf("repos[%d]: %w", i, err)

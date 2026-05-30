@@ -506,7 +506,7 @@ func TestParseCreatedAt(t *testing.T) {
 
 func TestRepo(t *testing.T) {
 	t.Parallel()
-	t.Run("Name", func(t *testing.T) {
+	t.Run("resolveMountPaths", func(t *testing.T) {
 		t.Parallel()
 		t.Run("valid", func(t *testing.T) {
 			t.Parallel()
@@ -544,10 +544,11 @@ func TestRepo(t *testing.T) {
 			for _, tt := range tests {
 				t.Run(tt.name, func(t *testing.T) {
 					t.Parallel()
-					if err := tt.r.Validate(); err != nil {
+					repos := []Repo{tt.r}
+					if err := resolveMountPaths(repos); err != nil {
 						t.Fatal(err)
 					}
-					if got := tt.r.MountedPath; got != tt.want {
+					if got := repos[0].MountedPath; got != tt.want {
 						t.Errorf("MountedPath = %q, want %q", got, tt.want)
 					}
 				})
@@ -602,17 +603,19 @@ func TestRepo(t *testing.T) {
 	})
 }
 
-func TestValidateRepoNames(t *testing.T) {
+func TestResolveMountPaths(t *testing.T) {
 	t.Parallel()
 	t.Run("valid", func(t *testing.T) {
 		t.Parallel()
 		tests := []struct {
 			name  string
 			repos []Repo
+			want  []string
 		}{
 			{
 				"single repo",
 				[]Repo{{GitRoot: "/home/user/src/myrepo"}},
+				[]string{"/home/user/src/myrepo"},
 			},
 			{
 				"two repos with different basenames",
@@ -620,6 +623,7 @@ func TestValidateRepoNames(t *testing.T) {
 					{GitRoot: "/home/user/src/foo"},
 					{GitRoot: "/home/user/src/bar"},
 				},
+				[]string{"/home/user/src/foo", "/home/user/src/bar"},
 			},
 			{
 				"same basename but different MountedPath",
@@ -627,18 +631,43 @@ func TestValidateRepoNames(t *testing.T) {
 					{GitRoot: "/home/user/src/foo/website", MountedPath: "/home/user/src/foo/website"},
 					{GitRoot: "/home/user/src/bar/website", MountedPath: "/home/user/src/bar/website"},
 				},
+				[]string{"/home/user/src/foo/website", "/home/user/src/bar/website"},
+			},
+			{
+				"same basename auto-disambiguated with relative path",
+				[]Repo{
+					{GitRoot: "/home/user/src/foo/website"},
+					{GitRoot: "/home/user/src/bar/website"},
+				},
+				[]string{"/home/user/src/foo/website", "/home/user/src/bar/website"},
+			},
+			{
+				"mixed explicit and auto-disambiguated",
+				[]Repo{
+					{GitRoot: "/home/user/src/foo/website"},
+					{GitRoot: "/home/user/src/website"},
+				},
+				[]string{"/home/user/src/foo/website", "/home/user/src/website"},
+			},
+			{
+				"repos outside ~/src auto-disambiguate from common parent",
+				[]Repo{
+					{GitRoot: "/other/foo/website"},
+					{GitRoot: "/other/bar/website"},
+				},
+				[]string{"/home/user/src/foo/website", "/home/user/src/bar/website"},
 			},
 		}
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {
 				t.Parallel()
-				for i := range tt.repos {
-					if err := tt.repos[i].Validate(); err != nil {
-						t.Fatal(err)
-					}
+				if err := resolveMountPaths(tt.repos); err != nil {
+					t.Fatal(err)
 				}
-				if err := validateRepoNames(tt.repos); err != nil {
-					t.Errorf("unexpected error: %v", err)
+				for i, r := range tt.repos {
+					if r.MountedPath != tt.want[i] {
+						t.Errorf("repos[%d].MountedPath = %q, want %q", i, r.MountedPath, tt.want[i])
+					}
 				}
 			})
 		}
@@ -646,21 +675,19 @@ func TestValidateRepoNames(t *testing.T) {
 
 	t.Run("error", func(t *testing.T) {
 		t.Parallel()
-		// Two repos with the same basename but no MountedPath disambiguation.
-		// Both resolve to MountedPath == "/home/user/src/website".
-		repos := []Repo{
-			{GitRoot: "/home/user/src/foo/website"},
-			{GitRoot: "/home/user/src/bar/website"},
-		}
-		err := validateRepoNames(repos)
-		if err == nil {
-			t.Fatal("expected error for duplicate mount names")
-		}
-		if !strings.Contains(err.Error(), "both mount as") {
-			t.Errorf("error should mention 'both mount as', got: %v", err)
-		}
-		if !strings.Contains(err.Error(), "MountedPath") {
-			t.Errorf("error should mention 'MountedPath', got: %v", err)
-		}
+		t.Run("same repo different branches still conflicts", func(t *testing.T) {
+			t.Parallel()
+			repos := []Repo{
+				{GitRoot: "/home/user/src/myrepo", Branch: "main"},
+				{GitRoot: "/home/user/src/myrepo", Branch: "feature"},
+			}
+			err := resolveMountPaths(repos)
+			if err == nil {
+				t.Fatal("expected error for same GitRoot after relative resolution")
+			}
+			if !strings.Contains(err.Error(), "both mount as") {
+				t.Errorf("error should mention 'both mount as', got: %v", err)
+			}
+		})
 	})
 }

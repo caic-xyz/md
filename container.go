@@ -46,7 +46,9 @@ type Repo struct {
 	// MountedPath is the absolute destination path inside the
 	// container, e.g. "/home/user/src/github/caic". When empty,
 	// populateMountPath fills it from filepath.Base(GitRoot).
-	// Callers may set it explicitly for disambiguation.
+	// When two repos share the same basename, resolveMountPaths
+	// disambiguates using relative paths from /home/user/src.
+	// Callers may set it explicitly to override.
 	MountedPath string `json:"mounted_path,omitempty"`
 	// DefaultRemote is the host's default git remote.
 	DefaultRemote string `json:"default_remote,omitempty"`
@@ -181,7 +183,7 @@ func (c *Container) SSHCommand(opts []string, cmd string) []string {
 	return args
 }
 
-// Validate normalizes the repo and returns an error for invalid values.
+// Validate returns an error for invalid repo fields.
 func (r *Repo) Validate() error {
 	r.populateMountPath()
 	if strings.HasPrefix(r.MountedPath, "~/") {
@@ -199,21 +201,94 @@ func (r *Repo) Validate() error {
 	return nil
 }
 
-// validateRepoNames checks that all repos have unique mount paths.
-//
-// Two repos with the same MountedPath would share a directory and
-// overwrite each other. Callers must set MountedPath to disambiguate repos
-// with the same basename from different parent directories.
-func validateRepoNames(repos []Repo) error {
-	seen := make(map[string]int, len(repos))
-	for i, r := range repos {
-		n := r.MountedPath
-		if j, dup := seen[n]; dup {
-			return fmt.Errorf("repos[%d] and repos[%d] both mount as %q; set MountedPath to disambiguate", j, i, n)
+// resolveMountPaths sets MountedPath for any repo that doesn't have one,
+// using filepath.Base(GitRoot) by default. When any two repos share the
+// same basename, all auto-populated repos switch to paths relative to the
+// common parent directory of their GitRoots.
+func resolveMountPaths(repos []Repo) error {
+	// Track which repos were auto-populated (no explicit MountedPath).
+	auto := make([]bool, len(repos))
+	for i := range repos {
+		auto[i] = repos[i].MountedPath == ""
+		repos[i].populateMountPath()
+	}
+
+	// Detect basename conflicts.
+	seen := make(map[string]struct{}, len(repos))
+	hasConflict := false
+	for _, r := range repos {
+		if _, dup := seen[r.MountedPath]; dup {
+			hasConflict = true
+			break
 		}
-		seen[n] = i
+		seen[r.MountedPath] = struct{}{}
+	}
+	if !hasConflict {
+		return nil
+	}
+
+	// Conflict detected: switch all auto-populated repos to relative paths
+	// from their common parent directory.
+	var autoDirs []string
+	for i, r := range repos {
+		if auto[i] {
+			autoDirs = append(autoDirs, r.GitRoot)
+		}
+	}
+	base := commonParent(autoDirs)
+	for i := range repos {
+		if !auto[i] {
+			continue
+		}
+		rel, err := filepath.Rel(base, repos[i].GitRoot)
+		if err != nil {
+			return fmt.Errorf("repos[%d]: cannot compute relative path from %q: %w", i, base, err)
+		}
+		repos[i].MountedPath = "/home/user/src/" + rel
+	}
+
+	// Final validation: check for remaining duplicate mount paths.
+	final := make(map[string]int, len(repos))
+	for i, r := range repos {
+		if j, dup := final[r.MountedPath]; dup {
+			return fmt.Errorf("repos[%d] and repos[%d] both mount as %q; set MountedPath to disambiguate", j, i, r.MountedPath)
+		}
+		final[r.MountedPath] = i
 	}
 	return nil
+}
+
+// commonParent returns the longest common path prefix across all dirs.
+// Returns "/" if there is no common prefix beyond the root.
+func commonParent(dirs []string) string {
+	if len(dirs) == 0 {
+		return "/"
+	}
+	common := dirs[0]
+	for _, d := range dirs[1:] {
+		common = commonPrefix(common, d)
+		if common == "/" {
+			break
+		}
+	}
+	return common
+}
+
+// commonPrefix returns the longest common directory prefix of two paths.
+func commonPrefix(a, b string) string {
+	minLen := min(len(a), len(b))
+	i := 0
+	for i < minLen && a[i] == b[i] {
+		i++
+	}
+	// Back up to the last complete path separator.
+	for i > 0 && a[i-1] != '/' {
+		i--
+	}
+	if i == 0 {
+		return "/"
+	}
+	return a[:i]
 }
 
 // resolveDefaults populates DefaultRemote and DefaultBranch if not already set.
@@ -250,10 +325,9 @@ func (c *Container) Launch(ctx context.Context, stdout, stderr io.Writer, opts *
 	if err := c.prepare(opts.AgentPaths); err != nil {
 		return err
 	}
-	// Validate unique mount paths within this container. Two repos with
-	// the same MountedPath would share a directory and overwrite each
-	// other's data. Set MountedPath explicitly to disambiguate.
-	if err := validateRepoNames(c.Repos); err != nil {
+	// Resolve mount paths, disambiguating repos with the same basename
+	// using relative paths. After this, all MountedPaths are unique.
+	if err := resolveMountPaths(c.Repos); err != nil {
 		return err
 	}
 
