@@ -1,3 +1,4 @@
+# Development environment and tool integration guide for the md container.
 ---
 name: md-container-environment
 description: Development environment and tool integration guide for the md container. Reference for Chrome DevTools MCP, Node.js, virtualization, and other system tools. See ~/AGENTS.md for complete tool list.

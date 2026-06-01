@@ -2,6 +2,7 @@
 // source code is governed by the Apache v2 license that can be found in the
 // LICENSE file.
 
+// KVM availability detection for Linux.
 package md
 
 import "syscall"

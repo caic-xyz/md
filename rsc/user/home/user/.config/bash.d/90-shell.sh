@@ -1,5 +1,5 @@
+# Common shell defaults (PATH, editor, aliases).
 # shellcheck disable=SC2148
-# Common shell defaults.
 
 export SHELL="${SHELL:-/bin/bash}"
 export PNPM_HOME="$HOME/.local/share/pnpm"

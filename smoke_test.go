@@ -4,6 +4,7 @@
 
 //go:build smoke
 
+// End-to-end container lifecycle smoke tests.
 package md
 
 import (

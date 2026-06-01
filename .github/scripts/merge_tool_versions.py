@@ -3,6 +3,7 @@
 # source code is governed by the Apache v2 license that can be found in the
 # LICENSE file.
 
+# Merges tool version reports from amd64 and arm64 architectures.
 import argparse
 import datetime
 import re

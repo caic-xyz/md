@@ -1,5 +1,5 @@
+# Android SDK paths.
 # shellcheck disable=SC2148
-ANDROID_SDK_ROOT="$HOME/.local/share/android-sdk"
 if [ -d "$ANDROID_SDK_ROOT/cmdline-tools" ]; then
 	export ANDROID_SDK_ROOT
 	export ANDROID_HOME="$ANDROID_SDK_ROOT"

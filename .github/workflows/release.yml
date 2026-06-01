@@ -2,6 +2,7 @@
 # source code is governed by the Apache v2 license that can be found in the
 # LICENSE file.
 
+# Release workflow for goreleaser and GitHub releases.
 name: Release
 
 on:
