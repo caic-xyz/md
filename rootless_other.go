@@ -5,6 +5,7 @@
 //go:build !linux
 
 // Rootless podman stub for non-Linux platforms.
+
 package md
 
 // isRootlessPodman reports whether we are running under rootless podman.

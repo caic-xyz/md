@@ -3,6 +3,7 @@
 // LICENSE file.
 
 // Tests for commit message generation.
+
 package gitutil
 
 import (

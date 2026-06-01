@@ -3,6 +3,7 @@
 // LICENSE file.
 
 // Rootless podman detection for Linux.
+
 package md
 
 import "os"

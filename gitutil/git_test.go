@@ -3,6 +3,7 @@
 // LICENSE file.
 
 // Tests for git repository utilities.
+
 package gitutil
 
 import (

@@ -2,8 +2,7 @@
 // source code is governed by the Apache v2 license that can be found in the
 // LICENSE file.
 
-// md (my devenv) manages isolated Docker development containers for AI coding
-// agents.
+// Package main implements the md CLI for isolated Docker development containers.
 package main
 
 import (

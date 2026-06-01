@@ -3,6 +3,7 @@
 // LICENSE file.
 
 // KVM availability detection for Linux.
+
 package md
 
 import "syscall"

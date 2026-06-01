@@ -5,6 +5,7 @@
 //go:build !linux
 
 // KVM stub for non-Linux platforms.
+
 package md
 
 // kvmAvailable reports whether /dev/kvm is present and writable.

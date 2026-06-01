@@ -3,6 +3,7 @@
 // LICENSE file.
 
 // Commit message generation and formatting.
+
 package gitutil
 
 import (
