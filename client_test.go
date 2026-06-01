@@ -181,6 +181,60 @@ func TestDetectRuntime(t *testing.T) {
 	})
 }
 
+func TestBaseImageIsLocal(t *testing.T) {
+	t.Parallel()
+	t.Run("valid", func(t *testing.T) {
+		t.Parallel()
+		for _, image := range []string{
+			"md-user-local",
+			"md-user-local:latest",
+			"md-user-local@sha256:0123456789abcdef",
+			"ubuntu:latest",
+			"myteam/image:latest",
+		} {
+			c := &Client{Runtime: "true"}
+			if !c.baseImageIsLocal(t.Context(), image) {
+				t.Errorf("baseImageIsLocal(%q) = false, want true", image)
+			}
+		}
+	})
+	t.Run("error", func(t *testing.T) {
+		t.Parallel()
+		c := &Client{Runtime: "false"}
+		for _, image := range []string{"ubuntu:latest", "md-user-local:latest", "myteam/image:latest"} {
+			if c.baseImageIsLocal(t.Context(), image) {
+				t.Errorf("baseImageIsLocal(%q) = true, want false", image)
+			}
+		}
+		c = &Client{Runtime: "true"}
+		for _, image := range []string{"docker.io/library/ubuntu:latest", "ghcr.io/caic-xyz/md-user:latest", "localhost:5000/md-user:latest"} {
+			if c.baseImageIsLocal(t.Context(), image) {
+				t.Errorf("baseImageIsLocal(%q) = true, want false", image)
+			}
+		}
+	})
+}
+
+func TestHasExplicitRegistry(t *testing.T) {
+	t.Parallel()
+	t.Run("valid", func(t *testing.T) {
+		t.Parallel()
+		for _, image := range []string{"docker.io/library/ubuntu:latest", "ghcr.io/caic-xyz/md-user:latest", "localhost/md-user:latest", "localhost:5000/md-user:latest"} {
+			if !hasExplicitRegistry(image) {
+				t.Errorf("hasExplicitRegistry(%q) = false, want true", image)
+			}
+		}
+	})
+	t.Run("error", func(t *testing.T) {
+		t.Parallel()
+		for _, image := range []string{"ubuntu:latest", "md-user-local:latest", "myteam/image:latest", "ubuntu@sha256:0123456789abcdef"} {
+			if hasExplicitRegistry(image) {
+				t.Errorf("hasExplicitRegistry(%q) = true, want false", image)
+			}
+		}
+	})
+}
+
 func TestIsRootlessPodman(t *testing.T) {
 	t.Parallel()
 	t.Run("docker", func(t *testing.T) {

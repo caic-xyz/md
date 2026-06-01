@@ -922,7 +922,7 @@ func (c *Client) imageBuildNeededSlow(ctx context.Context, imageName, baseImage,
 	// RepoDigests[0] (manifest list digest) against the per-platform entry.
 	// Errors are intentionally ignored: a registry failure is not a reason to rebuild;
 	// the base digest label comparison above already catches locally-pulled updates.
-	isLocal := !strings.Contains(baseImage, "/")
+	isLocal := c.baseImageIsLocal(ctx, baseImage)
 	if !isLocal {
 		slog.DebugContext(ctx, "md", "msg", "checking remote manifest digest", "base", baseImage)
 		storedManifest, err := c.dockerInspectFormat(ctx, imageName, `{{index .Config.Labels "md.base_manifest_digest"}}`)
@@ -951,6 +951,22 @@ func (c *Client) imageBuildNeededSlow(ctx context.Context, imageName, baseImage,
 
 	slog.DebugContext(ctx, "md", "msg", "image is up to date", "image", imageName)
 	return false
+}
+
+func (c *Client) baseImageIsLocal(ctx context.Context, image string) bool {
+	if hasExplicitRegistry(image) {
+		return false
+	}
+	_, err := c.runCmd(ctx, "", []string{c.Runtime, "image", "inspect", "--format", "{{.Id}}", image})
+	return err == nil
+}
+
+func hasExplicitRegistry(image string) bool {
+	first, _, ok := strings.Cut(image, "/")
+	if !ok {
+		return false
+	}
+	return first == "localhost" || strings.ContainsAny(first, ".:")
 }
 
 // resolveCaches determines which caches have existing host directories and
@@ -1116,9 +1132,10 @@ func readOnlyCachePaths(active []activeCM) []string {
 func (c *Client) buildSpecializedImage(ctx context.Context, stdout, stderr io.Writer, imageName, baseImage string, caches []CacheMount, mountPaths []string, quiet bool) error {
 	slog.DebugContext(ctx, "md", "msg", "building specialized image", "image", imageName, "base", baseImage)
 	arch := runtime.GOARCH
-	// Local-only images (no "/" in name) are never pulled from a registry.
-	// A tag (":latest") does not imply a registry; only a "/" does.
-	isLocal := !strings.Contains(baseImage, "/")
+	// References without an explicit registry are ambiguous: they may name a
+	// local image tag or a Docker Hub repository. Prefer an existing local
+	// image; otherwise pull from the default registry.
+	isLocal := c.baseImageIsLocal(ctx, baseImage)
 	if isLocal {
 		if _, err := c.runCmd(ctx, "", []string{c.Runtime, "image", "inspect", "--format", "{{.Id}}", baseImage}); err != nil {
 			return fmt.Errorf("local image %s not found; build it first with 'md build-image'", baseImage)
