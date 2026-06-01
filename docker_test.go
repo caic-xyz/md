@@ -235,6 +235,53 @@ func TestCacheSpecKey(t *testing.T) {
 	})
 }
 
+func TestActiveCacheKey(t *testing.T) {
+	t.Parallel()
+	t.Run("valid", func(t *testing.T) {
+		t.Parallel()
+		home := t.TempDir()
+		cacheDir := filepath.Join(home, ".android")
+		if err := os.MkdirAll(cacheDir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(cacheDir, "adbkey"), []byte("key"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		caches := []CacheMount{{
+			Name:          "android-keys",
+			HostPath:      "~/.android",
+			ContainerPath: "/home/user/.android",
+			Shallow:       true,
+		}}
+
+		got := activeCacheKey(caches, home)
+		resolved := caches[0]
+		resolved.HostPath = filepath.ToSlash(cacheDir)
+		if want := cacheSpecKey([]CacheMount{resolved}); got != want {
+			t.Fatalf("activeCacheKey = %q; want %q", got, want)
+		}
+	})
+
+	t.Run("error", func(t *testing.T) {
+		t.Parallel()
+		home := t.TempDir()
+		cacheDir := filepath.Join(home, ".android")
+		if err := os.MkdirAll(filepath.Join(cacheDir, "avd"), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		caches := []CacheMount{{
+			Name:          "android-keys",
+			HostPath:      "~/.android",
+			ContainerPath: "/home/user/.android",
+			Shallow:       true,
+		}}
+
+		if got := activeCacheKey(caches, home); got != "" {
+			t.Fatalf("activeCacheKey = %q; want empty for shallow cache with no top-level files", got)
+		}
+	})
+}
+
 func TestResolveCaches(t *testing.T) {
 	t.Parallel()
 	t.Run("existing_cache_resolved", func(t *testing.T) {

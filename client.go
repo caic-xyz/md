@@ -806,15 +806,8 @@ func (c *Client) cachedRemoteManifestDigest(ctx context.Context, image, arch str
 // activeCacheKey filters caches to those whose host directories exist and
 // returns the cache spec key for the active set.
 func activeCacheKey(caches []CacheMount, home string) string {
-	var active []CacheMount
-	for _, cm := range caches {
-		hostPath := resolveHostPath(cm.HostPath, home)
-		if _, err := os.Stat(hostPath); err == nil {
-			cm.HostPath = hostPath
-			active = append(active, cm)
-		}
-	}
-	return cacheSpecKey(active)
+	_, _, activeKey := resolveCaches(caches, home, nil)
+	return activeKey
 }
 
 // userImageName returns the Docker image name for a given base image and
@@ -852,24 +845,15 @@ func cacheSpecKey(caches []CacheMount) string {
 // rebuilt. It checks the base image digest, SSH keys hash, and cache spec
 // key against labels on the existing image. For remote base images it also
 // verifies the local copy matches the registry.
-// home is used to resolve "~/" in cache HostPaths so only caches whose host
-// directory currently exists are compared (matching what resolveCaches
-// would actually inject).
+// home is used to resolve "~/" in cache HostPaths so only caches that
+// resolveCaches would inject are compared.
 func (c *Client) imageBuildNeeded(ctx context.Context, imageName, baseImage string, caches []CacheMount) bool {
 	// Compute cheap inputs first so we can check the cache.
 	contextSHA, err := keysSHA(c.keysDir)
 	if err != nil {
 		return true
 	}
-	var activeCaches []CacheMount
-	for _, cm := range caches {
-		hostPath := resolveHostPath(cm.HostPath, c.Home)
-		if _, err := os.Stat(hostPath); err == nil {
-			cm.HostPath = hostPath
-			activeCaches = append(activeCaches, cm)
-		}
-	}
-	activeKey := cacheSpecKey(activeCaches)
+	activeKey := activeCacheKey(caches, c.Home)
 
 	// Check cached result from a previous call with the same inputs.
 	c.mu.Lock()
