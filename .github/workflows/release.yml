@@ -96,6 +96,7 @@ jobs:
       - name: Fetch tag
         run: git fetch --tags --force
       - name: Create GitHub Release with Binaries
+        id: goreleaser
         uses: goreleaser/goreleaser-action@v7
         with:
           version: latest
@@ -103,3 +104,15 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GORELEASER_CURRENT_TAG: ${{ needs.setup.outputs.version }}
+      - name: Cleanup tag after release failure
+        if: failure() && steps.goreleaser.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.setup.outputs.version }}
+        run: |
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            echo "Release $VERSION exists; keeping tag."
+            exit 0
+          fi
+          git push --delete origin "$VERSION" || true

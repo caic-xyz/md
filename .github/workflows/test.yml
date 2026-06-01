@@ -96,10 +96,41 @@ jobs:
 
       - run: go install mvdan.cc/sh/v3/cmd/shfmt@latest
         if: runner.os == 'Linux'
-      - run: find rsc -name '*.sh' -print0 | xargs -0 shellcheck -x
+      - name: "Check: shellcheck"
         if: runner.os == 'Linux'
-      - run: find rsc -name '*.sh' -print0 | xargs -0 "$HOME/go/bin/shfmt" -d
+        run: |
+          mapfile -d '' shell_files < <(
+            find rsc -type f \( -name '*.sh' -o -perm /111 \) -print0 |
+              while IFS= read -r -d '' file; do
+                first_line=$(head -n 1 "$file")
+                case "$file:$first_line" in
+                  *.sh:* | *:'#!'*'/sh'* | *:'#!'*'/bash'* | *:'#!'*'env sh'* | *:'#!'*'env bash'*)
+                    printf '%s\0' "$file"
+                    ;;
+                esac
+              done
+          )
+          shellcheck -x "${shell_files[@]}"
+      - name: "Check: shfmt"
         if: runner.os == 'Linux'
+        run: |
+          mapfile -d '' shell_files < <(
+            find rsc -type f \( -name '*.sh' -o -perm /111 \) -print0 |
+              while IFS= read -r -d '' file; do
+                first_line=$(head -n 1 "$file")
+                case "$file:$first_line" in
+                  *.sh:* | *:'#!'*'/sh'* | *:'#!'*'/bash'* | *:'#!'*'env sh'* | *:'#!'*'env bash'*)
+                    printf '%s\0' "$file"
+                    ;;
+                esac
+              done
+          )
+          unformatted=$("$HOME/go/bin/shfmt" -l "${shell_files[@]}")
+          if [ -n "$unformatted" ]; then
+            echo "These shell files need shfmt:"
+            echo "$unformatted"
+            exit 1
+          fi
       - uses: actions/setup-python@v6
         if: runner.os == 'Linux'
         with:
