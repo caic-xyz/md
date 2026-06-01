@@ -428,7 +428,7 @@ func (c *Container) Run(ctx context.Context, stdout, stderr io.Writer, baseImage
 		return 1, err
 	}
 
-	cmdStr := strings.Join(command, " ")
+	cmdStr := shellQuoteArgs(command)
 	var sshCmd string
 	if len(c.Repos) > 0 {
 		sshCmd = "cd " + shellQuote(c.Repos[0].MountedPath) + " && " + cmdStr
@@ -2097,6 +2097,14 @@ func shellQuote(s string) string {
 		}
 	}
 	return s
+}
+
+func shellQuoteArgs(args []string) string {
+	quoted := make([]string, len(args))
+	for i, arg := range args {
+		quoted[i] = shellQuote(arg)
+	}
+	return strings.Join(quoted, " ")
 }
 
 // psName handles Docker's string format and Podman's array format for the

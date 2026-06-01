@@ -44,6 +44,19 @@ func TestShellQuote(t *testing.T) {
 	}
 }
 
+func TestShellQuoteArgs(t *testing.T) {
+	t.Parallel()
+	t.Run("valid", func(t *testing.T) {
+		t.Parallel()
+		got := shellQuoteArgs([]string{"printf", "%s\n", "hello world", "$(not-run)", "it's"})
+		want := `printf '%s
+' 'hello world' '$(not-run)' 'it'\''s'`
+		if got != want {
+			t.Errorf("shellQuoteArgs() = %q, want %q", got, want)
+		}
+	})
+}
+
 func TestUnmarshalContainer(t *testing.T) {
 	t.Parallel()
 	t.Run("valid", func(t *testing.T) {
