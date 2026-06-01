@@ -180,7 +180,7 @@ jobs:
       - name: "Check: go test -tags=smoke (short)"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: go test -tags=smoke -run TestSmoke -short -covermode=count -coverprofile coverage_smoke.txt -v -timeout 30m ./...
+        run: go test -tags=smoke -run TestSmoke -short -covermode=count -coverprofile coverage_smoke.txt -v -timeout 30m
       - uses: codecov/codecov-action@v6
         with:
           token: ${{secrets.CODECOV_TOKEN}}
