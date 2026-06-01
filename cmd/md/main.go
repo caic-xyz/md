@@ -25,11 +25,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/caic-xyz/md"
-	"github.com/caic-xyz/md/gitutil"
 	"github.com/maruel/genai"
 	"github.com/maruel/genai/providers"
 	"golang.org/x/sync/errgroup"
+
+	"github.com/caic-xyz/md"
+	"github.com/caic-xyz/md/gitutil"
 )
 
 // runtimeOverride is set by --runtime and applied in newClient/cmdList.
@@ -1037,12 +1038,22 @@ func cmdVNC(ctx context.Context, args []string) error {
 		return err
 	}
 	initLogging(*verbose)
-	if err := checkArgs(fs, 0); err != nil {
+	if err := checkArgs(fs, 1); err != nil {
 		return err
 	}
-	ct, err := newContainer(ctx, cf, nil)
-	if err != nil {
-		return err
+	var ct *md.Container
+	if name := fs.Arg(0); name != "" {
+		c, err := newClient()
+		if err != nil {
+			return err
+		}
+		ct = &md.Container{Client: c, Name: name}
+	} else {
+		var err error
+		ct, _, err = findContainerAndRepo(ctx, cf)
+		if err != nil {
+			return err
+		}
 	}
 	vncPort, err := ct.GetHostPort(ctx, "5901/tcp")
 	if err != nil {
