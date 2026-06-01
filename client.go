@@ -834,6 +834,9 @@ func cacheSpecKey(caches []CacheMount) string {
 	specs := make([]string, len(caches))
 	for i, c := range caches {
 		s := c.Name + ":" + c.ContainerPath
+		if c.ReadOnly {
+			s += ":ro"
+		}
 		if c.Shallow {
 			s += ":shallow"
 		}
@@ -1029,15 +1032,19 @@ func generateDockerfile(baseImage string, active []activeCM, dirs []string, base
 	df.WriteString("COPY --chown=root:root ssh_host_ed25519_key.pub /etc/ssh/ssh_host_ed25519_key.pub\n")
 	df.WriteString("COPY --chown=user:user authorized_keys /home/user/.ssh/authorized_keys\n")
 	for _, a := range active {
+		owner := "user:user"
+		if a.cm.ReadOnly {
+			owner = "root:root"
+		}
 		if a.files != nil {
 			// Shallow: copy only top-level files, skip subdirectories.
 			// Flags must appear before the JSON array; the array contains only
 			// sources and destination.
 			for _, f := range a.files {
-				fmt.Fprintf(&df, "COPY --from=cache-%s --chown=user:user [%q, %q]\n", a.cm.Name, f, a.cm.ContainerPath+"/")
+				fmt.Fprintf(&df, "COPY --from=cache-%s --chown=%s [%q, %q]\n", a.cm.Name, owner, f, a.cm.ContainerPath+"/")
 			}
 		} else {
-			fmt.Fprintf(&df, "COPY --from=cache-%s --chown=user:user [\".\", %q]\n", a.cm.Name, a.cm.ContainerPath+"/")
+			fmt.Fprintf(&df, "COPY --from=cache-%s --chown=%s [\".\", %q]\n", a.cm.Name, owner, a.cm.ContainerPath+"/")
 		}
 	}
 	// Single RUN layer for file permissions and directory pre-creation.
@@ -1053,6 +1060,15 @@ func generateDockerfile(baseImage string, active []activeCM, dirs []string, base
 		joined := strings.Join(quoted, " ")
 		fmt.Fprintf(&run, " && mkdir -p %s && chown user:user %s", joined, joined)
 	}
+	readOnlyPaths := readOnlyCachePaths(active)
+	if len(readOnlyPaths) > 0 {
+		quoted := make([]string, len(readOnlyPaths))
+		for i, p := range readOnlyPaths {
+			quoted[i] = shellQuote(p)
+		}
+		joined := strings.Join(quoted, " ")
+		fmt.Fprintf(&run, " && chown -R root:root %s && chmod -R a-w %s", joined, joined)
+	}
 	fmt.Fprintf(&df, "RUN %s\n", run.String())
 	fmt.Fprintf(&df, "LABEL md.base_image=%q\n", baseImage)
 	fmt.Fprintf(&df, "LABEL md.base_digest=%q\n", baseDigest)
@@ -1061,6 +1077,21 @@ func generateDockerfile(baseImage string, active []activeCM, dirs []string, base
 	fmt.Fprintf(&df, "LABEL md.base_manifest_digest=%q\n", manifestDigest)
 	df.WriteString("CMD [\"/root/start.sh\"]\n")
 	return df.String()
+}
+
+func readOnlyCachePaths(active []activeCM) []string {
+	seen := make(map[string]struct{})
+	for _, a := range active {
+		if a.cm.ReadOnly {
+			seen[a.cm.ContainerPath] = struct{}{}
+		}
+	}
+	paths := make([]string, 0, len(seen))
+	for p := range seen {
+		paths = append(paths, p)
+	}
+	sort.Strings(paths)
+	return paths
 }
 
 // buildSpecializedImage builds the per-user Docker image by generating a
@@ -1385,9 +1416,9 @@ var HarnessMounts = map[Harness]AgentPaths{
 	HarnessQwen:     {Description: "Qwen Code", HomePaths: []string{".qwen"}},
 }
 
-// CacheMount defines a host directory to bind-mount as a build cache inside
-// the container. Well-known caches are defined in [WellKnownCaches]; custom
-// mounts can be constructed directly.
+// CacheMount defines a host directory to copy into the specialized container
+// image. Well-known caches are defined in [WellKnownCaches]; custom mounts can
+// be constructed directly.
 type CacheMount struct {
 	// Name is a human-readable identifier shown in progress output (e.g. "go-mod").
 	Name string
@@ -1399,7 +1430,7 @@ type CacheMount struct {
 	HostPath string
 	// ContainerPath is the absolute path inside the container.
 	ContainerPath string
-	// ReadOnly mounts the directory read-only inside the container.
+	// ReadOnly copies the cache into the image as root-owned, non-writable files.
 	ReadOnly bool
 	// Shallow copies only top-level files from HostPath, ignoring
 	// subdirectories. Useful for directories like ~/.android where only a few

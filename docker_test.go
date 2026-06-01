@@ -217,6 +217,14 @@ func TestCacheSpecKey(t *testing.T) {
 			t.Error("shallow and recursive caches with same name/path should produce different keys")
 		}
 	})
+	t.Run("readonly_differs_from_writable", func(t *testing.T) {
+		t.Parallel()
+		a := cacheSpecKey([]CacheMount{{Name: "go-mod", ContainerPath: "/home/user/go/pkg/mod"}})
+		b := cacheSpecKey([]CacheMount{{Name: "go-mod", ContainerPath: "/home/user/go/pkg/mod", ReadOnly: true}})
+		if a == b {
+			t.Error("read-only and writable caches with same name/path should produce different keys")
+		}
+	})
 }
 
 func TestResolveCaches(t *testing.T) {
@@ -407,6 +415,20 @@ func TestGenerateDockerfile(t *testing.T) {
 		}
 	})
 
+	t.Run("readonly_recursive_cache", func(t *testing.T) {
+		t.Parallel()
+		active := []activeCM{{
+			cm: CacheMount{Name: "go-mod", ContainerPath: "/home/user/go/pkg/mod", ReadOnly: true},
+		}}
+		got := generateDockerfile("base:v1", active, []string{"/home/user/go/pkg/mod"}, "", "", "cachekey", "")
+		if !strings.Contains(got, `COPY --from=cache-go-mod --chown=root:root [".", "/home/user/go/pkg/mod/"]`) {
+			t.Errorf("missing read-only recursive COPY in:\n%s", got)
+		}
+		if !strings.Contains(got, "chown -R root:root /home/user/go/pkg/mod && chmod -R a-w /home/user/go/pkg/mod") {
+			t.Errorf("missing read-only permission fix in:\n%s", got)
+		}
+	})
+
 	t.Run("shallow_cache", func(t *testing.T) {
 		t.Parallel()
 		active := []activeCM{{
@@ -419,6 +441,21 @@ func TestGenerateDockerfile(t *testing.T) {
 		}
 		if !strings.Contains(got, `COPY --from=cache-android-keys --chown=user:user ["adbkey", "/home/user/.android/"]`) {
 			t.Errorf("missing shallow COPY for adbkey in:\n%s", got)
+		}
+	})
+
+	t.Run("readonly_shallow_cache", func(t *testing.T) {
+		t.Parallel()
+		active := []activeCM{{
+			cm:    CacheMount{Name: "android-keys", ContainerPath: "/home/user/.android", ReadOnly: true},
+			files: []string{"debug.keystore"},
+		}}
+		got := generateDockerfile("base:v1", active, []string{"/home/user/.android"}, "", "", "", "")
+		if !strings.Contains(got, `COPY --from=cache-android-keys --chown=root:root ["debug.keystore", "/home/user/.android/"]`) {
+			t.Errorf("missing read-only shallow COPY in:\n%s", got)
+		}
+		if !strings.Contains(got, "chown -R root:root /home/user/.android && chmod -R a-w /home/user/.android") {
+			t.Errorf("missing read-only permission fix in:\n%s", got)
 		}
 	})
 
