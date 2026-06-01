@@ -165,12 +165,13 @@ jobs:
     steps:
       - name: Maximize Docker/Podman Space
         run: |
-          sudo systemctl stop docker
-          sudo mv /var/lib/docker /mnt/
+          sudo systemctl stop docker.service docker.socket containerd.service
+          sudo rm -rf /var/lib/docker
+          sudo mkdir -p /mnt/docker
           sudo ln -s /mnt/docker /var/lib/docker
-          sudo systemctl start docker
+          sudo systemctl start containerd.service docker.service
           sudo mkdir -p /mnt/user-containers
-          sudo chown $USER:$USER /mnt/user-containers
+          sudo chown "$USER:$USER" /mnt/user-containers
           mkdir -p ~/.local/share
           ln -s /mnt/user-containers ~/.local/share/containers
       - uses: actions/checkout@v6

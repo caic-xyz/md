@@ -339,9 +339,17 @@ func TestSmoke(t *testing.T) {
 				})
 			})
 
-			// Cache subtest: creates a different specialized image
-			// (with cache mounts), so it runs in parallel with the
-			// serialized group.
+			if isRootlessPodman(rt) {
+				t.Log("pruning unused specialized images before cache test ...")
+				if _, err := client.PruneImages(t.Context(), io.Discard, io.Discard); err != nil {
+					t.Fatalf("PruneImages: %v", err)
+				}
+			}
+
+			// Cache subtest: creates a different specialized image (with cache
+			// mounts). Rootless podman may need an ID-mapped copy of the large
+			// base layers for each specialized image, so prune the now-unused
+			// no-cache image above before creating the cache image.
 			t.Run("cache", func(t *testing.T) {
 				t.Parallel()
 				src := t.TempDir()
