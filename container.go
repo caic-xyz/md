@@ -40,6 +40,8 @@ import (
 // DefaultBaseImage is the base image used when none is specified.
 const DefaultBaseImage = "ghcr.io/caic-xyz/md-user"
 
+const tailscaleDeviceIDPath = "/var/lib/md/tailscale_device_id"
+
 // Repo describes a git repository to push into a container.
 type Repo struct {
 	// GitRoot is the absolute path to the git repository root on the host.
@@ -110,6 +112,11 @@ type StartOpts struct {
 	// ExtraRunArgs are additional arguments passed verbatim to the
 	// container runtime's "run" command. Not portable across runtimes.
 	ExtraRunArgs []string
+
+	// resetTailscale removes any Tailscale state inherited from a source image
+	// before tailscaled starts. It is used for forked containers created from a
+	// committed filesystem snapshot.
+	resetTailscale bool
 }
 
 // StartResult contains Tailscale information from Connect. Port information
@@ -351,19 +358,6 @@ func (c *Container) Launch(ctx context.Context, stdout, stderr io.Writer, opts *
 		}
 	}
 
-	// Generate Tailscale auth key if needed.
-	if opts.Tailscale && opts.TailscaleAuthKey == "" {
-		key, err := generateTailscaleAuthKey(ctx, c.TailscaleAPIKey)
-		if err != nil {
-			if !opts.Quiet {
-				_, _ = fmt.Fprintf(stdout, "- Could not generate Tailscale auth key (%v), will use browser auth\n", err)
-			}
-		} else {
-			opts.TailscaleAuthKey = key
-			c.tailscaleEphemeral = true
-		}
-	}
-
 	baseImage := opts.BaseImage
 	if baseImage == "" {
 		baseImage = DefaultBaseImage + ":latest"
@@ -372,6 +366,7 @@ func (c *Container) Launch(ctx context.Context, stdout, stderr io.Writer, opts *
 	if err != nil {
 		return err
 	}
+	c.prepareTailscaleAuthKey(ctx, stdout, opts)
 	c.Display = opts.Display
 	c.USB = opts.USB
 	c.Sudo = opts.Sudo
@@ -565,6 +560,7 @@ func (c *Container) Purge(ctx context.Context, stdout, stderr io.Writer) error {
 		return fmt.Errorf("%s not found", c.Name)
 	}
 
+	var retErr error
 	// Clean up non-ephemeral Tailscale node.
 	if containerExists {
 		if !c.Tailscale {
@@ -574,24 +570,28 @@ func (c *Container) Purge(ctx context.Context, stdout, stderr io.Writer) error {
 		if c.Tailscale {
 			ephLabel, _ := c.runCmd(ctx, "", []string{c.Runtime, "inspect", "--format", `{{index .Config.Labels "md.tailscale_ephemeral"}}`, c.Name})
 			if ephLabel != "1" {
-				statusJSON, err := c.runCmd(ctx, "", []string{c.Runtime, "exec", c.Name, "tailscale", "status", "--json"})
-				if err == nil {
-					var status tailscaleStatus
-					if json.Unmarshal([]byte(statusJSON), &status) == nil && status.Self.ID != "" {
-						_, _ = fmt.Fprintln(stdout, "- Removing Tailscale node from tailnet...")
-						if err := deleteTailscaleDevice(ctx, c.TailscaleAPIKey, status.Self.ID); err != nil {
-							slog.WarnContext(ctx, "md", "msg", "failed to remove Tailscale device", "err", err)
-						}
+				deviceID, err := c.tailscaleDeviceID(ctx)
+				switch {
+				case err != nil:
+					retErr = errors.Join(retErr, fmt.Errorf("reading Tailscale device ID: %w", err))
+				case deviceID == "":
+					retErr = errors.Join(retErr, errors.New("tailscale node not removed: device ID unavailable"))
+				default:
+					_, _ = fmt.Fprintln(stdout, "- Removing Tailscale node from tailnet...")
+					if err := deleteTailscaleDevice(ctx, c.TailscaleAPIKey, deviceID); err != nil {
+						retErr = errors.Join(retErr, fmt.Errorf("removing Tailscale node %s: %w", deviceID, err))
 					}
 				}
 			}
 		}
 	}
+	if retErr != nil {
+		return retErr
+	}
 
 	_ = os.Remove(sshConf)
 	_ = os.Remove(sshKnown)
 
-	var retErr error
 	for _, repo := range c.Repos {
 		if _, err := c.runCmd(ctx, repo.GitRoot, []string{"git", "remote", "get-url", c.Name}); err == nil {
 			if _, err := c.runCmd(ctx, repo.GitRoot, []string{"git", "remote", "remove", c.Name}); err != nil {
@@ -953,15 +953,24 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 		MaxCPUs:      opts.MaxCPUs,
 		ExtraRunArgs: opts.ExtraRunArgs,
 	}
+	startOpts.resetTailscale = startOpts.Tailscale
 	if err := c.prepare(startOpts.AgentPaths); err != nil {
 		return nil, err
 	}
+	fork.prepareTailscaleAuthKey(ctx, stdout, startOpts)
 	if err := fork.launchContainer(ctx, stdout, stderr, startOpts, snapshotImage); err != nil {
 		return nil, err
 	}
 	fork.Display = startOpts.Display
+	fork.Tailscale = startOpts.Tailscale
 	fork.USB = startOpts.USB
 	fork.Sudo = startOpts.Sudo
+
+	if startOpts.Tailscale && startOpts.TailscaleAuthKey == "" {
+		if _, err := fork.tryReadTailscaleAuthURL(ctx, stdout); err != nil {
+			return nil, fmt.Errorf("reading Tailscale auth URL: %w", err)
+		}
+	}
 
 	// Wait for SSH and set up repos.
 	addr := fmt.Sprintf("localhost:%d", fork.SSHPort)
@@ -1209,6 +1218,66 @@ func (c *Container) SyncDefaultBranch(ctx context.Context, repoIdx int) error {
 		return fmt.Errorf("sync default branch %q: %w", r.DefaultBranch, err)
 	}
 	return nil
+}
+
+func (c *Container) prepareTailscaleAuthKey(ctx context.Context, stdout io.Writer, opts *StartOpts) {
+	if !opts.Tailscale || opts.TailscaleAuthKey != "" {
+		return
+	}
+	key, err := generateTailscaleAuthKey(ctx, c.TailscaleAPIKey)
+	if err != nil {
+		if !opts.Quiet {
+			_, _ = fmt.Fprintf(stdout, "- Could not generate Tailscale auth key (%v), will use browser auth\n", err)
+		}
+		return
+	}
+	opts.TailscaleAuthKey = key
+	c.tailscaleEphemeral = true
+}
+
+func (c *Container) tailscaleDeviceID(ctx context.Context) (string, error) {
+	statusJSON, statusErr := c.runCmd(ctx, "", []string{c.Runtime, "exec", c.Name, "tailscale", "status", "--json"})
+	if statusErr == nil {
+		deviceID, err := tailscaleDeviceIDFromStatus(statusJSON)
+		if err == nil && deviceID != "" {
+			return deviceID, nil
+		}
+		if err != nil {
+			statusErr = err
+		}
+	}
+
+	deviceID, fileErr := c.readContainerFile(ctx, tailscaleDeviceIDPath)
+	if fileErr == nil {
+		return strings.TrimSpace(deviceID), nil
+	}
+	return "", errors.Join(statusErr, fileErr)
+}
+
+func tailscaleDeviceIDFromStatus(statusJSON string) (string, error) {
+	var status tailscaleStatus
+	if err := json.Unmarshal([]byte(statusJSON), &status); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(status.Self.ID), nil
+}
+
+func (c *Container) readContainerFile(ctx context.Context, containerPath string) (string, error) {
+	tmpDir, err := os.MkdirTemp("", "md-container-file-*")
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	dst := filepath.Join(tmpDir, "file")
+	if _, err := c.runCmd(ctx, "", []string{c.Runtime, "cp", c.Name + ":" + containerPath, dst}); err != nil {
+		return "", err
+	}
+	data, err := os.ReadFile(dst) // #nosec G304 -- dst is a private temp file populated by docker cp.
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
 }
 
 // prepare creates harness-specific config directories on the host so they can
@@ -1611,6 +1680,9 @@ func (c *Container) launchContainer(ctx context.Context, stdout, stderr io.Write
 		}
 		if c.tailscaleEphemeral {
 			dockerArgs = append(dockerArgs, "-e", "MD_TAILSCALE_EPHEMERAL=1")
+		}
+		if opts.resetTailscale {
+			dockerArgs = append(dockerArgs, "-e", "MD_TAILSCALE_RESET=1")
 		}
 	}
 

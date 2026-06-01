@@ -78,11 +78,11 @@ func generateTailscaleAuthKey(ctx context.Context, apiKey string) (string, error
 
 // deleteTailscaleDevice deletes a Tailscale device using the API.
 func deleteTailscaleDevice(ctx context.Context, apiKey, deviceID string) error {
-	if apiKey == "" {
-		return nil
-	}
 	if deviceID == "" {
 		return nil
+	}
+	if apiKey == "" {
+		return errors.New("no Tailscale API key provided")
 	}
 	u, err := url.JoinPath("https://api.tailscale.com/api/v2/device", deviceID)
 	if err != nil {

@@ -8,8 +8,16 @@ echo "Connected to $(hostname)" >/etc/motd
 
 # Pre-create the Tailscale well-known path and file so the host tooling
 # can inotify-wait for the first write.
-mkdir -p /run/md
+mkdir -p /run/md /var/lib/md
 : >/run/md/tailscale_auth_url.json
+
+write_tailscale_device_id() {
+	local ts_id
+	ts_id=$(tailscale status --json 2>/dev/null | jq -r '.Self.ID // empty' || true)
+	if [ -n "$ts_id" ]; then
+		echo "$ts_id" >/var/lib/md/tailscale_device_id
+	fi
+}
 
 # If /dev/kvm exists, update the kvm group GID to match the host.
 # In rootless Docker, device GIDs map to the overflow GID (65534) and groupmod
@@ -61,6 +69,11 @@ fi
 # Start Tailscale if enabled
 if [ -n "${MD_TAILSCALE:-}" ]; then
 	echo "[start.sh] Starting Tailscale..."
+	if [ -n "${MD_TAILSCALE_RESET:-}" ]; then
+		rm -rf /var/lib/tailscale /run/tailscale
+		rm -f /var/lib/md/tailscale_device_id
+		mkdir -p /var/lib/tailscale
+	fi
 	# /dev/net/tun is passed through from the host via --device (see docker.go).
 	# The tun kernel module must be loaded on the host for this to work.
 	tailscaled --state=/var/lib/tailscale/tailscaled.state &
@@ -75,6 +88,7 @@ if [ -n "${MD_TAILSCALE:-}" ]; then
 		tailscale up --hostname="$(hostname)" --ssh --authkey="$TAILSCALE_AUTHKEY"
 		# Allow non-root users to access tailscale CLI (must be after tailscale up)
 		tailscale set --operator=user
+		write_tailscale_device_id
 		# Update MOTD with Tailscale FQDN and VNC URL if display is enabled
 		ts_fqdn=$(tailscale status --json | jq -r '.Self.DNSName // empty' | sed 's/\.$//')
 		if [ -n "$ts_fqdn" ]; then
@@ -91,6 +105,7 @@ if [ -n "${MD_TAILSCALE:-}" ]; then
 		(
 			tailscale up --hostname="$(hostname)" --ssh --json >/run/md/tailscale_auth_url.json 2>&1
 			tailscale set --operator=user
+			write_tailscale_device_id
 		) &
 	fi
 fi
