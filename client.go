@@ -808,7 +808,9 @@ func (c *Client) cachedRemoteManifestDigest(ctx context.Context, image, arch str
 func activeCacheKey(caches []CacheMount, home string) string {
 	var active []CacheMount
 	for _, cm := range caches {
-		if _, err := os.Stat(resolveHostPath(cm.HostPath, home)); err == nil {
+		hostPath := resolveHostPath(cm.HostPath, home)
+		if _, err := os.Stat(hostPath); err == nil {
+			cm.HostPath = hostPath
 			active = append(active, cm)
 		}
 	}
@@ -824,23 +826,22 @@ func userImageName(baseImage, cacheKey string) string {
 	return "md-specialized-" + hex.EncodeToString(h[:16])
 }
 
-// cacheSpecKey returns a short hash over the requested cache names and
-// container paths. Returns empty string when caches is nil or empty.
-// Only the spec (name + path) is hashed, not the cache contents.
+// cacheSpecKey returns a short hash over the requested cache specs. Returns
+// empty string when caches is nil or empty. Only the spec is hashed, not the
+// cache contents.
 func cacheSpecKey(caches []CacheMount) string {
 	if len(caches) == 0 {
 		return ""
 	}
 	specs := make([]string, len(caches))
 	for i, c := range caches {
-		s := c.Name + ":" + c.ContainerPath
-		if c.ReadOnly {
-			s += ":ro"
-		}
-		if c.Shallow {
-			s += ":shallow"
-		}
-		specs[i] = s
+		specs[i] = strings.Join([]string{
+			c.Name,
+			filepath.ToSlash(c.HostPath),
+			c.ContainerPath,
+			strconv.FormatBool(c.ReadOnly),
+			strconv.FormatBool(c.Shallow),
+		}, "\x00")
 	}
 	sort.Strings(specs)
 	h := sha256.Sum256([]byte(strings.Join(specs, ",")))
@@ -862,7 +863,9 @@ func (c *Client) imageBuildNeeded(ctx context.Context, imageName, baseImage stri
 	}
 	var activeCaches []CacheMount
 	for _, cm := range caches {
-		if _, err := os.Stat(resolveHostPath(cm.HostPath, c.Home)); err == nil {
+		hostPath := resolveHostPath(cm.HostPath, c.Home)
+		if _, err := os.Stat(hostPath); err == nil {
+			cm.HostPath = hostPath
 			activeCaches = append(activeCaches, cm)
 		}
 	}
@@ -999,6 +1002,7 @@ func resolveCaches(caches []CacheMount, home string, mountPaths []string) (activ
 	activeMounts := make([]CacheMount, len(active))
 	for i, a := range active {
 		activeMounts[i] = a.cm
+		activeMounts[i].HostPath = a.hostPath
 	}
 	activeKey = cacheSpecKey(activeMounts)
 

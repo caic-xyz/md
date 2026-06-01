@@ -209,6 +209,14 @@ func TestCacheSpecKey(t *testing.T) {
 			t.Error("different caches should produce different keys")
 		}
 	})
+	t.Run("host_path_differs", func(t *testing.T) {
+		t.Parallel()
+		a := cacheSpecKey([]CacheMount{{Name: "cache", HostPath: "/tmp/a", ContainerPath: "/home/user/.cache/tool"}})
+		b := cacheSpecKey([]CacheMount{{Name: "cache", HostPath: "/tmp/b", ContainerPath: "/home/user/.cache/tool"}})
+		if a == b {
+			t.Error("different host paths with same name/container path should produce different keys")
+		}
+	})
 	t.Run("shallow_differs_from_recursive", func(t *testing.T) {
 		t.Parallel()
 		a := cacheSpecKey([]CacheMount{{Name: "android-keys", ContainerPath: "/home/user/.android"}})
@@ -375,6 +383,30 @@ func TestResolveCaches(t *testing.T) {
 		requestedKey := cacheSpecKey(requested)
 		if activeKey == requestedKey {
 			t.Errorf("activeKey %q should differ from requestedKey %q when host dir is missing", activeKey, requestedKey)
+		}
+	})
+
+	t.Run("activeKey_uses_resolved_host_path", func(t *testing.T) {
+		t.Parallel()
+		home := t.TempDir()
+		hostPath := filepath.Join(home, ".cache", "tool")
+		if err := os.MkdirAll(hostPath, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		caches := []CacheMount{{
+			Name:          "tool",
+			HostPath:      "~/.cache/tool",
+			ContainerPath: "/home/user/.cache/tool",
+		}}
+
+		_, _, activeKey := resolveCaches(caches, home, nil)
+		resolved := caches[0]
+		resolved.HostPath = filepath.ToSlash(hostPath)
+		if want := cacheSpecKey([]CacheMount{resolved}); activeKey != want {
+			t.Errorf("activeKey = %q, want %q", activeKey, want)
+		}
+		if unresolved := cacheSpecKey(caches); activeKey == unresolved {
+			t.Errorf("activeKey %q should use resolved host path, not unresolved key %q", activeKey, unresolved)
 		}
 	})
 }

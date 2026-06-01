@@ -47,7 +47,7 @@ The test requires a container runtime (docker or podman) in PATH. Nested podman 
 1. `md.base_digest` label missing/empty, or differs from the current base image digest.
 2. For remote base images: registry has a newer version than the local copy.
 3. `md.context_sha` label differs from the SHA of the SSH keys.
-4. `md.cache_key` label differs from `cacheSpecKey` of the **active** caches (those whose host directories currently exist).
+4. `md.cache_key` label differs from `cacheSpecKey` of the **active** caches (those whose host directories currently exist). The key includes the cache name, resolved host path, container path, read-only flag, and shallow flag.
 
 ### Cache injection
 
@@ -73,7 +73,7 @@ The test requires a container runtime (docker or podman) in PATH. Nested podman 
 | `md.base_image` | Base image reference used at build time |
 | `md.base_digest` | Digest (or image ID for local images) of the base |
 | `md.context_sha` | SHA-256 of SSH keys |
-| `md.cache_key` | 8-byte hex hash of the **active** (injected) cache names+paths+shallow flag |
+| `md.cache_key` | 8-byte hex hash of the **active** (injected) cache names, resolved host paths, container paths, read-only flags, and shallow flags |
 | `md.base_manifest_digest` | Per-platform manifest digest from the registry (remote bases only) |
 
 ## Adding a New Tool Checklist

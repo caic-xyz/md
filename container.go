@@ -30,10 +30,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/caic-xyz/md/gitutil"
 	"github.com/maruel/genai"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/term"
+
+	"github.com/caic-xyz/md/gitutil"
 )
 
 // DefaultBaseImage is the base image used when none is specified.
@@ -1692,7 +1693,7 @@ func (c *Container) launchContainer(ctx context.Context, stdout, stderr io.Write
 
 	if opts.Quiet {
 		if _, err := c.runCmd(ctx, "", dockerArgs); err != nil {
-			return fmt.Errorf("starting container: %w", err)
+			return cmdErrWithStderr("starting container", err)
 		}
 	} else {
 		_, _ = fmt.Fprintf(stdout, "- Starting container %s ... ", c.Name)
