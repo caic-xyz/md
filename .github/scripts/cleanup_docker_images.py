@@ -17,12 +17,20 @@ import json
 import os
 import re
 import sys
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 # Tags matching these patterns are always kept.
 _KEEP_RE = re.compile(r"^(latest(-.+)?|v\d+.*|edge(-.+)?)$")
+
+
+@dataclass(frozen=True)
+class OwnerInfo:
+    """GitHub account metadata needed to choose package API endpoints."""
+
+    kind: str
 
 
 def _request(
@@ -55,6 +63,25 @@ def github_api(
     )
 
 
+def _fetch_owner_info(owner: str, token: str) -> OwnerInfo:
+    """Return GitHub owner metadata."""
+    status, body = github_api(f"https://api.github.com/users/{owner}", token)
+    if status != 200:
+        raise RuntimeError(f"fetching owner {owner}: HTTP {status}")
+    data = json.loads(body)
+    kind = data.get("type", "")
+    if kind not in ("Organization", "User"):
+        raise RuntimeError(f"unsupported GitHub owner type for {owner}: {kind!r}")
+    return OwnerInfo(kind=kind)
+
+
+def _package_api_base(owner: str, repo: str, token: str) -> str:
+    """Return the GitHub API base URL for a user or organization package."""
+    owner_info = _fetch_owner_info(owner, token)
+    scope = "orgs" if owner_info.kind == "Organization" else "users"
+    return f"https://api.github.com/{scope}/{owner}/packages/container/{repo}"
+
+
 def _get_ghcr_token(owner: str, repo: str, github_token: str) -> str:
     """Exchange GitHub token for a GHCR registry token."""
     url = f"https://ghcr.io/token?scope=repository:{owner}/{repo}:pull&service=ghcr.io"
@@ -84,15 +111,12 @@ def _fetch_manifest_refs(
     return {m["digest"] for m in data.get("manifests", [])}
 
 
-def _fetch_all_versions(owner: str, repo: str, token: str) -> list[dict]:
+def _fetch_all_versions(package_api_base: str, token: str) -> list[dict]:
     all_versions: list[dict] = []
     page = 1
     while True:
         print(f"Fetching versions page {page}...")
-        url = (
-            f"https://api.github.com/users/{owner}/packages/container"
-            f"/{repo}/versions?per_page=100&page={page}"
-        )
+        url = f"{package_api_base}/versions?per_page=100&page={page}"
         status, body = github_api(url, token)
         if status != 200:
             print(f"Error fetching versions: HTTP {status}", file=sys.stderr)
@@ -122,7 +146,8 @@ def main():
     cutoff = datetime.now(timezone.utc) - timedelta(days=7)
     print(f"Cutoff date: {cutoff}")
 
-    versions = _fetch_all_versions(owner, repo, token)
+    package_api_base = _package_api_base(owner, repo, token)
+    versions = _fetch_all_versions(package_api_base, token)
     print(f"Found {len(versions)} total versions")
 
     # Phase 1: Identify versions to keep by their tags.
@@ -174,10 +199,7 @@ def main():
             continue
         created_fmt = str(created)
         print(f"Deleting: {label} (created: {created_fmt})")
-        del_url = (
-            f"https://api.github.com/users/{owner}/packages/container"
-            f"/{repo}/versions/{v['id']}"
-        )
+        del_url = f"{package_api_base}/versions/{v['id']}"
         del_status, _ = github_api(del_url, token, method="DELETE")
         if del_status == 204:
             deleted_count += 1
