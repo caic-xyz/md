@@ -757,19 +757,15 @@ func (c *Container) Diff(ctx context.Context, stdout, stderr io.Writer, repoIdx 
 	if err := c.SyncDefaultBranch(ctx, repoIdx); err != nil {
 		return err
 	}
-	quotedArgs := make([]string, len(extraArgs))
-	for i, a := range extraArgs {
-		quotedArgs[i] = shellQuote(a)
-	}
 	repo := c.Repos[repoIdx]
-	mp := shellQuote(repo.MountedPath)
 	opts := []string{"-q"}
 	isTTY := false
 	if f, ok := stdout.(*os.File); ok && term.IsTerminal(int(f.Fd())) {
 		opts = append(opts, "-t")
 		isTTY = true
 	}
-	sshArgs := c.SSHCommand(opts, "cd "+mp+" && git add . && git diff base "+strings.Join(quotedArgs, " ")+" -- .")
+	exitOnDiff := slices.Contains(extraArgs, "--exit-code") || slices.Contains(extraArgs, "--quiet")
+	sshArgs := c.SSHCommand(opts, gitDiffCommand(repo.MountedPath, extraArgs, exitOnDiff))
 	cmd := exec.CommandContext(ctx, sshArgs[0]) //nolint:gosec // args are from trusted SSH config
 	cmd.Env = append(os.Environ(), c.env...)
 	if isTTY {
@@ -784,6 +780,35 @@ func (c *Container) Diff(ctx context.Context, stdout, stderr io.Writer, repoIdx 
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	return cmd.Run()
+}
+
+func gitDiffCommand(repo string, extraArgs []string, exitOnDiff bool) string {
+	diffArgs := ""
+	if len(extraArgs) != 0 {
+		quotedArgs := make([]string, len(extraArgs))
+		for i, a := range extraArgs {
+			quotedArgs[i] = shellQuote(a)
+		}
+		diffArgs = " " + strings.Join(quotedArgs, " ")
+	}
+	exitOnDiffFlag := "0"
+	if exitOnDiff {
+		exitOnDiffFlag = "1"
+	}
+	commands := []string{
+		"cd " + shellQuote(repo),
+		"export GIT_OPTIONAL_LOCKS=0",
+		"diff_status=0",
+		"git diff base" + diffArgs + " -- . || diff_status=$?",
+		`if [ "$diff_status" -gt 1 ]; then exit "$diff_status"; fi`,
+		"untracked_status=0",
+		`untracked_paths=$(mktemp) || exit $?`,
+		`trap 'rm -f "$untracked_paths"' EXIT`,
+		`git ls-files -z --others --exclude-standard -- . > "$untracked_paths" || exit $?`,
+		"while IFS= read -r -d '' path; do git diff --no-index" + diffArgs + ` -- /dev/null "$path"; file_status=$?; if [ "$file_status" -eq 1 ]; then untracked_status=1; elif [ "$file_status" -ne 0 ]; then exit "$file_status"; fi; done < "$untracked_paths"`,
+		"if [ " + exitOnDiffFlag + ` -eq 1 ]; then if [ "$diff_status" -ne 0 ]; then exit "$diff_status"; fi; if [ "$untracked_status" -ne 0 ]; then exit "$untracked_status"; fi; fi`,
+	}
+	return strings.Join(commands, "; ")
 }
 
 // ForkOpts configures a container fork operation.

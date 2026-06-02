@@ -7,8 +7,11 @@
 package md
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"os"
+	"os/exec"
 	"slices"
 	"strings"
 	"testing"
@@ -53,6 +56,70 @@ func TestShellQuoteArgs(t *testing.T) {
 ' 'hello world' '$(not-run)' 'it'\''s'`
 		if got != want {
 			t.Errorf("shellQuoteArgs() = %q, want %q", got, want)
+		}
+	})
+}
+
+func TestDiff(t *testing.T) {
+	t.Parallel()
+	t.Run("valid", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		dir := t.TempDir()
+		runGit := func(args ...string) string {
+			cmd := exec.CommandContext(ctx, "git", args...) //nolint:gosec // args are from test code
+			cmd.Dir = dir
+			cmd.Env = append(os.Environ(), "LANG=C")
+			var stderr bytes.Buffer
+			cmd.Stderr = &stderr
+			out, err := cmd.Output()
+			if err != nil {
+				t.Fatalf("git %s: %v: %s", strings.Join(args, " "), err, stderr.String())
+			}
+			return strings.TrimSpace(string(out))
+		}
+		writeFile := func(name, content string) {
+			if err := os.WriteFile(name, []byte(content), 0o644); err != nil { //nolint:gosec // test data, world-readable is fine
+				t.Fatal(err)
+			}
+		}
+
+		runGit("init", "-q", "--initial-branch=main")
+		runGit("config", "user.name", "Test")
+		runGit("config", "user.email", "test@test")
+		writeFile(dir+"/tracked.txt", "old\n")
+		writeFile(dir+"/staged.txt", "old\n")
+		runGit("add", ".")
+		runGit("commit", "-q", "-m", "init")
+		runGit("branch", "base")
+
+		writeFile(dir+"/tracked.txt", "new\n")
+		writeFile(dir+"/staged.txt", "new\n")
+		runGit("add", "staged.txt")
+		writeFile(dir+"/untracked.txt", "new\n")
+
+		cmd := exec.CommandContext(ctx, "bash", "-c", gitDiffCommand(dir, nil, false)) //nolint:gosec // repo path is a test temp dir
+		cmd.Env = append(os.Environ(), "LANG=C")
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("diff command: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+		}
+		out := stdout.String()
+		for _, name := range []string{"tracked.txt", "staged.txt", "untracked.txt"} {
+			if !strings.Contains(out, name) {
+				t.Errorf("diff output missing %q:\n%s", name, out)
+			}
+		}
+		if got := runGit("diff", "--cached", "--name-only"); got != "staged.txt" {
+			t.Errorf("cached diff = %q, want staged.txt", got)
+		}
+		status := runGit("status", "--short")
+		for _, want := range []string{" M tracked.txt", "M  staged.txt", "?? untracked.txt"} {
+			if !strings.Contains(status, want) {
+				t.Errorf("status missing %q:\n%s", want, status)
+			}
 		}
 	})
 }
