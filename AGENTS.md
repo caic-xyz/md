@@ -14,7 +14,7 @@ A file to [guide coding agents](https://agents.md/).
 - For Go code changes, ensure code passes `go test ./...`, `go vet ./...`, and `golangci-lint run ./...`.
 - **Cross-platform paths**: When passing host paths to Docker CLI or SSH config files, always use `filepath.ToSlash()`.
   Docker Desktop on Windows expects forward slashes; SSH config uses POSIX convention.
-- For Python code changes, ensure code passes `pylint` and `ruff` checks as defined in `.github/workflows/docker-build-user.yml`
+- For Python code changes, ensure code passes `pylint .` and `ruff check --no-cache` as defined in `.github/workflows/test.yml`
 - When adding new tools to the system, they must also be added to `rsc/user/home/user/setup/generate_version_report.sh` to ensure they appear in version reports. The script generates `/home/user/src/tool_versions.md` which is used in release notes and build reports
 
 ## Smoke Tests

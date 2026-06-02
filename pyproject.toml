@@ -3,4 +3,24 @@
 # LICENSE file.
 
 [tool.ruff]
-line-length = 200
+target-version = "py313"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.pylint."messages control"]
+disable = [
+  "line-too-long",
+  "missing-module-docstring",
+  "too-many-arguments",
+  "too-many-branches",
+  "too-many-locals",
+  "too-many-positional-arguments",
+  "too-many-return-statements",
+  "too-many-statements",
+]

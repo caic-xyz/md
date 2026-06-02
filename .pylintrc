@@ -1,9 +1,0 @@
-[MESSAGES CONTROL]
-disable=
-    line-too-long,
-    missing-module-docstring,
-    too-many-arguments,
-    too-many-branches,
-    too-many-locals,
-    too-many-positional-arguments,
-    too-many-statements,
