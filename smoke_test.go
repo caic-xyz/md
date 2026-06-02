@@ -2,9 +2,9 @@
 // source code is governed by the Apache v2 license that can be found in the
 // LICENSE file.
 
-//go:build smoke
-
 // End-to-end container lifecycle smoke tests.
+
+//go:build smoke
 
 package md
 

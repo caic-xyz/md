@@ -2,7 +2,7 @@
 // source code is governed by the Apache v2 license that can be found in the
 // LICENSE file.
 
-// Tests for the md client package.
+// Tests for client.go
 
 package md
 
