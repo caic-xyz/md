@@ -65,6 +65,7 @@ func TestResolveHostPath(t *testing.T) {
 	}{
 		{"~/go/pkg/mod", "/home/alice", "/home/alice/go/pkg/mod"},
 		{"~/.cargo/registry", "/home/alice", "/home/alice/.cargo/registry"},
+		{"~", "/home/alice", "/home/alice"},
 		{"/absolute/path", "/home/alice", "/absolute/path"},
 		{"/no/tilde", "/home/alice", "/no/tilde"},
 	}
@@ -74,6 +75,24 @@ func TestResolveHostPath(t *testing.T) {
 	for _, tt := range tests {
 		if got := resolveHostPath(tt.path, tt.home); got != tt.want {
 			t.Errorf("resolveHostPath(%q, %q) = %q, want %q", tt.path, tt.home, got, tt.want)
+		}
+	}
+}
+
+func TestResolveContainerPath(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		path string
+		want string
+	}{
+		{"~", "/home/user"},
+		{"~/src/project", "/home/user/src/project"},
+		{"/home/user/src/project", "/home/user/src/project"},
+		{"relative/path", "relative/path"},
+	}
+	for _, tt := range tests {
+		if got := ResolveContainerPath(tt.path); got != tt.want {
+			t.Errorf("ResolveContainerPath(%q) = %q, want %q", tt.path, got, tt.want)
 		}
 	}
 }
@@ -305,6 +324,29 @@ func TestResolveCaches(t *testing.T) {
 			t.Error("activeKey should be non-empty when cache dir exists")
 		}
 		// Should include the cache container path and its intermediary.
+		if !slices.Contains(dirs, "/home/user/.cache/myapp") {
+			t.Errorf("dirs = %v, want to contain /home/user/.cache/myapp", dirs)
+		}
+	})
+
+	t.Run("container_path_tilde_resolved", func(t *testing.T) {
+		t.Parallel()
+		cacheDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(cacheDir, "file.txt"), []byte("data"), 0o644); err != nil { //nolint:gosec // test data
+			t.Fatal(err)
+		}
+		caches := []CacheMount{{
+			Name:          "mycache",
+			HostPath:      cacheDir,
+			ContainerPath: "~/.cache/myapp",
+		}}
+		active, dirs, activeKey := resolveCaches(caches, "/home/user", nil)
+		if len(active) != 1 || active[0].cm.ContainerPath != "/home/user/.cache/myapp" {
+			t.Errorf("active = %v, want resolved container path", active)
+		}
+		if activeKey == "" {
+			t.Error("activeKey should be non-empty when cache dir exists")
+		}
 		if !slices.Contains(dirs, "/home/user/.cache/myapp") {
 			t.Errorf("dirs = %v, want to contain /home/user/.cache/myapp", dirs)
 		}

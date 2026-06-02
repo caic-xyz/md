@@ -581,6 +581,7 @@ func TestRepo(t *testing.T) {
 				{"from basename", Repo{GitRoot: "/home/user/src/myrepo"}},
 				{"explicit absolute path", Repo{GitRoot: "/home/user/src/myrepo", MountedPath: "/home/user/src/custom"}},
 				{"tilde expansion", Repo{GitRoot: "/home/user/src/myrepo", MountedPath: "~/src/custom"}},
+				{"bare tilde", Repo{GitRoot: "/home/user/src/myrepo", MountedPath: "~"}},
 			}
 			for _, tt := range tests {
 				t.Run(tt.name, func(t *testing.T) {
@@ -600,7 +601,6 @@ func TestRepo(t *testing.T) {
 			}{
 				{"empty GitRoot", Repo{}, "GitRoot is empty"},
 				{"relative MountedPath", Repo{GitRoot: "/home/user/src/myrepo", MountedPath: "custom"}, "must be an absolute POSIX path"},
-				{"bare tilde", Repo{GitRoot: "/home/user/src/myrepo", MountedPath: "~"}, "absolute POSIX path"},
 			}
 			for _, tt := range tests {
 				t.Run(tt.name, func(t *testing.T) {

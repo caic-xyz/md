@@ -107,6 +107,28 @@ func TestResolveCaches(t *testing.T) {
 		}
 	})
 
+	t.Run("custom_cache_expands_container_tilde", func(t *testing.T) {
+		t.Parallel()
+		got, err := resolveCaches([]string{"~/.cache/tool:~/.cache/tool"}, nil, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 1 || got[0].HostPath != "~/.cache/tool" || got[0].ContainerPath != "/home/user/.cache/tool" {
+			t.Errorf("unexpected result: %+v", got)
+		}
+	})
+
+	t.Run("custom_cache_expands_bare_container_tilde", func(t *testing.T) {
+		t.Parallel()
+		got, err := resolveCaches([]string{"~:~"}, nil, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 1 || got[0].Name != "home" || got[0].HostPath != "~" || got[0].ContainerPath != "/home/user" {
+			t.Errorf("unexpected result: %+v", got)
+		}
+	})
+
 	t.Run("no_caches_plus_cache_readds_well_known", func(t *testing.T) {
 		t.Parallel()
 		got, err := resolveCaches([]string{"go-mod"}, nil, true)

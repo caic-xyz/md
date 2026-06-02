@@ -980,6 +980,7 @@ func resolveCaches(caches []CacheMount, home string, mountPaths []string) (activ
 		if _, err := os.Stat(hostPath); err != nil {
 			continue
 		}
+		cm.ContainerPath = ResolveContainerPath(cm.ContainerPath)
 		a := activeCM{cm: cm, hostPath: hostPath}
 		if cm.Shallow {
 			entries, err := os.ReadDir(hostPath)
@@ -1364,13 +1365,40 @@ func formatCount(n int64) string {
 	return b.String()
 }
 
-// resolveHostPath expands a leading "~/" (or "~\" on Windows) to home;
+// ResolveContainerPath expands "~" or a leading "~/" to the container user's
+// home directory; absolute paths are returned unchanged.
+func ResolveContainerPath(p string) string {
+	suffix, ok := homePathSuffix(p, false)
+	if !ok {
+		return p
+	}
+	if suffix == "" {
+		return "/home/user"
+	}
+	return path.Join("/home/user", suffix)
+}
+
+// resolveHostPath expands "~" or a leading "~/" (or "~\" on Windows) to home;
 // absolute paths are returned unchanged.
 func resolveHostPath(p, home string) string {
-	if strings.HasPrefix(p, "~/") || strings.HasPrefix(p, `~\`) {
-		return filepath.ToSlash(filepath.Join(home, p[2:]))
+	suffix, ok := homePathSuffix(p, true)
+	if !ok {
+		return p
 	}
-	return p
+	return filepath.ToSlash(filepath.Join(home, suffix))
+}
+
+func homePathSuffix(p string, windowsBackslash bool) (string, bool) {
+	if p == "~" {
+		return "", true
+	}
+	if strings.HasPrefix(p, "~/") {
+		return p[2:], true
+	}
+	if windowsBackslash && strings.HasPrefix(p, `~\`) {
+		return p[2:], true
+	}
+	return "", false
 }
 
 // Harness identifies an agent harness whose config directories are mounted
@@ -1430,10 +1458,11 @@ type CacheMount struct {
 	// Description is a short human-readable label for the cache group (e.g.
 	// "Go module cache"). Displayed in settings UI.
 	Description string
-	// HostPath is the absolute path on the host. In [WellKnownCaches] entries
-	// "~/" is used as a placeholder; call [CachesForHome] to resolve it.
+	// HostPath is the absolute path on the host. "~" and "~/" resolve to the
+	// host user's home directory.
 	HostPath string
-	// ContainerPath is the absolute path inside the container.
+	// ContainerPath is the absolute path inside the container. "~" and "~/"
+	// resolve to the container user's home directory via [ResolveContainerPath].
 	ContainerPath string
 	// ReadOnly copies the cache into the image as root-owned, non-writable files.
 	ReadOnly bool
@@ -1447,8 +1476,9 @@ type CacheMount struct {
 // WellKnownCaches is the set of predefined build-tool caches, keyed by short
 // name. Each name may expand to multiple [CacheMount]s (e.g. "cargo" covers
 // both the registry index and git sources). HostPath values use "~/" as a
-// prefix that [Container.Launch] resolves to the user's home directory at
-// runtime; custom absolute paths are also accepted.
+// prefix that [Container.Launch] resolves to the host user's home directory at
+// runtime; ContainerPath values may use "~/" for the container user's home
+// directory.
 var WellKnownCaches = map[string][]CacheMount{
 	"android-keys": {
 		{Name: "android-keys", Description: "Android debug keystore and ADB keys", HostPath: "~/.android", ContainerPath: "/home/user/.android", Shallow: true},

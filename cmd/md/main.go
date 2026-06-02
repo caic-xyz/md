@@ -1332,9 +1332,9 @@ func resolveCaches(customSpecs, excluded []string, noAll bool) ([]md.CacheMount,
 				spec, wellKnownCacheList())
 		}
 		cm := md.CacheMount{
-			Name:          filepath.Base(parts[0]),
+			Name:          customCacheName(parts[0]),
 			HostPath:      parts[0],
-			ContainerPath: parts[1],
+			ContainerPath: md.ResolveContainerPath(parts[1]),
 		}
 		if len(parts) == 3 {
 			if parts[2] != "ro" {
@@ -1345,6 +1345,13 @@ func resolveCaches(customSpecs, excluded []string, noAll bool) ([]md.CacheMount,
 		result = append(result, cm)
 	}
 	return result, nil
+}
+
+func customCacheName(hostPath string) string {
+	if hostPath == "~" || hostPath == "~/" || hostPath == `~\` {
+		return "home"
+	}
+	return filepath.Base(hostPath)
 }
 
 // stringSlice implements flag.Value for repeatable string flags.

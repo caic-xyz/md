@@ -196,9 +196,7 @@ func (c *Container) SSHCommand(opts []string, cmd string) []string {
 // Validate returns an error for invalid repo fields.
 func (r *Repo) Validate() error {
 	r.populateMountPath()
-	if strings.HasPrefix(r.MountedPath, "~/") {
-		r.MountedPath = "/home/user/" + r.MountedPath[2:]
-	}
+	r.MountedPath = ResolveContainerPath(r.MountedPath)
 	if r.GitRoot == "" {
 		return errors.New("Repo.GitRoot is empty")
 	}
