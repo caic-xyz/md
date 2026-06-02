@@ -124,6 +124,69 @@ func TestDiff(t *testing.T) {
 	})
 }
 
+func TestContainer(t *testing.T) {
+	t.Parallel()
+	t.Run("SyncDefaultBranch", func(t *testing.T) {
+		t.Parallel()
+		t.Run("valid", func(t *testing.T) {
+			t.Parallel()
+			ctx := t.Context()
+			dir := t.TempDir()
+			remoteDir := t.TempDir() + "/container.git"
+
+			runGit := func(wd string, args ...string) string {
+				cmd := exec.CommandContext(ctx, "git", args...) //nolint:gosec // args are from test code
+				cmd.Dir = wd
+				cmd.Env = append(os.Environ(), "LANG=C")
+				var stderr bytes.Buffer
+				cmd.Stderr = &stderr
+				out, err := cmd.Output()
+				if err != nil {
+					t.Fatalf("git %s: %v: %s", strings.Join(args, " "), err, stderr.String())
+				}
+				return strings.TrimSpace(string(out))
+			}
+			writeFile := func(name, content string) {
+				if err := os.WriteFile(name, []byte(content), 0o644); err != nil { //nolint:gosec // test data, world-readable is fine
+					t.Fatal(err)
+				}
+			}
+
+			runGit("", "init", "-q", "--bare", remoteDir)
+			runGit(dir, "init", "-q", "--initial-branch=main")
+			runGit(dir, "config", "user.name", "Test")
+			runGit(dir, "config", "user.email", "test@test")
+			writeFile(dir+"/tracked.txt", "main\n")
+			runGit(dir, "add", ".")
+			runGit(dir, "commit", "-q", "-m", "main")
+			runGit(dir, "checkout", "-q", "-b", "migration")
+			writeFile(dir+"/tracked.txt", "migration\n")
+			runGit(dir, "commit", "-q", "-am", "migration")
+			migrationCommit := runGit(dir, "rev-parse", "migration")
+			runGit(dir, "checkout", "-q", "-b", "caic-1")
+			writeFile(dir+"/tracked.txt", "task\n")
+			runGit(dir, "commit", "-q", "-am", "task")
+
+			ct := &Container{
+				Client: &Client{},
+				Name:   remoteDir,
+				Repos: []Repo{{
+					GitRoot:       dir,
+					Branch:        "caic-1",
+					DefaultRemote: "origin",
+					DefaultBranch: "migration",
+				}},
+			}
+			if err := ct.SyncDefaultBranch(ctx, 0); err != nil {
+				t.Fatal(err)
+			}
+			if got := runGit(remoteDir, "rev-parse", "migration"); got != migrationCommit {
+				t.Errorf("pushed migration = %q, want %q", got, migrationCommit)
+			}
+		})
+	})
+}
+
 func TestUnmarshalContainer(t *testing.T) {
 	t.Parallel()
 	t.Run("valid", func(t *testing.T) {

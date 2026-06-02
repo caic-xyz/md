@@ -1237,10 +1237,26 @@ func (c *Container) SyncDefaultBranch(ctx context.Context, repoIdx int) error {
 	if r.DefaultBranch == r.Branch {
 		return nil
 	}
-	if _, err := c.runCmd(ctx, r.GitRoot, []string{"git", "push", "-q", "-f", c.Name, "refs/remotes/" + r.DefaultRemote + "/" + r.DefaultBranch + ":refs/heads/" + r.DefaultBranch}); err != nil {
+	src, err := defaultBranchPushSource(ctx, r)
+	if err != nil {
+		return fmt.Errorf("sync default branch %q: %w", r.DefaultBranch, err)
+	}
+	if _, err := c.runCmd(ctx, r.GitRoot, []string{"git", "push", "-q", "-f", c.Name, src + ":refs/heads/" + r.DefaultBranch}); err != nil {
 		return fmt.Errorf("sync default branch %q: %w", r.DefaultBranch, err)
 	}
 	return nil
+}
+
+func defaultBranchPushSource(ctx context.Context, r Repo) (string, error) {
+	remoteRef := "refs/remotes/" + r.DefaultRemote + "/" + r.DefaultBranch
+	if _, err := gitutil.RevParse(ctx, r.GitRoot, remoteRef); err == nil {
+		return remoteRef, nil
+	}
+	localRef := "refs/heads/" + r.DefaultBranch
+	if _, err := gitutil.RevParse(ctx, r.GitRoot, localRef); err == nil {
+		return localRef, nil
+	}
+	return "", fmt.Errorf("neither %s nor %s exists", remoteRef, localRef)
 }
 
 func (c *Container) prepareTailscaleAuthKey(ctx context.Context, stdout io.Writer, opts *StartOpts) {
