@@ -471,9 +471,6 @@ func TestSmoke(t *testing.T) {
 				})
 
 				t.Run("fork", func(t *testing.T) {
-					if testing.Short() && baseImage == DefaultBaseImage+":latest" {
-						t.Skip("skipping: fork smoke requires a local image with current startup scripts")
-					}
 					staleForkName := containerName(sanitizeDockerName(filepath.Base(mountedPath)), "main-0")
 					_, _ = client.runCmd(t.Context(), "", []string{client.Runtime, "rm", "-f", "-v", staleForkName})
 					_, _ = client.runCmd(t.Context(), "", []string{client.Runtime, "rmi", "-f", "md-fork-" + ct.Name})
