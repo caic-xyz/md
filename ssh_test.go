@@ -14,7 +14,7 @@ import (
 
 func TestEnsureSSHConfigInclude(t *testing.T) {
 	t.Parallel()
-	t.Run("writes_absolute_include", func(t *testing.T) {
+	t.Run("writes_relative_include", func(t *testing.T) {
 		t.Parallel()
 		sshDir := filepath.Join(t.TempDir(), ".ssh")
 		if err := os.MkdirAll(sshDir, 0o700); err != nil {
@@ -27,13 +27,13 @@ func TestEnsureSSHConfigInclude(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		want := "Include " + filepath.ToSlash(filepath.Join(sshDir, "config.d", "*.conf"))
+		want := "Include config.d/*.conf"
 		if !strings.Contains(string(data), want) {
 			t.Fatalf("config = %q, want containing %q", data, want)
 		}
 	})
 
-	t.Run("migrates_relative_include", func(t *testing.T) {
+	t.Run("accepts_relative_include", func(t *testing.T) {
 		t.Parallel()
 		sshDir := filepath.Join(t.TempDir(), ".ssh")
 		if err := os.MkdirAll(sshDir, 0o700); err != nil {
@@ -50,12 +50,32 @@ func TestEnsureSSHConfigInclude(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if strings.Contains(string(data), "Include config.d/*.conf") {
-			t.Fatalf("relative include was not migrated:\n%s", data)
+		want := "Include config.d/*.conf"
+		if string(data) != want+"\n" {
+			t.Fatalf("config = %q, want %q", data, want+"\n")
 		}
-		want := "Include " + filepath.ToSlash(filepath.Join(sshDir, "config.d", "*.conf"))
-		if !strings.Contains(string(data), want) {
-			t.Fatalf("config = %q, want containing %q", data, want)
+	})
+
+	t.Run("accepts_absolute_include", func(t *testing.T) {
+		t.Parallel()
+		sshDir := filepath.Join(t.TempDir(), ".ssh")
+		if err := os.MkdirAll(sshDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		absoluteInclude := "Include " + filepath.ToSlash(filepath.Join(sshDir, "config.d", "*.conf"))
+		configPath := filepath.Join(sshDir, "config")
+		if err := os.WriteFile(configPath, []byte(absoluteInclude+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := ensureSSHConfigInclude(io.Discard, sshDir); err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(configPath) //nolint:gosec // path is under t.TempDir.
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(data) != absoluteInclude+"\n" {
+			t.Fatalf("config = %q, want %q", data, absoluteInclude+"\n")
 		}
 	})
 }
