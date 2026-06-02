@@ -1,9 +1,5 @@
 # Git completion and prompt helpers.
-# shellcheck disable=SC2148
-
-if [ -z "${BASH_VERSION:-}" ]; then
-	return
-fi
+# shellcheck shell=bash
 
 case $- in
 *i*) ;;

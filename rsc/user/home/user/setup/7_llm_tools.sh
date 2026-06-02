@@ -7,7 +7,7 @@ cd "$HOME"
 
 # OpenCode
 # The installer appends PATH to .bashrc; cleaned up by bashrc_cleanup.sh.
-# PATH setup is in bash.d/70-opencode.sh.
+# PATH setup is in bash.d/80-path.sh.
 curl -fsSL https://opencode.ai/install | bash
 
 # Amp

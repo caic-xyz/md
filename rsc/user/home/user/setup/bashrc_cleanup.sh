@@ -1,7 +1,7 @@
 #!/bin/bash
 # Remove installer-appended lines from .bashrc.
 # PATH setup for these tools is handled by ~/.config/bash.d/ scripts
-# sourced via /etc/bash_env (BASH_ENV for non-interactive, .bashrc for interactive).
+# sourced via /etc/bash_env.
 #
 # nvm is handled at install time via PROFILE=/dev/null.
 # bun, opencode, amp, and claude don't support a similar mechanism, so we clean up after.

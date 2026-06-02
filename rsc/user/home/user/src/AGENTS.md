@@ -4,6 +4,8 @@ You are running inside a docker container.
 
 Subdirectories from the current working directory are the projects (as git repositories) the user wants to work on.
 
+Bash shells source `/etc/bash_env` for PATH and environment setup. This includes non-interactive shells via `BASH_ENV`, login Bash shells via `/etc/profile.d/00-bash-env.sh`, and interactive shells via `/etc/bash.bashrc`.
+
 ## Preinstalled Tools
 
 The complete list of tool versions is at `tool_versions.md`

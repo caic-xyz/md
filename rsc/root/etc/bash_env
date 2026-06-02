@@ -1,5 +1,6 @@
 # shellcheck shell=bash
-# /etc/bash_env — sourced by non-interactive bash via BASH_ENV and by .bashrc.
+# /etc/bash_env — sourced by non-interactive bash via BASH_ENV, login bash via
+# /etc/profile.d/00-bash-env.sh, and interactive bash via /etc/bash.bashrc.
 # Only PATH and environment setup belongs here. No completions, prompts, or aliases.
 # Guard against double-sourcing.
 if [ -n "${__BASH_ENV_SOURCED:-}" ]; then

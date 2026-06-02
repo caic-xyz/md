@@ -1,5 +1,5 @@
 # NVM (Node Version Manager) paths.
-# shellcheck disable=SC2148
+# shellcheck shell=bash
 export NVM_DIR="${HOME}/.nvm"
 if [ -d "${NVM_DIR}" ]; then
 	# Add the default node version's bin to PATH without loading the full nvm function.

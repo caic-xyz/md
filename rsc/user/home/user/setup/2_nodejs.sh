@@ -8,7 +8,7 @@ cd "$HOME"
 # 1. Setup Node.js via NVM
 if ! which nvm &>/dev/null; then
 	# TODO: Update from time to time.
-	# PROFILE=/dev/null prevents nvm from appending to .bashrc; PATH setup is in bash.d/50-nvm.sh.
+	# PROFILE=/dev/null prevents nvm from appending to .bashrc; PATH setup is in bash.d/30-nvm.sh.
 	PROFILE=/dev/null curl -sSL -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash
 	# shellcheck disable=SC1090
 	. ~/.nvm/nvm.sh

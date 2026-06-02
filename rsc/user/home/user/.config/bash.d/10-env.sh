@@ -1,5 +1,5 @@
 # User environment files (API keys).
-# shellcheck disable=SC2148
+# shellcheck shell=bash
 if [ -f "${HOME}/.env" ]; then
 	set -a
 	# shellcheck source=/dev/null

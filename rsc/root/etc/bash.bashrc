@@ -2,12 +2,13 @@
 # System-wide .bashrc file for interactive bash(1) shells.
 #
 # This overrides the Debian default /etc/bash.bashrc. Differences:
-# - Sources /etc/bash_env before the interactive guard (PATH, env vars for all shells)
+# - Sources /etc/bash_env before the interactive guard (PATH, env vars for
+#   interactive shells)
 # - Removed commented-out bash-completion block (unused)
 # - Reformatted to pass shellcheck/shfmt
 
-# Source environment (PATH, API keys, etc.) for all shells including non-interactive.
-# For non-interactive shells this is handled by BASH_ENV=/etc/bash_env instead.
+# Source environment (PATH, API keys, etc.) for interactive shells.
+# Non-interactive and login shells are handled by BASH_ENV and /etc/profile.d.
 # shellcheck disable=SC1091
 [ -r /etc/bash_env ] && . /etc/bash_env
 
