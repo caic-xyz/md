@@ -8,15 +8,36 @@ package md
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 )
+
+func runTestGit(t *testing.T, ctx context.Context, wd string, args ...string) string {
+	cmd := exec.CommandContext(ctx, "git", args...) //nolint:gosec // args are from test code
+	cmd.Dir = wd
+	cmd.Env = append(os.Environ(), "LANG=C")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git %s: %v: %s", strings.Join(args, " "), err, stderr.String())
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func writeTestFile(t *testing.T, name, content string) {
+	if err := os.WriteFile(name, []byte(content), 0o644); err != nil { //nolint:gosec // test data, world-readable is fine
+		t.Fatal(err)
+	}
+}
 
 func TestShellQuote(t *testing.T) {
 	t.Parallel()
@@ -66,37 +87,19 @@ func TestDiff(t *testing.T) {
 		t.Parallel()
 		ctx := t.Context()
 		dir := t.TempDir()
-		runGit := func(args ...string) string {
-			cmd := exec.CommandContext(ctx, "git", args...) //nolint:gosec // args are from test code
-			cmd.Dir = dir
-			cmd.Env = append(os.Environ(), "LANG=C")
-			var stderr bytes.Buffer
-			cmd.Stderr = &stderr
-			out, err := cmd.Output()
-			if err != nil {
-				t.Fatalf("git %s: %v: %s", strings.Join(args, " "), err, stderr.String())
-			}
-			return strings.TrimSpace(string(out))
-		}
-		writeFile := func(name, content string) {
-			if err := os.WriteFile(name, []byte(content), 0o644); err != nil { //nolint:gosec // test data, world-readable is fine
-				t.Fatal(err)
-			}
-		}
+		runTestGit(t, ctx, dir, "init", "-q", "--initial-branch=main")
+		runTestGit(t, ctx, dir, "config", "user.name", "Test")
+		runTestGit(t, ctx, dir, "config", "user.email", "test@test")
+		writeTestFile(t, filepath.Join(dir, "tracked.txt"), "old\n")
+		writeTestFile(t, filepath.Join(dir, "staged.txt"), "old\n")
+		runTestGit(t, ctx, dir, "add", ".")
+		runTestGit(t, ctx, dir, "commit", "-q", "-m", "init")
+		runTestGit(t, ctx, dir, "branch", "base")
 
-		runGit("init", "-q", "--initial-branch=main")
-		runGit("config", "user.name", "Test")
-		runGit("config", "user.email", "test@test")
-		writeFile(dir+"/tracked.txt", "old\n")
-		writeFile(dir+"/staged.txt", "old\n")
-		runGit("add", ".")
-		runGit("commit", "-q", "-m", "init")
-		runGit("branch", "base")
-
-		writeFile(dir+"/tracked.txt", "new\n")
-		writeFile(dir+"/staged.txt", "new\n")
-		runGit("add", "staged.txt")
-		writeFile(dir+"/untracked.txt", "new\n")
+		writeTestFile(t, filepath.Join(dir, "tracked.txt"), "new\n")
+		writeTestFile(t, filepath.Join(dir, "staged.txt"), "new\n")
+		runTestGit(t, ctx, dir, "add", "staged.txt")
+		writeTestFile(t, filepath.Join(dir, "untracked.txt"), "new\n")
 
 		cmd := exec.CommandContext(ctx, "bash", "-c", gitDiffCommand(dir, nil, false)) //nolint:gosec // repo path is a test temp dir
 		cmd.Env = append(os.Environ(), "LANG=C")
@@ -112,10 +115,10 @@ func TestDiff(t *testing.T) {
 				t.Errorf("diff output missing %q:\n%s", name, out)
 			}
 		}
-		if got := runGit("diff", "--cached", "--name-only"); got != "staged.txt" {
+		if got := runTestGit(t, ctx, dir, "diff", "--cached", "--name-only"); got != "staged.txt" {
 			t.Errorf("cached diff = %q, want staged.txt", got)
 		}
-		status := runGit("status", "--short")
+		status := runTestGit(t, ctx, dir, "status", "--short")
 		for _, want := range []string{" M tracked.txt", "M  staged.txt", "?? untracked.txt"} {
 			if !strings.Contains(status, want) {
 				t.Errorf("status missing %q:\n%s", want, status)
@@ -128,44 +131,26 @@ func TestContainer(t *testing.T) {
 	t.Parallel()
 	t.Run("SyncDefaultBranch", func(t *testing.T) {
 		t.Parallel()
-		t.Run("valid", func(t *testing.T) {
+		t.Run("local_only_default_branch", func(t *testing.T) {
 			t.Parallel()
 			ctx := t.Context()
 			dir := t.TempDir()
-			remoteDir := t.TempDir() + "/container.git"
+			remoteDir := filepath.Join(t.TempDir(), "container.git")
 
-			runGit := func(wd string, args ...string) string {
-				cmd := exec.CommandContext(ctx, "git", args...) //nolint:gosec // args are from test code
-				cmd.Dir = wd
-				cmd.Env = append(os.Environ(), "LANG=C")
-				var stderr bytes.Buffer
-				cmd.Stderr = &stderr
-				out, err := cmd.Output()
-				if err != nil {
-					t.Fatalf("git %s: %v: %s", strings.Join(args, " "), err, stderr.String())
-				}
-				return strings.TrimSpace(string(out))
-			}
-			writeFile := func(name, content string) {
-				if err := os.WriteFile(name, []byte(content), 0o644); err != nil { //nolint:gosec // test data, world-readable is fine
-					t.Fatal(err)
-				}
-			}
-
-			runGit("", "init", "-q", "--bare", remoteDir)
-			runGit(dir, "init", "-q", "--initial-branch=main")
-			runGit(dir, "config", "user.name", "Test")
-			runGit(dir, "config", "user.email", "test@test")
-			writeFile(dir+"/tracked.txt", "main\n")
-			runGit(dir, "add", ".")
-			runGit(dir, "commit", "-q", "-m", "main")
-			runGit(dir, "checkout", "-q", "-b", "migration")
-			writeFile(dir+"/tracked.txt", "migration\n")
-			runGit(dir, "commit", "-q", "-am", "migration")
-			migrationCommit := runGit(dir, "rev-parse", "migration")
-			runGit(dir, "checkout", "-q", "-b", "caic-1")
-			writeFile(dir+"/tracked.txt", "task\n")
-			runGit(dir, "commit", "-q", "-am", "task")
+			runTestGit(t, ctx, "", "init", "-q", "--bare", remoteDir)
+			runTestGit(t, ctx, dir, "init", "-q", "--initial-branch=main")
+			runTestGit(t, ctx, dir, "config", "user.name", "Test")
+			runTestGit(t, ctx, dir, "config", "user.email", "test@test")
+			writeTestFile(t, filepath.Join(dir, "tracked.txt"), "main\n")
+			runTestGit(t, ctx, dir, "add", ".")
+			runTestGit(t, ctx, dir, "commit", "-q", "-m", "main")
+			runTestGit(t, ctx, dir, "checkout", "-q", "-b", "migration")
+			writeTestFile(t, filepath.Join(dir, "tracked.txt"), "migration\n")
+			runTestGit(t, ctx, dir, "commit", "-q", "-am", "migration")
+			migrationCommit := runTestGit(t, ctx, dir, "rev-parse", "migration")
+			runTestGit(t, ctx, dir, "checkout", "-q", "-b", "caic-1")
+			writeTestFile(t, filepath.Join(dir, "tracked.txt"), "task\n")
+			runTestGit(t, ctx, dir, "commit", "-q", "-am", "task")
 
 			ct := &Container{
 				Client: &Client{},
@@ -180,7 +165,7 @@ func TestContainer(t *testing.T) {
 			if err := ct.SyncDefaultBranch(ctx, 0); err != nil {
 				t.Fatal(err)
 			}
-			if got := runGit(remoteDir, "rev-parse", "migration"); got != migrationCommit {
+			if got := runTestGit(t, ctx, remoteDir, "rev-parse", "migration"); got != migrationCommit {
 				t.Errorf("pushed migration = %q, want %q", got, migrationCommit)
 			}
 		})

@@ -1231,7 +1231,7 @@ func (c *Container) SyncDefaultBranch(ctx context.Context, repoIdx int) error {
 	if err := c.Repos[repoIdx].resolveDefaults(ctx); err != nil {
 		return fmt.Errorf("sync default branch: %w", err)
 	}
-	r := c.Repos[repoIdx]
+	r := &c.Repos[repoIdx]
 	// If the container's working branch is the default branch, it's already
 	// synced as "base".
 	if r.DefaultBranch == r.Branch {
@@ -1247,7 +1247,7 @@ func (c *Container) SyncDefaultBranch(ctx context.Context, repoIdx int) error {
 	return nil
 }
 
-func defaultBranchPushSource(ctx context.Context, r Repo) (string, error) {
+func defaultBranchPushSource(ctx context.Context, r *Repo) (string, error) {
 	remoteRef := "refs/remotes/" + r.DefaultRemote + "/" + r.DefaultBranch
 	if _, err := gitutil.RevParse(ctx, r.GitRoot, remoteRef); err == nil {
 		return remoteRef, nil
