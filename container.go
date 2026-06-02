@@ -417,6 +417,9 @@ func (c *Container) Run(ctx context.Context, stdout, stderr io.Writer, baseImage
 		return 1, err
 	}
 	opts := StartOpts{Quiet: true, ExtraEnv: extraEnv, AgentPaths: slices.Collect(maps.Values(HarnessMounts)), MaxCPUs: maxCPUs, ExtraRunArgs: extraRunArgs}
+	if err := tmp.prepare(opts.AgentPaths); err != nil {
+		return 1, err
+	}
 	if err := tmp.launchContainer(ctx, stdout, stderr, &opts, imageName); err != nil {
 		tmp.cleanup(ctx)
 		return 1, err
@@ -767,7 +770,7 @@ func (c *Container) Diff(ctx context.Context, stdout, stderr io.Writer, repoIdx 
 	exitOnDiff := slices.Contains(extraArgs, "--exit-code") || slices.Contains(extraArgs, "--quiet")
 	sshArgs := c.SSHCommand(opts, gitDiffCommand(repo.MountedPath, extraArgs, exitOnDiff))
 	cmd := exec.CommandContext(ctx, sshArgs[0]) //nolint:gosec // args are from trusted SSH config
-	cmd.Env = append(os.Environ(), c.env...)
+	cmd.Env = c.commandEnv()
 	if isTTY {
 		cmd.Stdin = os.Stdin
 	}
@@ -977,7 +980,7 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 		ExtraRunArgs: opts.ExtraRunArgs,
 	}
 	startOpts.resetTailscale = startOpts.Tailscale
-	if err := c.prepare(startOpts.AgentPaths); err != nil {
+	if err := fork.prepare(startOpts.AgentPaths); err != nil {
 		return nil, err
 	}
 	fork.prepareTailscaleAuthKey(ctx, stdout, startOpts)
@@ -1000,6 +1003,9 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 	deadline := time.Now().Add(30 * time.Second)
 	if err := waitForTCP(ctx, addr, deadline); err != nil {
 		return nil, fmt.Errorf("waiting for SSH on forked container: %w", err)
+	}
+	if err := fork.waitForSSH(ctx, deadline); err != nil {
+		return nil, fmt.Errorf("SSH handshake on forked container: %w", err)
 	}
 
 	// Send .env into the forked container.
@@ -1025,7 +1031,7 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 	sshEnvArgs := fork.SSHCommand(nil, "cat > /home/user/.env")
 	for {
 		cmd := exec.CommandContext(ctx, sshEnvArgs[0], sshEnvArgs[1:]...) //nolint:gosec // args are from trusted SSH config
-		cmd.Env = append(os.Environ(), fork.env...)
+		cmd.Env = fork.commandEnv()
 		cmd.Stdin = bytes.NewReader(envContent)
 		out, err := cmd.CombinedOutput()
 		if err == nil {
@@ -1371,7 +1377,7 @@ func (c *Container) waitForSSH(ctx context.Context, deadline time.Time) error {
 	for {
 		sshArgs := c.SSHCommand(nil, "true")
 		cmd := exec.CommandContext(ctx, sshArgs[0], sshArgs[1:]...) //nolint:gosec // args are from trusted SSH config
-		cmd.Env = append(os.Environ(), c.env...)
+		cmd.Env = c.commandEnv()
 		if out, err := cmd.CombinedOutput(); err == nil {
 			return nil
 		} else {
@@ -2052,7 +2058,7 @@ func (c *Container) sendEnv(ctx context.Context, stdout io.Writer, opts *StartOp
 	}
 	sshEnvArgs := c.SSHCommand(nil, "cat > /home/user/.env")
 	cmd := exec.CommandContext(ctx, sshEnvArgs[0], sshEnvArgs[1:]...) //nolint:gosec // args are from trusted SSH config
-	cmd.Env = append(os.Environ(), c.env...)
+	cmd.Env = c.commandEnv()
 	cmd.Stdin = bytes.NewReader(envContent)
 	out, err := cmd.CombinedOutput()
 	if err != nil {

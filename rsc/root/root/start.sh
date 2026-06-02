@@ -49,14 +49,20 @@ echo "[start.sh] Starting dbus service..."
 /etc/init.d/dbus start
 echo "[start.sh] Setting up persistent DBus session for user..."
 session_file="/home/user/.dbus-session-env"
-su - user -c "dbus-launch --sh-syntax > '$session_file'"
-chown user:user "$session_file"
-cat <<EOF >/etc/profile.d/50-dbus-session.sh
+rm -f "$session_file" /etc/profile.d/50-dbus-session.sh
+if su user -s /bin/bash -c "env -u DBUS_SESSION_BUS_ADDRESS dbus-launch --sh-syntax" >"$session_file"; then
+	chown user:user "$session_file"
+	chmod 600 "$session_file"
+	cat <<EOF >/etc/profile.d/50-dbus-session.sh
 if [ -f "$session_file" ]; then
     . "$session_file"
     export DBUS_SESSION_BUS_ADDRESS
 fi
 EOF
+else
+	echo "[start.sh] WARNING: DBus session setup failed, continuing without DBUS_SESSION_BUS_ADDRESS"
+	rm -f "$session_file"
+fi
 
 # Start XFCE4 and VNC
 if [ -n "${MD_DISPLAY:-}" ]; then
@@ -158,6 +164,21 @@ if [ -n "${MD_SUDO_PASSWORD:-}" ]; then
 fi
 
 # Start SSH server (after VNC so DISPLAY is available)
-service ssh start
+rm -f /run/sshd.pid /var/run/sshd.pid
+rm -rf /run/sshd
+install -d -m 0755 /run/sshd
+chown user:user /home/user /home/user/.ssh /home/user/.ssh/authorized_keys
+chmod 0700 /home/user /home/user/.ssh
+chmod 0400 /home/user/.ssh/authorized_keys
+if [ -d /home/user/src ]; then
+	chown -R user:user /home/user/src
+fi
+find /etc/ssh -maxdepth 1 -type f -name 'ssh_host_*_key' -exec chown root:root {} + -exec chmod 0600 {} +
+find /etc/ssh -maxdepth 1 -type f -name 'ssh_host_*_key.pub' -exec chown root:root {} + -exec chmod 0644 {} +
+if ! service ssh start; then
+	echo "[start.sh] ERROR: sshd failed config validation:"
+	/usr/sbin/sshd -t -e || true
+	exit 1
+fi
 
 sleep infinity

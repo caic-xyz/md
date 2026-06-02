@@ -76,6 +76,37 @@ func TestHarnessMounts(t *testing.T) {
 	}
 }
 
+func TestEnvWithOverrides(t *testing.T) {
+	t.Parallel()
+	got := envWithOverrides(
+		[]string{"HOME=/real", "PATH=/bin", "KEEP=1"},
+		[]string{"HOME=/tmp/md", "XDG_CONFIG_HOME=/tmp/md/.config"},
+	)
+
+	counts := map[string]int{}
+	values := map[string]string{}
+	for _, kv := range got {
+		k, v, ok := strings.Cut(kv, "=")
+		if !ok {
+			continue
+		}
+		counts[k]++
+		values[k] = v
+	}
+	if counts["HOME"] != 1 {
+		t.Fatalf("HOME count = %d, want 1 in %v", counts["HOME"], got)
+	}
+	if values["HOME"] != "/tmp/md" {
+		t.Fatalf("HOME = %q, want /tmp/md", values["HOME"])
+	}
+	if values["PATH"] != "/bin" {
+		t.Fatalf("PATH = %q, want /bin", values["PATH"])
+	}
+	if values["XDG_CONFIG_HOME"] != "/tmp/md/.config" {
+		t.Fatalf("XDG_CONFIG_HOME = %q, want /tmp/md/.config", values["XDG_CONFIG_HOME"])
+	}
+}
+
 func TestWellKnownCaches(t *testing.T) {
 	t.Parallel()
 	if len(WellKnownCaches) == 0 {

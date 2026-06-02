@@ -12,13 +12,53 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 )
+
+func newSmokeClient(t *testing.T, rt string) *Client {
+	tmp := t.TempDir()
+	tmpHome := filepath.Join(tmp, "home")
+	if err := os.MkdirAll(tmpHome, 0o700); err != nil {
+		t.Fatalf("create home: %v", err)
+	}
+	cfgDir := filepath.Join(tmpHome, ".config", "containers")
+	if err := os.MkdirAll(cfgDir, 0o700); err != nil {
+		t.Fatalf("create containers config dir: %v", err)
+	}
+	storageConf := "[storage]\n"
+	storageConf += "driver = \"overlay\"\n"
+	storageConf += "graphroot = \"" + filepath.ToSlash(tmpHome) + "/.local/share/containers/storage\"\n"
+	storageConf += "runroot = \"" + filepath.ToSlash(tmp) + "/runroot\"\n"
+	if err := os.WriteFile(filepath.Join(cfgDir, "storage.conf"), []byte(storageConf), 0o644); err != nil {
+		t.Fatalf("write storage.conf: %v", err)
+	}
+
+	client, err := newClient(tmpHome, rt, io.Discard)
+	if err != nil {
+		t.Fatalf("newClient: %v", err)
+	}
+	client.env = []string{
+		"HOME=" + tmpHome,
+		"GIT_SSH_COMMAND=ssh -F " + filepath.Join(tmpHome, ".ssh", "config"),
+		"XDG_CONFIG_HOME=" + filepath.Join(tmpHome, ".config"),
+	}
+
+	// podman system reset cleans up overlay storage before t.TempDir removal,
+	// avoiding permission errors.
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 30*time.Second)
+		defer cancel()
+		_, _ = client.runCmd(ctx, "", []string{rt, "system", "reset", "-f"})
+	})
+	return client
+}
 
 // hasImage checks whether a container image exists in the local store.
 func hasImage(ctx context.Context, c *Client, name string) bool {
@@ -98,6 +138,72 @@ func launchSmokeContainer(t *testing.T, ctx context.Context, c *Client, baseImag
 	return ct
 }
 
+func launchSmokeRepoContainer(t *testing.T, ctx context.Context, c *Client, baseImage string, repo Repo) *Container {
+	ct, err := c.Container(repo)
+	if err != nil {
+		t.Fatalf("Container: %v", err)
+	}
+
+	_, _ = c.runCmd(ctx, "", []string{c.Runtime, "rm", "-f", "-v", ct.Name})
+
+	opts := &StartOpts{
+		BaseImage: baseImage,
+		Sudo:      true,
+		Quiet:     true,
+	}
+
+	t.Logf("launching repo container %s ...", ct.Name)
+	var stdout, stderr strings.Builder
+	if err := ct.Launch(ctx, &stdout, &stderr, opts); err != nil {
+		t.Fatalf("Launch: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+
+	t.Cleanup(func() {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		if err := ct.Purge(cleanupCtx, io.Discard, io.Discard); err != nil {
+			t.Logf("cleanup %s: %v", ct.Name, err)
+		}
+	})
+
+	if _, err := ct.Connect(ctx, &stdout, &stderr, opts); err != nil {
+		t.Fatalf("Connect: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+	return ct
+}
+
+func createSmokeGitRepo(t *testing.T) string {
+	ctx := t.Context()
+	tmp := t.TempDir()
+	repo := filepath.Join(tmp, "smoke-repo")
+	origin := filepath.Join(tmp, "origin.git")
+
+	runSmokeGit(t, ctx, "", "init", "-q", "--bare", origin)
+	runSmokeGit(t, ctx, "", "init", "-q", "--initial-branch=main", repo)
+	runSmokeGit(t, ctx, repo, "config", "user.name", "Smoke Test")
+	runSmokeGit(t, ctx, repo, "config", "user.email", "smoke@example.invalid")
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("initial\n"), 0o644); err != nil {
+		t.Fatalf("write README.md: %v", err)
+	}
+	runSmokeGit(t, ctx, repo, "add", ".")
+	runSmokeGit(t, ctx, repo, "commit", "-q", "-m", "initial")
+	runSmokeGit(t, ctx, repo, "remote", "add", "origin", origin)
+	runSmokeGit(t, ctx, repo, "push", "-q", "-u", "origin", "main")
+	runSmokeGit(t, ctx, origin, "symbolic-ref", "HEAD", "refs/heads/main")
+	return repo
+}
+
+func runSmokeGit(t *testing.T, ctx context.Context, wd string, args ...string) string {
+	cmd := exec.CommandContext(ctx, "git", args...) //nolint:gosec // args are test-controlled.
+	cmd.Dir = wd
+	cmd.Env = append(os.Environ(), "LANG=C")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
 // TestSmoke verifies end-to-end: build images, start a sudo-enabled container,
 // confirm rootless podman works inside, pull from registries, and exercise the
 // container lifecycle. Runs under each available container runtime.
@@ -107,48 +213,9 @@ func TestSmoke(t *testing.T) {
 			if _, err := exec.LookPath(rt); err != nil {
 				t.Skipf("skipping: %s not in PATH", rt)
 			}
-			if rt == "podman" && os.Getuid() == 0 {
-				t.Skip("skipping: rootless podman smoke test requires non-root user")
-			}
 			t.Parallel()
 
-			// Isolated temp home for SSH keys and podman storage.
-			// client.env propagates HOME to subprocesses so podman
-			// reads ~/.config/containers/storage.conf from here,
-			// and ssh reads ~/.ssh/config (Include directive).
-			tmp := t.TempDir()
-			tmpHome := filepath.Join(tmp, "home")
-			if err := os.MkdirAll(tmpHome, 0o700); err != nil {
-				t.Fatalf("create home: %v", err)
-			}
-			cfgDir := filepath.Join(tmpHome, ".config", "containers")
-			if err := os.MkdirAll(cfgDir, 0o700); err != nil {
-				t.Fatalf("create containers config dir: %v", err)
-			}
-			storageConf := "[storage]\n"
-			storageConf += "driver = \"overlay\"\n"
-			storageConf += "graphroot = \"" + filepath.ToSlash(tmpHome) + "/.local/share/containers/storage\"\n"
-			storageConf += "runroot = \"" + filepath.ToSlash(tmp) + "/runroot\"\n"
-			if err := os.WriteFile(filepath.Join(cfgDir, "storage.conf"), []byte(storageConf), 0o644); err != nil {
-				t.Fatalf("write storage.conf: %v", err)
-			}
-
-			client, err := newClient(tmpHome, rt, io.Discard)
-			if err != nil {
-				t.Fatalf("newClient: %v", err)
-			}
-			client.env = []string{
-				"HOME=" + tmpHome,
-				"XDG_CONFIG_HOME=" + filepath.Join(tmpHome, ".config"),
-			}
-
-			// podman system reset cleans up overlay storage before
-			// t.TempDir removal, avoiding permission errors.
-			t.Cleanup(func() {
-				ctx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 30*time.Second)
-				defer cancel()
-				_, _ = client.runCmd(ctx, "", []string{rt, "system", "reset", "-f"})
-			})
+			client := newSmokeClient(t, rt)
 
 			// Rootless podman adds --userns=keep-id, which puts the
 			// inner container in a user namespace. Nested newuidmap
@@ -335,6 +402,133 @@ func TestSmoke(t *testing.T) {
 					}
 					if got := strings.TrimSpace(out); got != "persisted" {
 						t.Fatalf("expected 'persisted', got %q", got)
+					}
+				})
+			})
+
+			t.Run("repo_workflow", func(t *testing.T) {
+				repo := createSmokeGitRepo(t)
+				mountedPath := "/home/user/src/smoke-" + rt + "-repo"
+				ct := launchSmokeRepoContainer(t, t.Context(), client, baseImage, Repo{
+					GitRoot:     repo,
+					Branch:      "main",
+					MountedPath: mountedPath,
+				})
+
+				t.Run("run", func(t *testing.T) {
+					var stdout, stderr strings.Builder
+					exitCode, err := ct.Run(t.Context(), &stdout, &stderr, baseImage, []string{
+						"bash", "-lc", "grep -qx 'SMOKE_RUN_VALUE=from-run' /home/user/.env && git rev-parse --abbrev-ref HEAD",
+					}, nil, []string{"SMOKE_RUN_VALUE=from-run"}, DefaultMaxCPUs(), nil)
+					if err != nil {
+						t.Fatalf("Run: %v", err)
+					}
+					if exitCode != 0 {
+						t.Fatalf("Run exit code = %d\nstdout:\n%s\nstderr:\n%s", exitCode, stdout.String(), stderr.String())
+					}
+					if got := strings.TrimSpace(stdout.String()); got != "main" {
+						t.Fatalf("Run branch = %q, want main", got)
+					}
+				})
+
+				t.Run("push_pull", func(t *testing.T) {
+					if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("local-push\n"), 0o644); err != nil {
+						t.Fatalf("write local README.md: %v", err)
+					}
+					runSmokeGit(t, t.Context(), repo, "commit", "-q", "-am", "local push")
+
+					backupBranch, err := ct.Push(t.Context(), io.Discard, io.Discard, 0)
+					if err != nil {
+						t.Fatalf("Push: %v", err)
+					}
+					if !strings.HasPrefix(backupBranch, "backup-") {
+						t.Fatalf("backup branch = %q, want backup-*", backupBranch)
+					}
+					out, err := ct.runCmd(t.Context(), "", ct.SSHCommand(nil, "cat "+shellQuote(mountedPath+"/README.md")))
+					if err != nil {
+						t.Fatalf("read pushed README.md: %v", err)
+					}
+					if got := strings.TrimSpace(out); got != "local-push" {
+						t.Fatalf("container README.md = %q, want local-push", got)
+					}
+
+					if _, err := ct.runCmd(t.Context(), "", ct.SSHCommand(nil, "printf 'container-pull\n' > "+shellQuote(mountedPath+"/README.md"))); err != nil {
+						t.Fatalf("write container README.md: %v", err)
+					}
+					if err := ct.Pull(t.Context(), io.Discard, io.Discard, 0, nil); err != nil {
+						t.Fatalf("Pull: %v", err)
+					}
+					data, err := os.ReadFile(filepath.Join(repo, "README.md"))
+					if err != nil {
+						t.Fatalf("read local README.md: %v", err)
+					}
+					if got := strings.TrimSpace(string(data)); got != "container-pull" {
+						t.Fatalf("local README.md = %q, want container-pull", got)
+					}
+					if got := runSmokeGit(t, t.Context(), repo, "status", "--short"); got != "" {
+						t.Fatalf("local repo is dirty after Pull:\n%s", got)
+					}
+				})
+
+				t.Run("fork", func(t *testing.T) {
+					if testing.Short() && baseImage == DefaultBaseImage+":latest" {
+						t.Skip("skipping: fork smoke requires a local image with current startup scripts")
+					}
+					staleForkName := containerName(sanitizeDockerName(filepath.Base(mountedPath)), "main-0")
+					_, _ = client.runCmd(t.Context(), "", []string{client.Runtime, "rm", "-f", "-v", staleForkName})
+					_, _ = client.runCmd(t.Context(), "", []string{client.Runtime, "rmi", "-f", "md-fork-" + ct.Name})
+					t.Cleanup(func() {
+						cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 30*time.Second)
+						defer cancel()
+						_, _ = client.runCmd(cleanupCtx, "", []string{client.Runtime, "rmi", "-f", "md-fork-" + ct.Name})
+					})
+
+					if _, err := ct.runCmd(t.Context(), "", ct.SSHCommand(nil, strings.Join([]string{
+						"printf snapshot > /tmp/fork-marker",
+						"printf 'fork-uncommitted\n' > " + shellQuote(mountedPath+"/README.md"),
+					}, " && "))); err != nil {
+						t.Fatalf("prepare source for Fork: %v", err)
+					}
+
+					var forkStdout, forkStderr strings.Builder
+					fork, err := ct.Fork(t.Context(), &forkStdout, &forkStderr, &ForkOpts{
+						Quiet:      true,
+						AgentPaths: slices.Collect(maps.Values(HarnessMounts)),
+						MaxCPUs:    DefaultMaxCPUs(),
+					})
+					if err != nil {
+						state, _ := client.runCmd(t.Context(), "", []string{client.Runtime, "inspect", "--format", "{{json .State}}", staleForkName})
+						logs, _ := client.runCmd(t.Context(), "", []string{client.Runtime, "logs", staleForkName})
+						sshDiag, _ := client.runCmd(t.Context(), "", []string{client.Runtime, "exec", staleForkName, "bash", "-lc", strings.Join([]string{
+							"stat -c '%U:%G %a %n' /home/user /home/user/.ssh /home/user/.ssh/authorized_keys /etc/ssh/ssh_host_ed25519_key 2>&1",
+							"pgrep -a sshd 2>&1 || true",
+							"tail -120 /var/log/auth.log 2>&1 || true",
+							"/usr/sbin/sshd -T 2>&1 | head -80 || true",
+						}, "; ")})
+						t.Fatalf("Fork: %v\nstdout:\n%s\nstderr:\n%s\nstate:\n%s\nlogs:\n%s\nssh diagnostics:\n%s", err, forkStdout.String(), forkStderr.String(), state, logs, sshDiag)
+					}
+					t.Cleanup(func() {
+						cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 30*time.Second)
+						defer cancel()
+						if err := fork.Purge(cleanupCtx, io.Discard, io.Discard); err != nil {
+							t.Logf("cleanup %s: %v", fork.Name, err)
+						}
+					})
+
+					if len(fork.Repos) != 1 {
+						t.Fatalf("fork repos = %d, want 1", len(fork.Repos))
+					}
+					if fork.Repos[0].Branch != "main-0" {
+						t.Fatalf("fork branch = %q, want main-0", fork.Repos[0].Branch)
+					}
+					out, err := fork.runCmd(t.Context(), "", fork.SSHCommand(nil, "cat /tmp/fork-marker && printf '\n' && git -C "+shellQuote(mountedPath)+" branch --show-current && cat "+shellQuote(mountedPath+"/README.md")))
+					if err != nil {
+						t.Fatalf("inspect fork: %v", err)
+					}
+					for _, want := range []string{"snapshot", "main-0", "fork-uncommitted"} {
+						if !strings.Contains(out, want) {
+							t.Fatalf("fork output missing %q:\n%s", want, out)
+						}
 					}
 				})
 			})

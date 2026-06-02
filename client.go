@@ -506,9 +506,7 @@ func (c *Client) runCmd(ctx context.Context, dir string, args []string) (string,
 	slog.DebugContext(ctx, "md", "msg", "exec", "cmd", args)
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...) //nolint:gosec // args are from trusted callers
 	cmd.Dir = dir
-	env := append(os.Environ(), c.env...)
-	env = append(env, "LANG=C")
-	cmd.Env = env
+	cmd.Env = c.commandEnv("LANG=C")
 	out, err := cmd.Output()
 	return strings.TrimSpace(string(out)), err
 }
@@ -519,12 +517,41 @@ func (c *Client) runCmdOut(ctx context.Context, dir string, args []string, stdou
 	slog.DebugContext(ctx, "md", "msg", "exec", "cmd", args)
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...) //nolint:gosec // args are from trusted callers
 	cmd.Dir = dir
-	env := append(os.Environ(), c.env...)
-	env = append(env, "LANG=C")
-	cmd.Env = env
+	cmd.Env = c.commandEnv("LANG=C")
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	return cmd.Run()
+}
+
+func (c *Client) commandEnv(extra ...string) []string {
+	overrides := append([]string(nil), c.env...)
+	overrides = append(overrides, extra...)
+	return envWithOverrides(os.Environ(), overrides)
+}
+
+func envWithOverrides(base, overrides []string) []string {
+	env := append([]string(nil), base...)
+	index := make(map[string]int, len(env))
+	for i, kv := range env {
+		name, _, ok := strings.Cut(kv, "=")
+		if ok {
+			index[name] = i
+		}
+	}
+	for _, kv := range overrides {
+		name, _, ok := strings.Cut(kv, "=")
+		if !ok {
+			env = append(env, kv)
+			continue
+		}
+		if i, ok := index[name]; ok {
+			env[i] = kv
+			continue
+		}
+		index[name] = len(env)
+		env = append(env, kv)
+	}
+	return env
 }
 
 // runGitDir runs a git command with GIT_DIR and GIT_WORK_TREE

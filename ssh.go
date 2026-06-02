@@ -118,14 +118,19 @@ func writeKnownHosts(knownHostsPath string, port int32, hostPubKey string) error
 // When it exists but the directive is missing, a warning is printed.
 func ensureSSHConfigInclude(w io.Writer, sshDir string) error {
 	configPath := filepath.Join(sshDir, "config")
-	needle := "Include config.d/*.conf"
+	needle := "Include " + filepath.ToSlash(filepath.Join(sshDir, "config.d", "*.conf"))
+	oldNeedle := "Include config.d/*.conf"
 	data, err := os.ReadFile(configPath) //nolint:gosec // configPath is from trusted SSH dir
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
 	for line := range strings.SplitSeq(string(data), "\n") {
-		if strings.TrimSpace(line) == needle {
+		switch strings.TrimSpace(line) {
+		case needle:
 			return nil
+		case oldNeedle:
+			content := strings.ReplaceAll(string(data), oldNeedle, needle)
+			return os.WriteFile(configPath, []byte(content), 0o600) //nolint:gosec // configPath is from trusted SSH dir
 		}
 	}
 	if len(data) == 0 {
