@@ -82,6 +82,7 @@
 	check_version "asciinema" "asciinema" "--version"
 	check_version "FFmpeg" "ffmpeg" "-hide_banner -version"
 	check_version "ImageMagick" "magick" "--version"
+	check_version "man" "man" "--version"
 
 	# Editors / Tools
 	check_version "Neovim" "nvim" "--version"

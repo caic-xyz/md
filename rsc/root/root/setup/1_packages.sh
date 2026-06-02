@@ -77,6 +77,7 @@ apt-get install -qq -y --no-install-recommends \
 	lldb \
 	locales \
 	lsof \
+	man-db \
 	meson \
 	net-tools \
 	ninja-build \
