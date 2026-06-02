@@ -68,6 +68,7 @@
 	check_version "objdump" "objdump" "--version"
 	check_version "radare2" "r2" "-v"
 	check_version "strace" "strace" "-V"
+	check_version "col" "col" "--version"
 	check_version "yq" "yq" "--version"
 	check_version "bubblewrap" "bwrap" "--version"
 	check_version "Podman" "podman" "--version"

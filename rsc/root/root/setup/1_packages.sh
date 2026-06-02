@@ -18,6 +18,7 @@ apt-get install -qq -y --no-install-recommends \
 	bison \
 	breeze-cursor-theme \
 	brotli \
+	bsdextrautils \
 	bubblewrap \
 	build-essential \
 	ca-certificates \
