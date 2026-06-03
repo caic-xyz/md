@@ -1,6 +1,6 @@
 module github.com/caic-xyz/md
 
-go 1.25.10
+go 1.26.4
 
 require (
 	github.com/maruel/genai v0.5.6
