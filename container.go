@@ -801,15 +801,17 @@ func gitDiffCommand(repo string, extraArgs []string, exitOnDiff bool) string {
 	commands := []string{
 		"cd " + shellQuote(repo),
 		"export GIT_OPTIONAL_LOCKS=0",
-		"diff_status=0",
-		"git diff base" + diffArgs + " -- . || diff_status=$?",
-		`if [ "$diff_status" -gt 1 ]; then exit "$diff_status"; fi`,
-		"untracked_status=0",
+		`index_path=$(git rev-parse --git-path index) || exit $?`,
+		`tmp_index=$(mktemp) || exit $?`,
 		`untracked_paths=$(mktemp) || exit $?`,
-		`trap 'rm -f "$untracked_paths"' EXIT`,
+		`cp "$index_path" "$tmp_index" || exit $?`,
+		`trap 'rm -f "$tmp_index" "$untracked_paths"' EXIT`,
 		`git ls-files -z --others --exclude-standard -- . > "$untracked_paths" || exit $?`,
-		"while IFS= read -r -d '' path; do git diff --no-index" + diffArgs + ` -- /dev/null "$path"; file_status=$?; if [ "$file_status" -eq 1 ]; then untracked_status=1; elif [ "$file_status" -ne 0 ]; then exit "$file_status"; fi; done < "$untracked_paths"`,
-		"if [ " + exitOnDiffFlag + ` -eq 1 ]; then if [ "$diff_status" -ne 0 ]; then exit "$diff_status"; fi; if [ "$untracked_status" -ne 0 ]; then exit "$untracked_status"; fi; fi`,
+		`while IFS= read -r -d '' path; do GIT_INDEX_FILE="$tmp_index" git add -N -- "$path" || exit $?; done < "$untracked_paths"`,
+		"diff_status=0",
+		`GIT_INDEX_FILE="$tmp_index" git diff base` + diffArgs + ` -- . || diff_status=$?`,
+		`if [ "$diff_status" -gt 1 ]; then exit "$diff_status"; fi`,
+		"if [ " + exitOnDiffFlag + ` -eq 1 ]; then exit "$diff_status"; fi`,
 	}
 	return strings.Join(commands, "; ")
 }

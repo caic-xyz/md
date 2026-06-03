@@ -101,7 +101,15 @@ func TestDiff(t *testing.T) {
 		runTestGit(t, ctx, dir, "add", "staged.txt")
 		writeTestFile(t, filepath.Join(dir, "untracked.txt"), "new\n")
 
-		cmd := exec.CommandContext(ctx, "bash", "-c", gitDiffCommand(dir, nil, false)) //nolint:gosec // repo path is a test temp dir
+		diffCommand := gitDiffCommand(dir, nil, false)
+		if strings.Count(diffCommand, "git diff ") != 1 {
+			t.Fatalf("diff command runs multiple git diff invocations: %s", diffCommand)
+		}
+		if strings.Contains(diffCommand, "git diff --no-index") {
+			t.Fatalf("diff command uses separate no-index diff invocation: %s", diffCommand)
+		}
+
+		cmd := exec.CommandContext(ctx, "bash", "-c", diffCommand) //nolint:gosec // repo path is a test temp dir
 		cmd.Env = append(os.Environ(), "LANG=C")
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout = &stdout
