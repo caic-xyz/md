@@ -7,6 +7,7 @@
 package git
 
 import (
+	"errors"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -636,7 +637,7 @@ func TestIsReachable(t *testing.T) { //nolint:tparallel // subtests share git re
 	})
 }
 
-func TestCreateBranch(t *testing.T) { //nolint:tparallel // subtests share git repo
+func TestCreateBranch(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
 	dir := t.TempDir()
@@ -661,7 +662,7 @@ func TestCreateBranch(t *testing.T) { //nolint:tparallel // subtests share git r
 	g := &Checkout{Root: dir, Logger: testLogger(t)}
 
 	t.Run("DoesNotChangeWorkingTree", func(t *testing.T) { //nolint:paralleltest // subtests share git repo
-		if err := g.CreateBranch(ctx, "caic-1", "main"); err != nil {
+		if err := g.CreateBranch(ctx, "caic-1", "main", false); err != nil {
 			t.Fatal(err)
 		}
 		// Branch points at the same commit as main.
@@ -676,8 +677,63 @@ func TestCreateBranch(t *testing.T) { //nolint:tparallel // subtests share git r
 		}
 	})
 
+	t.Run("DoesNotTrackRemoteStartPoint", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		bare := filepath.Join(t.TempDir(), "remote.git")
+
+		run(t, "", "init", "--bare", "--initial-branch=main", bare)
+		run(t, "", "clone", bare, dir)
+		run(t, dir, "config", "user.name", "Test")
+		run(t, dir, "config", "user.email", "test@test")
+		run(t, dir, "config", "branch.autoSetupRebase", "always")
+		run(t, dir, "commit", "--allow-empty", "-m", "init")
+		run(t, dir, "push", "origin", "main")
+		run(t, dir, "fetch", "origin")
+
+		g := &Checkout{Root: dir, Logger: testLogger(t)}
+		if err := g.CreateBranch(ctx, "caic-1", "origin/main", false); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.CommandContext(ctx, "git", "config", "--get-regexp", `^branch\.caic-1\.`)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("branch config = %q, want none", strings.TrimSpace(string(out)))
+		}
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+			t.Fatalf("git config --get-regexp: %v\n%s", err, out)
+		}
+	})
+
+	t.Run("TracksRemoteStartPoint", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		bare := filepath.Join(t.TempDir(), "remote.git")
+
+		run(t, "", "init", "--bare", "--initial-branch=main", bare)
+		run(t, "", "clone", bare, dir)
+		run(t, dir, "config", "user.name", "Test")
+		run(t, dir, "config", "user.email", "test@test")
+		run(t, dir, "commit", "--allow-empty", "-m", "init")
+		run(t, dir, "push", "origin", "main")
+		run(t, dir, "fetch", "origin")
+
+		g := &Checkout{Root: dir, Logger: testLogger(t)}
+		if err := g.CreateBranch(ctx, "caic-1", "origin/main", true); err != nil {
+			t.Fatal(err)
+		}
+		if got := run(t, dir, "config", "--get", "branch.caic-1.remote"); got != "origin" {
+			t.Errorf("branch remote = %q, want origin", got)
+		}
+		if got := run(t, dir, "config", "--get", "branch.caic-1.merge"); got != "refs/heads/main" {
+			t.Errorf("branch merge = %q, want refs/heads/main", got)
+		}
+	})
+
 	t.Run("AlreadyExists", func(t *testing.T) { //nolint:paralleltest // subtests share git repo
-		if err := g.CreateBranch(ctx, "caic-1", "main"); err == nil {
+		if err := g.CreateBranch(ctx, "caic-1", "main", false); err == nil {
 			t.Error("expected error for duplicate branch")
 		}
 	})

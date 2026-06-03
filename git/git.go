@@ -221,13 +221,17 @@ func (c *Checkout) Fetch(ctx context.Context) error {
 
 // CreateBranch creates a new branch from startPoint without touching the
 // working tree or index.
-func (c *Checkout) CreateBranch(ctx context.Context, name, startPoint string) error {
-	c.Logger.Log(ctx, slog.LevelInfo, "git", "msg", "git create branch", "branch", name, "startPoint", startPoint)
-	cmd := c.cmd(ctx, []string{"branch", name, startPoint})
+func (c *Checkout) CreateBranch(ctx context.Context, name, startPoint string, track bool) error {
+	c.Logger.Log(ctx, slog.LevelInfo, "git", "msg", "git create branch", "branch", name, "startPoint", startPoint, "track", track)
+	trackArg := "--no-track"
+	if track {
+		trackArg = "--track"
+	}
+	cmd := c.cmd(ctx, []string{"branch", trackArg, name, startPoint})
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("git branch %s %s: %w: %s", name, startPoint, err, stderr.String())
+		return fmt.Errorf("git branch %s %s %s: %w: %s", trackArg, name, startPoint, err, stderr.String())
 	}
 	return nil
 }
