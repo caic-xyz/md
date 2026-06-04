@@ -28,7 +28,6 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -236,9 +235,19 @@ func (c *Client) Get(ctx context.Context, name string) (*Container, error) {
 // BuildImage builds the base Docker images locally: first md-root-local,
 // then md-user-local on top of it.
 func (c *Client) BuildImage(ctx context.Context, stdout, stderr io.Writer) (retErr error) {
+	return c.BuildImageForPlatform(ctx, stdout, stderr, "")
+}
+
+// BuildImageForPlatform builds the base Docker images locally for platform:
+// first md-root-local, then md-user-local on top of it.
+func (c *Client) BuildImageForPlatform(ctx context.Context, stdout, stderr io.Writer, platform string) (retErr error) {
 	c.buildMu.Lock()
 	defer c.buildMu.Unlock()
-	arch := runtime.GOARCH
+	p := Platform(platform).Resolve()
+	if err := p.Validate(); err != nil {
+		return err
+	}
+	platform = p.String()
 
 	if c.GithubToken == "" {
 		_, _ = fmt.Fprintln(stdout, "WARNING: GITHUB_TOKEN not found. Some tools (neovim, rust-analyzer, etc) might fail to install or hit rate limits.")
@@ -248,7 +257,7 @@ func (c *Client) BuildImage(ctx context.Context, stdout, stderr io.Writer) (retE
 	}
 
 	// Step 1: build the root image.
-	_, _ = fmt.Fprintln(stdout, "- Building root Docker image from rsc/root/Dockerfile ...")
+	_, _ = fmt.Fprintf(stdout, "- Building root Docker image for %s from rsc/root/Dockerfile ...\n", platform)
 	rootCtx, err := prepareRootBuildContext()
 	if err != nil {
 		return err
@@ -256,7 +265,7 @@ func (c *Client) BuildImage(ctx context.Context, stdout, stderr io.Writer) (retE
 	defer func() { retErr = errors.Join(retErr, os.RemoveAll(rootCtx)) }()
 	rootCmd := []string{
 		c.Runtime, "build",
-		"--platform", "linux/" + arch,
+		"--platform", platform,
 		"-f", filepath.Join(rootCtx, "Dockerfile"),
 		"-t", "md-root-local",
 	}
@@ -270,7 +279,7 @@ func (c *Client) BuildImage(ctx context.Context, stdout, stderr io.Writer) (retE
 	_, _ = fmt.Fprintln(stdout, "- Root image built as 'md-root-local'.")
 
 	// Step 2: build the user image on top of the root image.
-	_, _ = fmt.Fprintln(stdout, "- Building user Docker image from rsc/user/Dockerfile ...")
+	_, _ = fmt.Fprintf(stdout, "- Building user Docker image for %s from rsc/user/Dockerfile ...\n", platform)
 	userCtx, err := prepareBuildContext()
 	if err != nil {
 		return err
@@ -278,7 +287,7 @@ func (c *Client) BuildImage(ctx context.Context, stdout, stderr io.Writer) (retE
 	defer func() { retErr = errors.Join(retErr, os.RemoveAll(userCtx)) }()
 	userCmd := []string{
 		c.Runtime, "build",
-		"--platform", "linux/" + arch,
+		"--platform", platform,
 		"-f", filepath.Join(userCtx, "Dockerfile"),
 		"--build-arg", "BASE_ROOT_IMAGE=md-root-local",
 		"-t", "md-user-local",
@@ -306,6 +315,9 @@ type WarmupOpts struct {
 	// BaseImage is the full Docker image reference. When empty,
 	// DefaultBaseImage+":latest" is used.
 	BaseImage string
+	// Platform is the Linux container platform. Empty means use the host's
+	// native platform.
+	Platform string
 	// Caches lists host directories to COPY into the image at build time.
 	Caches []CacheMount
 	// Quiet suppresses informational output.
@@ -321,14 +333,19 @@ func (c *Client) Warmup(ctx context.Context, stdout, stderr io.Writer, opts *War
 	if baseImage == "" {
 		baseImage = DefaultBaseImage + ":latest"
 	}
-	imageName := userImageName(baseImage, activeCacheKey(opts.Caches, c.Home))
-	if !c.imageBuildNeeded(ctx, imageName, baseImage, opts.Caches) {
+	p := Platform(opts.Platform).Resolve()
+	if err := p.Validate(); err != nil {
+		return false, err
+	}
+	platform := p.String()
+	imageName := userImageName(baseImage, activeCacheKey(opts.Caches, c.Home), platform)
+	if !c.imageBuildNeeded(ctx, imageName, baseImage, platform, opts.Caches) {
 		if !opts.Quiet {
 			_, _ = fmt.Fprintf(stdout, "- Docker image %s is up to date, skipping build.\n", imageName)
 		}
 		return false, nil
 	}
-	if err := c.buildSpecializedImage(ctx, stdout, stderr, imageName, baseImage, opts.Caches, agentContainerPaths(), opts.Quiet); err != nil {
+	if err := c.buildSpecializedImage(ctx, stdout, stderr, imageName, baseImage, platform, opts.Caches, agentContainerPaths(), opts.Quiet); err != nil {
 		return false, err
 	}
 	c.invalidateImageBuildCache()
@@ -733,6 +750,34 @@ func (c *Client) getImageVersionLabel(ctx context.Context, imageName string) str
 	return out
 }
 
+func (c *Client) imageArchitecture(ctx context.Context, imageName string) (string, error) {
+	out, err := c.runCmd(ctx, "", []string{c.Runtime, "image", "inspect", imageName})
+	if err != nil {
+		return "", err
+	}
+	return parseImageArchitecture([]byte(out))
+}
+
+func parseImageArchitecture(out []byte) (string, error) {
+	var images []imageInspectJSON
+	if err := json.Unmarshal(out, &images); err != nil {
+		return "", fmt.Errorf("parsing image inspect output: %w", err)
+	}
+	if len(images) == 0 {
+		return "", nil
+	}
+	if images[0].OS != "" {
+		if images[0].OS != "linux" {
+			return "", nil
+		}
+		return images[0].Architecture, nil
+	}
+	if images[0].ImageManifestDescriptor.Platform.OS != "" && images[0].ImageManifestDescriptor.Platform.OS != "linux" {
+		return "", nil
+	}
+	return images[0].ImageManifestDescriptor.Platform.Architecture, nil
+}
+
 // getRemoteManifestDigest queries the registry for the per-architecture
 // manifest digest without downloading layers.
 //
@@ -793,6 +838,17 @@ type manifestIndex struct {
 	Manifests []manifestEntry `json:"manifests"`
 }
 
+type imageManifestDescriptor struct {
+	Platform manifestPlatform `json:"platform"`
+}
+
+type imageInspectJSON struct {
+	Architecture string `json:"Architecture"`
+	OS           string `json:"Os"`
+
+	ImageManifestDescriptor imageManifestDescriptor `json:"ImageManifestDescriptor"`
+}
+
 type activeCM struct {
 	cm       CacheMount
 	hostPath string
@@ -804,6 +860,7 @@ type activeCM struct {
 // back-to-back calls with the same inputs skip docker inspect exec calls.
 type imageBuildCacheEntry struct {
 	baseImage  string
+	platform   string
 	contextSHA string
 	cacheKey   string
 	needed     bool
@@ -841,8 +898,8 @@ func activeCacheKey(caches []CacheMount, home string) string {
 // active cache configuration. The name includes a content hash so that
 // different base images or cache sets produce distinct images without
 // clobbering each other.
-func userImageName(baseImage, cacheKey string) string {
-	h := sha256.Sum256([]byte(baseImage + "\x00" + cacheKey))
+func userImageName(baseImage, cacheKey, platform string) string {
+	h := sha256.Sum256([]byte(baseImage + "\x00" + cacheKey + "\x00" + platform))
 	return "md-specialized-" + hex.EncodeToString(h[:16])
 }
 
@@ -874,7 +931,12 @@ func cacheSpecKey(caches []CacheMount) string {
 // verifies the local copy matches the registry.
 // home is used to resolve "~/" in cache HostPaths so only caches that
 // resolveCaches would inject are compared.
-func (c *Client) imageBuildNeeded(ctx context.Context, imageName, baseImage string, caches []CacheMount) bool {
+func (c *Client) imageBuildNeeded(ctx context.Context, imageName, baseImage, platform string, caches []CacheMount) bool {
+	p := Platform(platform).Resolve()
+	if err := p.Validate(); err != nil {
+		return true
+	}
+	platform = p.String()
 	// Compute cheap inputs first so we can check the cache.
 	contextSHA, err := keysSHA(c.keysDir)
 	if err != nil {
@@ -884,18 +946,19 @@ func (c *Client) imageBuildNeeded(ctx context.Context, imageName, baseImage stri
 
 	// Check cached result from a previous call with the same inputs.
 	c.mu.Lock()
-	if e := c.imageBuildCache; e != nil && e.baseImage == baseImage && e.contextSHA == contextSHA && e.cacheKey == activeKey {
+	if e := c.imageBuildCache; e != nil && e.baseImage == baseImage && e.platform == platform && e.contextSHA == contextSHA && e.cacheKey == activeKey {
 		needed := e.needed
 		c.mu.Unlock()
 		return needed
 	}
 	c.mu.Unlock()
 
-	needed := c.imageBuildNeededSlow(ctx, imageName, baseImage, contextSHA, activeKey)
+	needed := c.imageBuildNeededSlow(ctx, imageName, baseImage, platform, contextSHA, activeKey)
 
 	c.mu.Lock()
 	c.imageBuildCache = &imageBuildCacheEntry{
 		baseImage:  baseImage,
+		platform:   platform,
 		contextSHA: contextSHA,
 		cacheKey:   activeKey,
 		needed:     needed,
@@ -913,7 +976,7 @@ func (c *Client) invalidateImageBuildCache() {
 }
 
 // imageBuildNeededSlow performs the full check with docker inspect calls.
-func (c *Client) imageBuildNeededSlow(ctx context.Context, imageName, baseImage, contextSHA, activeKey string) bool {
+func (c *Client) imageBuildNeededSlow(ctx context.Context, imageName, baseImage, platform, contextSHA, activeKey string) bool {
 	slog.DebugContext(ctx, "md", "msg", "checking if image build needed", "image", imageName, "base", baseImage)
 	// Quick check: does the specialized image have labels at all?
 	currentDigest, err := c.dockerInspectFormat(ctx, imageName, `{{index .Config.Labels "md.base_digest"}}`)
@@ -942,6 +1005,18 @@ func (c *Client) imageBuildNeededSlow(ctx context.Context, imageName, baseImage,
 		return true
 	}
 
+	currentArch, err := c.imageArchitecture(ctx, imageName)
+	if err == nil && currentArch != "" {
+		expectedArch, err := Platform(platform).Architecture()
+		if err != nil {
+			return true
+		}
+		if currentArch != expectedArch {
+			slog.DebugContext(ctx, "md", "msg", "build needed: image architecture changed", "current", currentArch, "expected", expectedArch)
+			return true
+		}
+	}
+
 	// For remote images, verify the local base is up to date with the registry.
 	// Compare the per-platform manifest digest stored during the last build
 	// against the current remote per-platform digest. This avoids the
@@ -954,7 +1029,11 @@ func (c *Client) imageBuildNeededSlow(ctx context.Context, imageName, baseImage,
 		slog.DebugContext(ctx, "md", "msg", "checking remote manifest digest", "base", baseImage)
 		storedManifest, err := c.dockerInspectFormat(ctx, imageName, `{{index .Config.Labels "md.base_manifest_digest"}}`)
 		if err == nil && storedManifest != "" && storedManifest != "<no value>" {
-			remoteDigest, err := c.cachedRemoteManifestDigest(ctx, baseImage, runtime.GOARCH)
+			arch, err := Platform(platform).Architecture()
+			if err != nil {
+				return true
+			}
+			remoteDigest, err := c.cachedRemoteManifestDigest(ctx, baseImage, arch)
 			if err == nil && remoteDigest != storedManifest {
 				slog.DebugContext(ctx, "md", "msg", "build needed: remote manifest changed", "stored", storedManifest, "remote", remoteDigest)
 				return true
@@ -1157,9 +1236,17 @@ func readOnlyCachePaths(active []activeCM) []string {
 // keysDir contains SSH host keys and authorized_keys. home resolves "~/" in
 // cache HostPaths. mountPaths lists container-side -v mount targets to
 // pre-create with user ownership.
-func (c *Client) buildSpecializedImage(ctx context.Context, stdout, stderr io.Writer, imageName, baseImage string, caches []CacheMount, mountPaths []string, quiet bool) error {
+func (c *Client) buildSpecializedImage(ctx context.Context, stdout, stderr io.Writer, imageName, baseImage, platform string, caches []CacheMount, mountPaths []string, quiet bool) error {
 	slog.DebugContext(ctx, "md", "msg", "building specialized image", "image", imageName, "base", baseImage)
-	arch := runtime.GOARCH
+	p := Platform(platform).Resolve()
+	if err := p.Validate(); err != nil {
+		return err
+	}
+	platform = p.String()
+	arch, err := Platform(platform).Architecture()
+	if err != nil {
+		return err
+	}
 	// References without an explicit registry are ambiguous: they may name a
 	// local image tag or a Docker Hub repository. Prefer an existing local
 	// image; otherwise pull from the default registry.
@@ -1178,11 +1265,11 @@ func (c *Client) buildSpecializedImage(ctx context.Context, stdout, stderr io.Wr
 			_, _ = fmt.Fprintf(stdout, "- Pulling base image %s ...\n", baseImage)
 		}
 		if quiet {
-			if _, err := c.runCmd(ctx, "", []string{c.Runtime, "pull", "--platform", "linux/" + arch, baseImage}); err != nil {
+			if _, err := c.runCmd(ctx, "", []string{c.Runtime, "pull", "--platform", platform, baseImage}); err != nil {
 				return cmdErrWithStderr("pulling base image", err)
 			}
 		} else {
-			if err := c.runCmdOut(ctx, "", []string{c.Runtime, "pull", "--platform", "linux/" + arch, baseImage}, stdout, stderr); err != nil {
+			if err := c.runCmdOut(ctx, "", []string{c.Runtime, "pull", "--platform", platform, baseImage}, stdout, stderr); err != nil {
 				return fmt.Errorf("pulling base image: %w", err)
 			}
 		}
@@ -1273,7 +1360,7 @@ func (c *Client) buildSpecializedImage(ctx context.Context, stdout, stderr io.Wr
 	// Build the image. --no-cache forces all layers to rebuild (prevents stale
 	// results). We omit --pull so BuildKit won't re-pull the base (we already
 	// pulled above).
-	buildCmd := []string{c.Runtime, "build", "--no-cache", "--platform", "linux/" + arch, "-t", imageName}
+	buildCmd := []string{c.Runtime, "build", "--no-cache", "--platform", platform, "-t", imageName}
 	for _, a := range active {
 		buildCmd = append(buildCmd, "--build-context", fmt.Sprintf("cache-%s=%s", a.cm.Name, filepath.ToSlash(a.hostPath)))
 	}

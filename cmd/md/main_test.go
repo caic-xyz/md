@@ -12,6 +12,31 @@ import (
 	"github.com/caic-xyz/md"
 )
 
+func TestContainerFlags(t *testing.T) {
+	t.Parallel()
+	t.Run("valid", func(t *testing.T) {
+		t.Parallel()
+		platform := "linux/amd64"
+		cf := &containerFlags{platform: &platform}
+		got, err := cf.containerPlatform()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "linux/amd64" {
+			t.Errorf("containerPlatform = %q, want linux/amd64", got)
+		}
+	})
+
+	t.Run("error", func(t *testing.T) {
+		t.Parallel()
+		platform := "x64"
+		cf := &containerFlags{platform: &platform}
+		if _, err := cf.containerPlatform(); err == nil {
+			t.Fatal("expected error for x64 alias")
+		}
+	})
+}
+
 func TestResolveCaches(t *testing.T) {
 	t.Parallel()
 	allNames := func(caches []md.CacheMount) []string {

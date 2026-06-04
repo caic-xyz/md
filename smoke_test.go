@@ -95,7 +95,7 @@ func prebuildSpecializedImage(t *testing.T, ctx context.Context, c *Client, base
 	}
 	ct.Name = "md-smoke-prebuild"
 	opts := &StartOpts{BaseImage: baseImage, Quiet: true}
-	if _, err := ct.ensureImage(ctx, io.Discard, io.Discard, baseImage, opts.Caches, true); err != nil {
+	if _, err := ct.ensureImage(ctx, io.Discard, io.Discard, baseImage, opts.Platform, opts.Caches, true); err != nil {
 		t.Fatalf("prebuild specialized image: %v", err)
 	}
 }
@@ -417,7 +417,7 @@ func TestSmoke(t *testing.T) {
 
 				t.Run("run", func(t *testing.T) {
 					var stdout, stderr strings.Builder
-					exitCode, err := ct.Run(t.Context(), &stdout, &stderr, baseImage, []string{
+					exitCode, err := ct.Run(t.Context(), &stdout, &stderr, baseImage, "", []string{
 						"bash", "-lc", "grep -qx 'SMOKE_RUN_VALUE=from-run' /home/user/.env && git rev-parse --abbrev-ref HEAD",
 					}, nil, []string{"SMOKE_RUN_VALUE=from-run"}, DefaultMaxCPUs(), nil)
 					if err != nil {

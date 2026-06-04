@@ -10,12 +10,60 @@ import (
 	"embed"
 	"fmt"
 	"runtime"
+	"strings"
 )
 
 // DefaultMaxCPUs returns max(2, NumCPU-2), a sensible CPU limit that
 // leaves headroom for the host while guaranteeing at least 2 cores.
 func DefaultMaxCPUs() int {
 	return max(2, runtime.NumCPU()-2)
+}
+
+// Platform is a Linux container platform.
+type Platform string
+
+const (
+	// PlatformLinuxAMD64 is the Linux amd64 container platform.
+	PlatformLinuxAMD64 Platform = "linux/amd64"
+	// PlatformLinuxARM64 is the Linux arm64 container platform.
+	PlatformLinuxARM64 Platform = "linux/arm64"
+)
+
+// DefaultPlatform returns the host's native Linux container platform.
+func DefaultPlatform() Platform {
+	return Platform("linux/" + runtime.GOARCH)
+}
+
+// Resolve returns the host's native Linux container platform when p is empty.
+func (p Platform) Resolve() Platform {
+	if p == "" {
+		return DefaultPlatform()
+	}
+	return p
+}
+
+// String returns p as a Docker platform string.
+func (p Platform) String() string {
+	return string(p)
+}
+
+// Validate returns an error unless p is a supported Linux container platform.
+func (p Platform) Validate() error {
+	switch p {
+	case PlatformLinuxAMD64, PlatformLinuxARM64:
+		return nil
+	default:
+		return fmt.Errorf("unsupported platform %q; use linux/amd64 or linux/arm64", p)
+	}
+}
+
+// Architecture returns the platform architecture component.
+func (p Platform) Architecture() (string, error) {
+	p = p.Resolve()
+	if err := p.Validate(); err != nil {
+		return "", err
+	}
+	return strings.TrimPrefix(p.String(), "linux/"), nil
 }
 
 //go:embed all:rsc

@@ -171,10 +171,11 @@ func newClient() (*md.Client, error) {
 
 // containerFlags holds the common flags for commands that target a container.
 type containerFlags struct {
-	image  *string
-	tag    *string
-	branch *string
-	repo   *string
+	image    *string
+	tag      *string
+	platform *string
+	branch   *string
+	repo     *string
 }
 
 // addContainerFlags registers -b/-branch and -repo on the given FlagSet.
@@ -184,12 +185,24 @@ func addContainerFlags(fs *flag.FlagSet, image bool) *containerFlags {
 	if image {
 		cf.image = fs.String("image", "", "Full base Docker image; md build-image generates md-user-local (default: "+md.DefaultBaseImage+":latest)")
 		cf.tag = fs.String("tag", "", "Tag for the default base image ("+md.DefaultBaseImage+":<tag>)")
+		cf.platform = fs.String("platform", "", "Container platform: linux/amd64 or linux/arm64 (default: "+md.DefaultPlatform().String()+")")
 	}
 	cf.branch = fs.String("branch", "", "Branch to use (default: current branch)")
 	fs.StringVar(cf.branch, "b", "", "Branch to use (default: current branch)")
 	cf.repo = fs.String("repo", "", "Path to git repository (default: current directory)")
 	fs.StringVar(cf.repo, "r", "", "Path to git repository (default: current directory)")
 	return cf
+}
+
+func (cf *containerFlags) containerPlatform() (string, error) {
+	if cf.platform == nil {
+		return "", nil
+	}
+	platform := md.Platform(*cf.platform).Resolve()
+	if err := platform.Validate(); err != nil {
+		return "", err
+	}
+	return platform.String(), nil
 }
 
 // baseImage returns the resolved base image from --image and --tag flags.
@@ -408,6 +421,10 @@ func cmdStart(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	platform, err := cf.containerPlatform()
+	if err != nil {
+		return err
+	}
 	caches, err := resolveCaches(cacheSpecs.values, noCacheSpecs.values, *noCaches)
 	if err != nil {
 		return err
@@ -422,6 +439,7 @@ func cmdStart(ctx context.Context, args []string) error {
 	}
 	opts := md.StartOpts{
 		BaseImage:        baseImage,
+		Platform:         platform,
 		Display:          *display,
 		Tailscale:        *tailscale,
 		USB:              *usb,
@@ -543,6 +561,10 @@ func cmdRun(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	platform, err := cf.containerPlatform()
+	if err != nil {
+		return err
+	}
 	caches, err := resolveCaches(cacheSpecs.values, noCacheSpecs.values, *noCaches)
 	if err != nil {
 		return err
@@ -555,7 +577,7 @@ func cmdRun(ctx context.Context, args []string) error {
 	if githubToken != "" {
 		extraEnv = append(extraEnv, "GITHUB_TOKEN="+githubToken)
 	}
-	exitCode, err := ct.Run(ctx, os.Stdout, os.Stderr, baseImage, extra, caches, extraEnv, *cpus, dockerFlags.values)
+	exitCode, err := ct.Run(ctx, os.Stdout, os.Stderr, baseImage, platform, extra, caches, extraEnv, *cpus, dockerFlags.values)
 	if err != nil {
 		return err
 	}
@@ -1139,6 +1161,7 @@ func cmdSudoPassword(ctx context.Context, args []string) error {
 func cmdBuildImage(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("build-image", flag.ExitOnError)
 	verbose := addVerboseFlag(fs)
+	platformFlag := fs.String("platform", "", "Image platform: linux/amd64 or linux/arm64 (default: "+md.DefaultPlatform().String()+")")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -1151,7 +1174,7 @@ func cmdBuildImage(ctx context.Context, args []string) error {
 		return err
 	}
 	ensureGithubToken(ctx, c)
-	return c.BuildImage(ctx, os.Stdout, os.Stderr)
+	return c.BuildImageForPlatform(ctx, os.Stdout, os.Stderr, *platformFlag)
 }
 
 func cmdPrune(ctx context.Context, args []string) error {

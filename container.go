@@ -67,6 +67,9 @@ type StartOpts struct {
 	// "ghcr.io/caic-xyz/md-user:v0.7.1" or "myregistry/custom:tag"). When empty,
 	// DefaultBaseImage is used.
 	BaseImage string
+	// Platform is the Linux container platform, e.g. "linux/amd64" or
+	// "linux/arm64". Empty means use the host's native platform.
+	Platform string
 	// Display enables X11/VNC virtual display (port 5901).
 	Display bool
 	// Tailscale enables Tailscale networking inside the container.
@@ -360,7 +363,7 @@ func (c *Container) Launch(ctx context.Context, stdout, stderr io.Writer, opts *
 	if baseImage == "" {
 		baseImage = DefaultBaseImage + ":latest"
 	}
-	imageName, err := c.ensureImage(ctx, stdout, stderr, baseImage, opts.Caches, opts.Quiet)
+	imageName, err := c.ensureImage(ctx, stdout, stderr, baseImage, opts.Platform, opts.Caches, opts.Quiet)
 	if err != nil {
 		return err
 	}
@@ -392,7 +395,7 @@ func (c *Container) Connect(ctx context.Context, stdout, stderr io.Writer, opts 
 // used. caches lists host directories to COPY into the image (same semantics
 // as StartOpts.Caches); nil means no caches. extraEnv holds KEY=VALUE pairs
 // injected into the container's ~/.env (see StartOpts.ExtraEnv).
-func (c *Container) Run(ctx context.Context, stdout, stderr io.Writer, baseImage string, command []string, caches []CacheMount, extraEnv []string, maxCPUs int, extraRunArgs []string) (_ int, retErr error) {
+func (c *Container) Run(ctx context.Context, stdout, stderr io.Writer, baseImage, platform string, command []string, caches []CacheMount, extraEnv []string, maxCPUs int, extraRunArgs []string) (_ int, retErr error) {
 	var buf [4]byte
 	_, _ = rand.Read(buf[:])
 	var tmpRepos []Repo
@@ -412,11 +415,11 @@ func (c *Container) Run(ctx context.Context, stdout, stderr io.Writer, baseImage
 	if baseImage == "" {
 		baseImage = DefaultBaseImage + ":latest"
 	}
-	imageName, err := c.ensureImage(ctx, stdout, stderr, baseImage, caches, true)
+	imageName, err := c.ensureImage(ctx, stdout, stderr, baseImage, platform, caches, true)
 	if err != nil {
 		return 1, err
 	}
-	opts := StartOpts{Quiet: true, ExtraEnv: extraEnv, AgentPaths: slices.Collect(maps.Values(HarnessMounts)), MaxCPUs: maxCPUs, ExtraRunArgs: extraRunArgs}
+	opts := StartOpts{Platform: platform, Quiet: true, ExtraEnv: extraEnv, AgentPaths: slices.Collect(maps.Values(HarnessMounts)), MaxCPUs: maxCPUs, ExtraRunArgs: extraRunArgs}
 	if err := tmp.prepare(opts.AgentPaths); err != nil {
 		return 1, err
 	}
@@ -1450,17 +1453,22 @@ func (c *Container) checkContainerState(ctx context.Context) error {
 // ensureImage checks whether the user image needs rebuilding and, if so,
 // builds it. Returns the computed image name (keyed by base image and active
 // caches). The build is serialized via Client.buildMu.
-func (c *Container) ensureImage(ctx context.Context, stdout, stderr io.Writer, baseImage string, caches []CacheMount, quiet bool) (string, error) {
+func (c *Container) ensureImage(ctx context.Context, stdout, stderr io.Writer, baseImage, platform string, caches []CacheMount, quiet bool) (string, error) {
 	c.buildMu.Lock()
 	defer c.buildMu.Unlock()
-	imageName := userImageName(baseImage, activeCacheKey(caches, c.Home))
-	if !c.imageBuildNeeded(ctx, imageName, baseImage, caches) {
+	p := Platform(platform).Resolve()
+	if err := p.Validate(); err != nil {
+		return "", err
+	}
+	platform = p.String()
+	imageName := userImageName(baseImage, activeCacheKey(caches, c.Home), platform)
+	if !c.imageBuildNeeded(ctx, imageName, baseImage, platform, caches) {
 		if !quiet {
 			_, _ = fmt.Fprintf(stdout, "- Docker image %s is up to date, skipping build.\n", imageName)
 		}
 		return imageName, nil
 	}
-	if err := c.buildSpecializedImage(ctx, stdout, stderr, imageName, baseImage, caches, agentContainerPaths(), quiet); err != nil {
+	if err := c.buildSpecializedImage(ctx, stdout, stderr, imageName, baseImage, platform, caches, agentContainerPaths(), quiet); err != nil {
 		return "", err
 	}
 	c.invalidateImageBuildCache()
@@ -1634,8 +1642,14 @@ func (c *Container) launchContainer(ctx context.Context, stdout, stderr io.Write
 	if len(c.Repos) > 1000 {
 		return fmt.Errorf("too many repositories: %d (max 1000)", len(c.Repos))
 	}
+	p := Platform(opts.Platform).Resolve()
+	if err := p.Validate(); err != nil {
+		return err
+	}
+	platform := p.String()
 	dockerArgs := []string{
 		c.Runtime, "run", "-d",
+		"--platform", platform,
 		"--name", c.Name,
 		"--hostname", c.Name,
 		"-p", "127.0.0.1::22",
