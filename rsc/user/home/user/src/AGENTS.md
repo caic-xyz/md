@@ -21,7 +21,7 @@ Notable executables available in the container:
 - Languages: go, python3, java, R, rust (cargo, rustc)
 - Languages (web): node (v24), npm, npx, pnpm, bun, typescript, bun, eslint, tsx
 - AI Tools: claude, gemini, codex, kilo, qwen-code, kimi, opencode, amp, pi, agent-browser
-- Containers: podman (rootless, requires -sudo for nested containers)
+- Containers: podman (rootless, vfs storage, requires -sudo for nested containers)
 - Virtualization: qemu-kvm, libvirt-clients
 - Media: ffmpeg, imagemagick
 - Android: android-sdk, gradle, adb, sdkmanager
