@@ -33,7 +33,7 @@ func newSmokeClient(t *testing.T, rt string) *Client {
 		t.Fatalf("create containers config dir: %v", err)
 	}
 	storageConf := "[storage]\n"
-	storageConf += "driver = \"vfs\"\n"
+	storageConf += "driver = \"overlay\"\n"
 	storageConf += "graphroot = \"" + filepath.ToSlash(tmpHome) + "/.local/share/containers/storage\"\n"
 	storageConf += "runroot = \"" + filepath.ToSlash(tmp) + "/runroot\"\n"
 	if err := os.WriteFile(filepath.Join(cfgDir, "storage.conf"), []byte(storageConf), 0o644); err != nil {
@@ -50,7 +50,7 @@ func newSmokeClient(t *testing.T, rt string) *Client {
 		"XDG_CONFIG_HOME=" + filepath.Join(tmpHome, ".config"),
 	}
 
-	// podman system reset cleans up storage before t.TempDir removal,
+	// podman system reset cleans up overlay storage before t.TempDir removal,
 	// avoiding permission errors.
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 30*time.Second)
