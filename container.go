@@ -1460,6 +1460,9 @@ func (c *Container) ensureImage(ctx context.Context, stdout, stderr io.Writer, b
 	if err := p.Validate(); err != nil {
 		return "", err
 	}
+	if err := validateCacheMounts(caches); err != nil {
+		return "", err
+	}
 	platform = p.String()
 	imageName := userImageName(baseImage, activeCacheKey(caches, c.Home), platform)
 	if !c.imageBuildNeeded(ctx, imageName, baseImage, platform, caches) {

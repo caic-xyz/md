@@ -1242,6 +1242,9 @@ func (c *Client) buildSpecializedImage(ctx context.Context, stdout, stderr io.Wr
 	if err := p.Validate(); err != nil {
 		return err
 	}
+	if err := validateCacheMounts(caches); err != nil {
+		return err
+	}
 	platform = p.String()
 	arch, err := Platform(platform).Architecture()
 	if err != nil {
@@ -1567,7 +1570,8 @@ var HarnessMounts = map[Harness]AgentPaths{
 // image. Well-known caches are defined in [WellKnownCaches]; custom mounts can
 // be constructed directly.
 type CacheMount struct {
-	// Name is a human-readable identifier shown in progress output (e.g. "go-mod").
+	// Name identifies the cache in progress output and Docker build contexts.
+	// It must match [a-z0-9][a-z0-9-]*, e.g. "go-mod".
 	Name string
 	// Description is a short human-readable label for the cache group (e.g.
 	// "Go module cache"). Displayed in settings UI.
@@ -1585,6 +1589,18 @@ type CacheMount struct {
 	// files (debug.keystore, adbkey) are needed but subdirectories (avd/,
 	// cache/) are large and unwanted.
 	Shallow bool
+}
+
+// validateCacheMounts rejects names that cannot be used as Docker build
+// context and stage identifiers. Without this, invalid user-provided names fail
+// later as opaque Docker "invalid reference format" errors.
+func validateCacheMounts(caches []CacheMount) error {
+	for _, c := range caches {
+		if !reCacheMountName.MatchString(c.Name) {
+			return fmt.Errorf("cache mount name %q is invalid; use [a-z0-9][a-z0-9-]*", c.Name)
+		}
+	}
+	return nil
 }
 
 // WellKnownCaches is the set of predefined build-tool caches, keyed by short
@@ -1634,6 +1650,7 @@ var WellKnownCaches = map[string][]CacheMount{
 //
 
 var (
+	reCacheMountName = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
 	reInvalid        = regexp.MustCompile(`[/@#:~]+`)
 	reStripRemaining = regexp.MustCompile(`[^a-zA-Z0-9_.-]`)
 	reCollapse       = regexp.MustCompile(`[-_.]{2,}`)

@@ -127,7 +127,18 @@ func TestResolveCaches(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(got) != 1 || got[0].HostPath != "/host/path" || got[0].ContainerPath != "/container/path" {
+		if len(got) != 1 || got[0].Name != "path" || got[0].HostPath != "/host/path" || got[0].ContainerPath != "/container/path" {
+			t.Errorf("unexpected result: %+v", got)
+		}
+	})
+
+	t.Run("custom_cache_name_sanitized", func(t *testing.T) {
+		t.Parallel()
+		got, err := resolveCaches([]string{"/host/Foo.Bar_cache:/container/path"}, nil, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 1 || got[0].Name != "foo-bar-cache" {
 			t.Errorf("unexpected result: %+v", got)
 		}
 	})

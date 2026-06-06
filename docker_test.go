@@ -396,6 +396,32 @@ func TestActiveCacheKey(t *testing.T) {
 	})
 }
 
+func TestValidateCacheMounts(t *testing.T) {
+	t.Parallel()
+	t.Run("valid", func(t *testing.T) {
+		t.Parallel()
+		if err := validateCacheMounts([]CacheMount{
+			{Name: "go-mod"},
+			{Name: "custom-mount-0"},
+			{Name: "a1"},
+		}); err != nil {
+			t.Fatalf("validateCacheMounts: %v", err)
+		}
+	})
+	t.Run("error", func(t *testing.T) {
+		t.Parallel()
+		for _, name := range []string{"", "Custom", "custom_mount", "custom.mount", "custom:~/.cache/caic", "-custom"} {
+			err := validateCacheMounts([]CacheMount{{Name: name}})
+			if err == nil {
+				t.Fatalf("validateCacheMounts(%q): want error", name)
+			}
+			if !strings.Contains(err.Error(), "cache mount name") {
+				t.Errorf("error = %q, want cache mount name detail", err.Error())
+			}
+		}
+	})
+}
+
 func TestResolveCaches(t *testing.T) {
 	t.Parallel()
 	t.Run("existing_cache_resolved", func(t *testing.T) {

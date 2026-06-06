@@ -1374,7 +1374,26 @@ func customCacheName(hostPath string) string {
 	if hostPath == "~" || hostPath == "~/" || hostPath == `~\` {
 		return "home"
 	}
-	return filepath.Base(hostPath)
+	base := strings.ToLower(filepath.Base(hostPath))
+	var b strings.Builder
+	lastHyphen := false
+	for _, r := range base {
+		valid := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')
+		if valid {
+			b.WriteRune(r)
+			lastHyphen = false
+			continue
+		}
+		if !lastHyphen {
+			b.WriteByte('-')
+			lastHyphen = true
+		}
+	}
+	name := strings.Trim(b.String(), "-")
+	if name == "" {
+		return "cache"
+	}
+	return name
 }
 
 // stringSlice implements flag.Value for repeatable string flags.
