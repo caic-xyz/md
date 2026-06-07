@@ -419,7 +419,7 @@ func TestSmoke(t *testing.T) {
 					var stdout, stderr strings.Builder
 					exitCode, err := ct.Run(t.Context(), &stdout, &stderr, baseImage, "", []string{
 						"bash", "-lc", "grep -qx 'SMOKE_RUN_VALUE=from-run' /home/user/.env && git rev-parse --abbrev-ref HEAD",
-					}, nil, []string{"SMOKE_RUN_VALUE=from-run"}, DefaultMaxCPUs(), nil)
+					}, nil, nil, []string{"SMOKE_RUN_VALUE=from-run"}, DefaultMaxCPUs(), nil)
 					if err != nil {
 						t.Fatalf("Run: %v", err)
 					}

@@ -397,6 +397,8 @@ func cmdStart(ctx context.Context, args []string) error {
 	fs.Var(labels, "l", "Set Docker container label (key=value); can be repeated")
 	cacheSpecs := &stringSlice{}
 	fs.Var(cacheSpecs, "cache", "Add a cache: well-known name or host:container[:ro]; may be repeated")
+	mountSpecs := &stringSlice{}
+	fs.Var(mountSpecs, "mount", "Bind-mount host:container[:ro]; may be repeated")
 	noCacheSpecs := &stringSlice{}
 	fs.Var(noCacheSpecs, "no-cache", "Exclude a default well-known cache by name; may be repeated")
 	noCaches := fs.Bool("no-caches", false, "Disable all default caches")
@@ -429,6 +431,10 @@ func cmdStart(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	mounts, err := resolveMounts(mountSpecs.values)
+	if err != nil {
+		return err
+	}
 	githubToken, err := resolveGithubToken(ctx, ct.Client, *github)
 	if err != nil {
 		return err
@@ -446,6 +452,7 @@ func cmdStart(ctx context.Context, args []string) error {
 		Sudo:             *sudoFlag,
 		TailscaleAuthKey: os.Getenv("TAILSCALE_AUTHKEY"),
 		Caches:           caches,
+		Mounts:           mounts,
 		Labels:           labels.values,
 		Quiet:            *quiet,
 		AgentPaths:       slices.Collect(maps.Values(md.HarnessMounts)),
@@ -537,6 +544,8 @@ func cmdRun(ctx context.Context, args []string) error {
 	cf := addContainerFlags(fs, true)
 	cacheSpecs := &stringSlice{}
 	fs.Var(cacheSpecs, "cache", "Add a cache: well-known name or host:container[:ro]; may be repeated")
+	mountSpecs := &stringSlice{}
+	fs.Var(mountSpecs, "mount", "Bind-mount host:container[:ro]; may be repeated")
 	noCacheSpecs := &stringSlice{}
 	fs.Var(noCacheSpecs, "no-cache", "Exclude a default well-known cache by name; may be repeated")
 	noCaches := fs.Bool("no-caches", false, "Disable all default caches")
@@ -569,6 +578,10 @@ func cmdRun(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	mounts, err := resolveMounts(mountSpecs.values)
+	if err != nil {
+		return err
+	}
 	githubToken, err := resolveGithubToken(ctx, ct.Client, *github)
 	if err != nil {
 		return err
@@ -577,7 +590,7 @@ func cmdRun(ctx context.Context, args []string) error {
 	if githubToken != "" {
 		extraEnv = append(extraEnv, "GITHUB_TOKEN="+githubToken)
 	}
-	exitCode, err := ct.Run(ctx, os.Stdout, os.Stderr, baseImage, platform, extra, caches, extraEnv, *cpus, dockerFlags.values)
+	exitCode, err := ct.Run(ctx, os.Stdout, os.Stderr, baseImage, platform, extra, caches, mounts, extraEnv, *cpus, dockerFlags.values)
 	if err != nil {
 		return err
 	}
@@ -1366,6 +1379,31 @@ func resolveCaches(customSpecs, excluded []string, noAll bool) ([]md.CacheMount,
 			cm.ReadOnly = true
 		}
 		result = append(result, cm)
+	}
+	return result, nil
+}
+
+// resolveMounts builds the list of runtime bind mounts.
+//
+// specs accepts "host:container[:ro]" paths.
+func resolveMounts(specs []string) ([]md.Mount, error) {
+	result := make([]md.Mount, 0, len(specs))
+	for _, spec := range specs {
+		parts := strings.SplitN(spec, ":", 3)
+		if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
+			return nil, fmt.Errorf("invalid --mount %q: use host:container[:ro]", spec)
+		}
+		m := md.Mount{
+			HostPath:      parts[0],
+			ContainerPath: md.ResolveContainerPath(parts[1]),
+		}
+		if len(parts) == 3 {
+			if parts[2] != "ro" {
+				return nil, fmt.Errorf("invalid --mount %q: only ':ro' modifier is supported", spec)
+			}
+			m.ReadOnly = true
+		}
+		result = append(result, m)
 	}
 	return result, nil
 }

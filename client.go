@@ -1566,8 +1566,46 @@ var HarnessMounts = map[Harness]AgentPaths{
 	HarnessQwen:     {Description: "Qwen Code", HomePaths: []string{".qwen"}},
 }
 
+// Mount defines a host directory to bind-mount into the running container.
+type Mount struct {
+	// HostPath is the absolute path on the host. "~" and "~/" resolve to the
+	// host user's home directory.
+	HostPath string
+	// ContainerPath is the absolute path inside the container. "~" and "~/"
+	// resolve to the container user's home directory via [ResolveContainerPath].
+	ContainerPath string
+	// ReadOnly mounts the host path read-only.
+	ReadOnly bool
+}
+
+func (m *Mount) dockerArg(home string) (string, error) {
+	hostPath := resolveHostPath(m.HostPath, home)
+	if hostPath == "" {
+		return "", errors.New("mount host path is empty")
+	}
+	info, err := os.Stat(hostPath)
+	if err != nil {
+		return "", fmt.Errorf("mount host path %q: %w", hostPath, err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("mount host path %q is not a directory", hostPath)
+	}
+	containerPath := ResolveContainerPath(m.ContainerPath)
+	if containerPath == "" {
+		return "", errors.New("mount container path is empty")
+	}
+	if !path.IsAbs(containerPath) {
+		return "", fmt.Errorf("mount container path %q is not absolute", containerPath)
+	}
+	arg := filepath.ToSlash(hostPath) + ":" + containerPath
+	if m.ReadOnly {
+		arg += ":ro"
+	}
+	return arg, nil
+}
+
 // CacheMount defines a host directory to copy into the specialized container
-// image. Well-known caches are defined in [WellKnownCaches]; custom mounts can
+// image. Well-known caches are defined in [WellKnownCaches]; custom caches can
 // be constructed directly.
 type CacheMount struct {
 	// Name identifies the cache in progress output and Docker build contexts.

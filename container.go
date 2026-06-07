@@ -95,6 +95,9 @@ type StartOpts struct {
 	// Use well-known names from [WellKnownCaches] or construct [CacheMount]
 	// values directly. Paths that do not exist on the host are silently skipped.
 	Caches []CacheMount
+	// Mounts lists host directories to bind-mount into the running container.
+	// Missing host directories are rejected before the runtime is invoked.
+	Mounts []Mount
 	// Labels are additional Docker labels (key=value) applied to the container.
 	Labels []string
 	// Quiet suppresses informational output during startup.
@@ -393,9 +396,10 @@ func (c *Container) Connect(ctx context.Context, stdout, stderr io.Writer, opts 
 // Run starts a temporary container, runs a command, then cleans up.
 // baseImage is the full Docker image reference; if empty, DefaultBaseImage is
 // used. caches lists host directories to COPY into the image (same semantics
-// as StartOpts.Caches); nil means no caches. extraEnv holds KEY=VALUE pairs
+// as StartOpts.Caches); nil means no caches. mounts lists host directories to
+// bind-mount into the running container. extraEnv holds KEY=VALUE pairs
 // injected into the container's ~/.env (see StartOpts.ExtraEnv).
-func (c *Container) Run(ctx context.Context, stdout, stderr io.Writer, baseImage, platform string, command []string, caches []CacheMount, extraEnv []string, maxCPUs int, extraRunArgs []string) (_ int, retErr error) {
+func (c *Container) Run(ctx context.Context, stdout, stderr io.Writer, baseImage, platform string, command []string, caches []CacheMount, mounts []Mount, extraEnv []string, maxCPUs int, extraRunArgs []string) (_ int, retErr error) {
 	var buf [4]byte
 	_, _ = rand.Read(buf[:])
 	var tmpRepos []Repo
@@ -419,7 +423,7 @@ func (c *Container) Run(ctx context.Context, stdout, stderr io.Writer, baseImage
 	if err != nil {
 		return 1, err
 	}
-	opts := StartOpts{Platform: platform, Quiet: true, ExtraEnv: extraEnv, AgentPaths: slices.Collect(maps.Values(HarnessMounts)), MaxCPUs: maxCPUs, ExtraRunArgs: extraRunArgs}
+	opts := StartOpts{Platform: platform, Quiet: true, Mounts: mounts, ExtraEnv: extraEnv, AgentPaths: slices.Collect(maps.Values(HarnessMounts)), MaxCPUs: maxCPUs, ExtraRunArgs: extraRunArgs}
 	if err := tmp.prepare(opts.AgentPaths); err != nil {
 		return 1, err
 	}
@@ -847,6 +851,9 @@ type ForkOpts struct {
 	// ExtraEnv holds additional KEY=VALUE pairs to inject into the container's
 	// ~/.env at runtime.
 	ExtraEnv []string
+	// Mounts lists host directories to bind-mount into the running container.
+	// Missing host directories are rejected before the runtime is invoked.
+	Mounts []Mount
 	// MaxCPUs limits the number of CPU cores the forked container may use.
 	// Passed as --cpus to docker/podman. Zero means no limit.
 	// Use [DefaultMaxCPUs] for a sensible default.
@@ -977,6 +984,7 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 		Labels:       opts.Labels,
 		AgentPaths:   opts.AgentPaths,
 		ExtraEnv:     opts.ExtraEnv,
+		Mounts:       opts.Mounts,
 		Display:      c.Display || opts.Display,
 		Tailscale:    c.Tailscale || opts.Tailscale,
 		USB:          c.USB || opts.USB,
@@ -1783,6 +1791,13 @@ func (c *Container) launchContainer(ctx context.Context, stdout, stderr io.Write
 	}
 	for _, p := range combined.LocalStatePaths {
 		dockerArgs = append(dockerArgs, "-v", filepath.ToSlash(filepath.Join(xdgState, p))+":/home/user/.local/state/"+p)
+	}
+	for _, m := range opts.Mounts {
+		arg, err := m.dockerArg(home)
+		if err != nil {
+			return err
+		}
+		dockerArgs = append(dockerArgs, "-v", arg)
 	}
 
 	// Set md metadata labels.

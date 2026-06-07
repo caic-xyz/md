@@ -561,6 +561,56 @@ func TestMergePaths(t *testing.T) {
 	})
 }
 
+func TestMount(t *testing.T) {
+	t.Parallel()
+	t.Run("dockerArg", func(t *testing.T) {
+		t.Parallel()
+		home := t.TempDir()
+		hostDir := filepath.Join(home, "data")
+		if err := os.MkdirAll(hostDir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		got, err := (Mount{
+			HostPath:      "~/data",
+			ContainerPath: "~/data",
+			ReadOnly:      true,
+		}).dockerArg(home)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := filepath.ToSlash(hostDir) + ":/home/user/data:ro"
+		if got != want {
+			t.Errorf("dockerArg = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("error", func(t *testing.T) {
+		t.Parallel()
+		home := t.TempDir()
+		filePath := filepath.Join(home, "file")
+		if err := os.WriteFile(filePath, []byte("data"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		tests := []struct {
+			name  string
+			mount Mount
+		}{
+			{name: "missing_host", mount: Mount{HostPath: filepath.Join(home, "missing"), ContainerPath: "/data"}},
+			{name: "file_host", mount: Mount{HostPath: filePath, ContainerPath: "/data"}},
+			{name: "empty_container", mount: Mount{HostPath: home}},
+			{name: "relative_container", mount: Mount{HostPath: home, ContainerPath: "data"}},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				t.Parallel()
+				if _, err := tt.mount.dockerArg(home); err == nil {
+					t.Fatal("expected error")
+				}
+			})
+		}
+	})
+}
+
 func TestFillFromInspect(t *testing.T) {
 	t.Parallel()
 	// Both Docker and Podman inspect return a JSON array.

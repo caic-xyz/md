@@ -230,6 +230,51 @@ func TestResolveCaches(t *testing.T) {
 	})
 }
 
+func TestResolveMounts(t *testing.T) {
+	t.Parallel()
+	t.Run("valid", func(t *testing.T) {
+		t.Parallel()
+		got, err := resolveMounts([]string{"/host/path:/container/path"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 1 || got[0].HostPath != "/host/path" || got[0].ContainerPath != "/container/path" || got[0].ReadOnly {
+			t.Errorf("unexpected result: %+v", got)
+		}
+	})
+
+	t.Run("readonly", func(t *testing.T) {
+		t.Parallel()
+		got, err := resolveMounts([]string{"/host/path:/container/path:ro"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 1 || !got[0].ReadOnly {
+			t.Errorf("unexpected result: %+v", got)
+		}
+	})
+
+	t.Run("container_tilde", func(t *testing.T) {
+		t.Parallel()
+		got, err := resolveMounts([]string{"~/host:~/container"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 1 || got[0].HostPath != "~/host" || got[0].ContainerPath != "/home/user/container" {
+			t.Errorf("unexpected result: %+v", got)
+		}
+	})
+
+	t.Run("error", func(t *testing.T) {
+		t.Parallel()
+		for _, spec := range []string{"notapath", "/host:/container:rw"} {
+			if _, err := resolveMounts([]string{spec}); err == nil {
+				t.Errorf("resolveMounts(%q): expected error", spec)
+			}
+		}
+	})
+}
+
 func TestShellSplit(t *testing.T) {
 	t.Parallel()
 	t.Run("simple", func(t *testing.T) {
