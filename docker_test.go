@@ -53,7 +53,7 @@ func TestPlatform(t *testing.T) {
 		t.Parallel()
 		t.Run("valid", func(t *testing.T) {
 			t.Parallel()
-			for _, platform := range []Platform{PlatformLinuxAMD64, PlatformLinuxARM64} {
+			for _, platform := range []Platform{PlatformDefault, PlatformLinuxAMD64, PlatformLinuxARM64} {
 				if err := platform.Validate(); err != nil {
 					t.Errorf("%q.Validate(): %v", platform, err)
 				}
@@ -62,7 +62,7 @@ func TestPlatform(t *testing.T) {
 
 		t.Run("error", func(t *testing.T) {
 			t.Parallel()
-			for _, platform := range []Platform{"", "amd64", "x64", "x86_64", "arm64", "aarch64", "linux/arm64/v8", "linux/386"} {
+			for _, platform := range []Platform{"amd64", "x64", "x86_64", "arm64", "aarch64", "linux/arm64/v8", "linux/386"} {
 				if err := platform.Validate(); err == nil {
 					t.Errorf("%q.Validate(): expected unsupported platform error", platform)
 				}

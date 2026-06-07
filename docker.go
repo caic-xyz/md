@@ -49,10 +49,11 @@ func (p Platform) String() string {
 	return string(p)
 }
 
-// Validate returns an error unless p is a supported Linux container platform.
+// Validate returns an error unless p is a supported Linux container platform or
+// PlatformDefault.
 func (p Platform) Validate() error {
 	switch p {
-	case PlatformLinuxAMD64, PlatformLinuxARM64:
+	case PlatformDefault, PlatformLinuxAMD64, PlatformLinuxARM64:
 		return nil
 	default:
 		return fmt.Errorf("unsupported platform %q; use linux/amd64 or linux/arm64", p)
