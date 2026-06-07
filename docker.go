@@ -23,10 +23,12 @@ func DefaultMaxCPUs() int {
 type Platform string
 
 const (
-	// PlatformLinuxAMD64 is the Linux amd64 container platform.
-	PlatformLinuxAMD64 Platform = "linux/amd64"
+	// PlatformDefault uses the host's native Linux container platform.
+	PlatformDefault Platform = ""
 	// PlatformLinuxARM64 is the Linux arm64 container platform.
 	PlatformLinuxARM64 Platform = "linux/arm64"
+	// PlatformLinuxAMD64 is the Linux amd64 container platform.
+	PlatformLinuxAMD64 Platform = "linux/amd64"
 )
 
 // DefaultPlatform returns the host's native Linux container platform.
@@ -36,7 +38,7 @@ func DefaultPlatform() Platform {
 
 // Resolve returns the host's native Linux container platform when p is empty.
 func (p Platform) Resolve() Platform {
-	if p == "" {
+	if p == PlatformDefault {
 		return DefaultPlatform()
 	}
 	return p

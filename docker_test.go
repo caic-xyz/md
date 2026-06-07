@@ -41,8 +41,8 @@ func TestPlatform(t *testing.T) {
 	t.Parallel()
 	t.Run("Resolve", func(t *testing.T) {
 		t.Parallel()
-		if got := Platform("").Resolve(); got != DefaultPlatform() {
-			t.Errorf("Platform(\"\").Resolve() = %q, want %q", got, DefaultPlatform())
+		if got := PlatformDefault.Resolve(); got != DefaultPlatform() {
+			t.Errorf("PlatformDefault.Resolve() = %q, want %q", got, DefaultPlatform())
 		}
 		if got := PlatformLinuxAMD64.Resolve(); got != PlatformLinuxAMD64 {
 			t.Errorf("PlatformLinuxAMD64.Resolve() = %q, want %q", got, PlatformLinuxAMD64)

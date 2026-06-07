@@ -570,11 +570,12 @@ func TestMount(t *testing.T) {
 		if err := os.MkdirAll(hostDir, 0o750); err != nil {
 			t.Fatal(err)
 		}
-		got, err := (Mount{
+		mount := Mount{
 			HostPath:      "~/data",
 			ContainerPath: "~/data",
 			ReadOnly:      true,
-		}).dockerArg(home)
+		}
+		got, err := mount.dockerArg(home)
 		if err != nil {
 			t.Fatal(err)
 		}

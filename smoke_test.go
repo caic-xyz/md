@@ -79,7 +79,7 @@ func ensureImages(t *testing.T, ctx context.Context, c *Client) string {
 		return DefaultBaseImage + ":latest"
 	}
 	t.Log("building local images (md-root-local → md-user-local) ...")
-	if err := c.BuildImage(ctx, io.Discard, io.Discard); err != nil {
+	if err := c.BuildImage(ctx, io.Discard, io.Discard, PlatformDefault); err != nil {
 		t.Fatalf("BuildImage: %v", err)
 	}
 	t.Log("images built successfully")
@@ -580,7 +580,7 @@ func TestSmoke(t *testing.T) {
 				}
 
 				t.Log("building images from scratch ...")
-				if err := client.BuildImage(subCtx, os.Stdout, os.Stderr); err != nil {
+				if err := client.BuildImage(subCtx, os.Stdout, os.Stderr, PlatformDefault); err != nil {
 					t.Fatalf("BuildImage: %v", err)
 				}
 

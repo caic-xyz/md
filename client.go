@@ -232,22 +232,16 @@ func (c *Client) Get(ctx context.Context, name string) (*Container, error) {
 	return ct, nil
 }
 
-// BuildImage builds the base Docker images locally: first md-root-local,
-// then md-user-local on top of it.
-func (c *Client) BuildImage(ctx context.Context, stdout, stderr io.Writer) (retErr error) {
-	return c.BuildImageForPlatform(ctx, stdout, stderr, "")
-}
-
-// BuildImageForPlatform builds the base Docker images locally for platform:
+// BuildImage builds the base Docker images locally for platform:
 // first md-root-local, then md-user-local on top of it.
-func (c *Client) BuildImageForPlatform(ctx context.Context, stdout, stderr io.Writer, platform string) (retErr error) {
+func (c *Client) BuildImage(ctx context.Context, stdout, stderr io.Writer, platform Platform) (retErr error) {
 	c.buildMu.Lock()
 	defer c.buildMu.Unlock()
-	p := Platform(platform).Resolve()
-	if err := p.Validate(); err != nil {
+	platform = platform.Resolve()
+	if err := platform.Validate(); err != nil {
 		return err
 	}
-	platform = p.String()
+	platformString := platform.String()
 
 	if c.GithubToken == "" {
 		_, _ = fmt.Fprintln(stdout, "WARNING: GITHUB_TOKEN not found. Some tools (neovim, rust-analyzer, etc) might fail to install or hit rate limits.")
@@ -257,7 +251,7 @@ func (c *Client) BuildImageForPlatform(ctx context.Context, stdout, stderr io.Wr
 	}
 
 	// Step 1: build the root image.
-	_, _ = fmt.Fprintf(stdout, "- Building root Docker image for %s from rsc/root/Dockerfile ...\n", platform)
+	_, _ = fmt.Fprintf(stdout, "- Building root Docker image for %s from rsc/root/Dockerfile ...\n", platformString)
 	rootCtx, err := prepareRootBuildContext()
 	if err != nil {
 		return err
@@ -265,7 +259,7 @@ func (c *Client) BuildImageForPlatform(ctx context.Context, stdout, stderr io.Wr
 	defer func() { retErr = errors.Join(retErr, os.RemoveAll(rootCtx)) }()
 	rootCmd := []string{
 		c.Runtime, "build",
-		"--platform", platform,
+		"--platform", platformString,
 		"-f", filepath.Join(rootCtx, "Dockerfile"),
 		"-t", "md-root-local",
 	}
@@ -279,7 +273,7 @@ func (c *Client) BuildImageForPlatform(ctx context.Context, stdout, stderr io.Wr
 	_, _ = fmt.Fprintln(stdout, "- Root image built as 'md-root-local'.")
 
 	// Step 2: build the user image on top of the root image.
-	_, _ = fmt.Fprintf(stdout, "- Building user Docker image for %s from rsc/user/Dockerfile ...\n", platform)
+	_, _ = fmt.Fprintf(stdout, "- Building user Docker image for %s from rsc/user/Dockerfile ...\n", platformString)
 	userCtx, err := prepareBuildContext()
 	if err != nil {
 		return err
@@ -287,7 +281,7 @@ func (c *Client) BuildImageForPlatform(ctx context.Context, stdout, stderr io.Wr
 	defer func() { retErr = errors.Join(retErr, os.RemoveAll(userCtx)) }()
 	userCmd := []string{
 		c.Runtime, "build",
-		"--platform", platform,
+		"--platform", platformString,
 		"-f", filepath.Join(userCtx, "Dockerfile"),
 		"--build-arg", "BASE_ROOT_IMAGE=md-root-local",
 		"-t", "md-user-local",

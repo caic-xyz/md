@@ -1187,7 +1187,7 @@ func cmdBuildImage(ctx context.Context, args []string) error {
 		return err
 	}
 	ensureGithubToken(ctx, c)
-	return c.BuildImageForPlatform(ctx, os.Stdout, os.Stderr, *platformFlag)
+	return c.BuildImage(ctx, os.Stdout, os.Stderr, md.Platform(*platformFlag))
 }
 
 func cmdPrune(ctx context.Context, args []string) error {
