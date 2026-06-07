@@ -17,7 +17,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"maps"
 	"math/big"
 	"net"
 	"os"
@@ -394,12 +393,13 @@ func (c *Container) Connect(ctx context.Context, stdout, stderr io.Writer, opts 
 }
 
 // Run starts a temporary container, runs a command, then cleans up.
-// baseImage is the full Docker image reference; if empty, DefaultBaseImage is
-// used. caches lists host directories to COPY into the image (same semantics
-// as StartOpts.Caches); nil means no caches. mounts lists host directories to
-// bind-mount into the running container. extraEnv holds KEY=VALUE pairs
-// injected into the container's ~/.env (see StartOpts.ExtraEnv).
-func (c *Container) Run(ctx context.Context, stdout, stderr io.Writer, baseImage, platform string, command []string, caches []CacheMount, mounts []Mount, extraEnv []string, maxCPUs int, extraRunArgs []string) (_ int, retErr error) {
+//
+// opts has the same semantics as Launch. When nil, defaults are used.
+func (c *Container) Run(ctx context.Context, stdout, stderr io.Writer, command []string, opts *StartOpts) (_ int, retErr error) {
+	runOpts := StartOpts{}
+	if opts != nil {
+		runOpts = *opts
+	}
 	var buf [4]byte
 	_, _ = rand.Read(buf[:])
 	var tmpRepos []Repo
@@ -416,24 +416,31 @@ func (c *Container) Run(ctx context.Context, stdout, stderr io.Writer, baseImage
 		Name:   tmpName,
 	}
 
+	baseImage := runOpts.BaseImage
 	if baseImage == "" {
 		baseImage = DefaultBaseImage + ":latest"
 	}
-	imageName, err := c.ensureImage(ctx, stdout, stderr, baseImage, platform, caches, true)
+	imageName, err := c.ensureImage(ctx, stdout, stderr, baseImage, runOpts.Platform, runOpts.Caches, runOpts.Quiet)
 	if err != nil {
 		return 1, err
 	}
-	opts := StartOpts{Platform: platform, Quiet: true, Mounts: mounts, ExtraEnv: extraEnv, AgentPaths: slices.Collect(maps.Values(HarnessMounts)), MaxCPUs: maxCPUs, ExtraRunArgs: extraRunArgs}
-	if err := tmp.prepare(opts.AgentPaths); err != nil {
+	tmp.prepareTailscaleAuthKey(ctx, stdout, &runOpts)
+	tmp.Display = runOpts.Display
+	tmp.USB = runOpts.USB
+	tmp.Sudo = runOpts.Sudo
+	if err := tmp.prepare(runOpts.AgentPaths); err != nil {
 		return 1, err
 	}
-	if err := tmp.launchContainer(ctx, stdout, stderr, &opts, imageName); err != nil {
+	if err := tmp.launchContainer(ctx, stdout, stderr, &runOpts, imageName); err != nil {
 		tmp.cleanup(ctx)
 		return 1, err
 	}
-	if _, err := tmp.provisionContainer(ctx, stdout, stderr, &opts); err != nil {
+	if _, err := tmp.provisionContainer(ctx, stdout, stderr, &runOpts); err != nil {
 		tmp.cleanup(ctx)
 		return 1, err
+	}
+	if runOpts.Tailscale {
+		tmp.Tailscale = true
 	}
 
 	cmdStr := shellQuoteArgs(command)

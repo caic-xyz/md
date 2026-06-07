@@ -590,7 +590,18 @@ func cmdRun(ctx context.Context, args []string) error {
 	if githubToken != "" {
 		extraEnv = append(extraEnv, "GITHUB_TOKEN="+githubToken)
 	}
-	exitCode, err := ct.Run(ctx, os.Stdout, os.Stderr, baseImage, platform, extra, caches, mounts, extraEnv, *cpus, dockerFlags.values)
+	opts := md.StartOpts{
+		BaseImage:    baseImage,
+		Platform:     platform,
+		Caches:       caches,
+		Mounts:       mounts,
+		Quiet:        true,
+		AgentPaths:   slices.Collect(maps.Values(md.HarnessMounts)),
+		ExtraEnv:     extraEnv,
+		MaxCPUs:      *cpus,
+		ExtraRunArgs: dockerFlags.values,
+	}
+	exitCode, err := ct.Run(ctx, os.Stdout, os.Stderr, extra, &opts)
 	if err != nil {
 		return err
 	}
