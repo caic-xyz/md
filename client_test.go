@@ -10,7 +10,9 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -135,6 +137,49 @@ func TestWellKnownCaches(t *testing.T) {
 
 func TestClient(t *testing.T) {
 	t.Parallel()
+	t.Run("AgentMounts", func(t *testing.T) {
+		t.Parallel()
+		home := t.TempDir()
+		c, err := newClient(home, "docker", io.Discard)
+		if err != nil {
+			t.Fatalf("newClient: %v", err)
+		}
+		mounts, err := c.AgentMounts(HarnessMounts[HarnessClaude])
+		if err != nil {
+			t.Fatalf("AgentMounts: %v", err)
+		}
+		wantDirs := []string{
+			filepath.Join(home, ".claude"),
+			filepath.Join(home, ".config", "agents"),
+			filepath.Join(home, ".config", "md"),
+		}
+		for _, d := range wantDirs {
+			info, err := os.Stat(d)
+			if err != nil {
+				t.Fatalf("stat %s: %v", d, err)
+			}
+			if !info.IsDir() {
+				t.Fatalf("%s is not a directory", d)
+			}
+		}
+		if !slices.ContainsFunc(mounts, func(m Mount) bool {
+			return m.HostPath == filepath.Join(home, ".claude") && m.ContainerPath == "/home/user/.claude"
+		}) {
+			t.Fatalf("AgentMounts missing Claude mount: %+v", mounts)
+		}
+		if !slices.ContainsFunc(mounts, func(m Mount) bool {
+			return m.HostPath == filepath.Join(home, ".config", "md") && m.ContainerPath == "/home/user/.config/md" && m.ReadOnly
+		}) {
+			t.Fatalf("AgentMounts missing read-only md mount: %+v", mounts)
+		}
+		target, err := os.Readlink(filepath.Join(home, ".claude.json"))
+		if err != nil {
+			t.Fatalf("Readlink .claude.json: %v", err)
+		}
+		if target != filepath.Join(home, ".claude", "claude.json") {
+			t.Fatalf(".claude.json target = %q, want %q", target, filepath.Join(home, ".claude", "claude.json"))
+		}
+	})
 	t.Run("Container", func(t *testing.T) {
 		t.Parallel()
 		c := &Client{}

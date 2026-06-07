@@ -485,6 +485,67 @@ func (c *Client) StatsAll(ctx context.Context, names []string) (map[string]*Cont
 	return result, errors.Join(statsErr, inspectErr)
 }
 
+// AgentMounts returns runtime mounts for the provided agent path groups.
+//
+// It creates the host directories before returning them. The shared agent
+// directories are always included; pass values from [HarnessMounts] to include
+// harness-specific directories.
+func (c *Client) AgentMounts(paths ...AgentPaths) ([]Mount, error) {
+	combined := mergePaths(paths)
+	mounts := make([]Mount, 0, len(combined.HomePaths)+len(combined.XDGConfigPaths)+len(combined.LocalSharePaths)+len(combined.LocalStatePaths))
+	for _, p := range combined.HomePaths {
+		hostPath := filepath.Join(c.Home, p)
+		if err := os.MkdirAll(hostPath, 0o700); err != nil {
+			return nil, err
+		}
+		mounts = append(mounts, Mount{HostPath: hostPath, ContainerPath: "/home/user/" + p})
+	}
+	for _, p := range combined.XDGConfigPaths {
+		hostPath := filepath.Join(c.XDGConfigHome, p)
+		if err := os.MkdirAll(hostPath, 0o700); err != nil {
+			return nil, err
+		}
+		mounts = append(mounts, Mount{
+			HostPath:      hostPath,
+			ContainerPath: "/home/user/.config/" + p,
+			ReadOnly:      p == "md",
+		})
+	}
+	for _, p := range combined.LocalSharePaths {
+		hostPath := filepath.Join(c.XDGDataHome, p)
+		if err := os.MkdirAll(hostPath, 0o700); err != nil {
+			return nil, err
+		}
+		mounts = append(mounts, Mount{HostPath: hostPath, ContainerPath: "/home/user/.local/share/" + p})
+	}
+	for _, p := range combined.LocalStatePaths {
+		hostPath := filepath.Join(c.XDGStateHome, p)
+		if err := os.MkdirAll(hostPath, 0o700); err != nil {
+			return nil, err
+		}
+		mounts = append(mounts, Mount{HostPath: hostPath, ContainerPath: "/home/user/.local/state/" + p})
+	}
+	for _, p := range combined.HomePaths {
+		if p != ".claude" {
+			continue
+		}
+		claudeJSON := filepath.Join(c.Home, ".claude.json")
+		target := filepath.Join(c.Home, ".claude", "claude.json")
+		if fi, err := os.Lstat(claudeJSON); err != nil {
+			if !os.IsNotExist(err) {
+				return nil, fmt.Errorf("checking claude.json symlink: %w", err)
+			}
+			if err := os.Symlink(target, claudeJSON); err != nil {
+				return nil, fmt.Errorf("creating claude.json symlink: %w", err)
+			}
+		} else if fi.Mode()&os.ModeSymlink == 0 {
+			return nil, fmt.Errorf("file %s exists but is not a symlink", claudeJSON)
+		}
+		break
+	}
+	return mounts, nil
+}
+
 // getHostPort extracts the host port for containerPort from a running
 // container. It uses JSON output instead of Go templates to work around
 // Docker 27's "index of untyped nil" bug when port bindings are nil.

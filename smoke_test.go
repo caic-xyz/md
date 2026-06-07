@@ -494,10 +494,14 @@ func TestSmoke(t *testing.T) {
 					}
 
 					var forkStdout, forkStderr strings.Builder
+					mounts, err := ct.AgentMounts(slices.Collect(maps.Values(HarnessMounts))...)
+					if err != nil {
+						t.Fatalf("AgentMounts: %v", err)
+					}
 					fork, err := ct.Fork(t.Context(), &forkStdout, &forkStderr, &ForkOpts{
-						Quiet:      true,
-						AgentPaths: slices.Collect(maps.Values(HarnessMounts)),
-						MaxCPUs:    DefaultMaxCPUs(),
+						Quiet:   true,
+						Mounts:  mounts,
+						MaxCPUs: DefaultMaxCPUs(),
 					})
 					if err != nil {
 						state, _ := client.runCmd(t.Context(), "", []string{client.Runtime, "inspect", "--format", "{{json .State}}", staleForkName})

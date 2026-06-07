@@ -101,11 +101,6 @@ type StartOpts struct {
 	Labels []string
 	// Quiet suppresses informational output during startup.
 	Quiet bool
-	// AgentPaths specifies which agent config directories to mount. Pass one
-	// entry per harness using values from [HarnessMounts]. Always-mounted
-	// directories (~/.config/agents, ~/.config/md) are added automatically.
-	// Nil or empty mounts only those shared directories.
-	AgentPaths []AgentPaths
 	// ExtraEnv holds additional KEY=VALUE pairs to inject into the container's
 	// ~/.env at runtime. Each entry is appended verbatim, so values may
 	// contain spaces but must not contain newlines.
@@ -335,9 +330,6 @@ func (r *Repo) populateMountPath() {
 // container's repos have their branches set (e.g. after concurrent branch
 // allocation).
 func (c *Container) Launch(ctx context.Context, stdout, stderr io.Writer, opts *StartOpts) (retErr error) {
-	if err := c.prepare(opts.AgentPaths); err != nil {
-		return err
-	}
 	// Resolve mount paths, disambiguating repos with the same basename
 	// using relative paths. After this, all MountedPaths are unique.
 	if err := resolveMountPaths(c.Repos); err != nil {
@@ -428,9 +420,6 @@ func (c *Container) Run(ctx context.Context, stdout, stderr io.Writer, command [
 	tmp.Display = runOpts.Display
 	tmp.USB = runOpts.USB
 	tmp.Sudo = runOpts.Sudo
-	if err := tmp.prepare(runOpts.AgentPaths); err != nil {
-		return 1, err
-	}
 	if err := tmp.launchContainer(ctx, stdout, stderr, &runOpts, imageName); err != nil {
 		tmp.cleanup(ctx)
 		return 1, err
@@ -853,8 +842,6 @@ type ForkOpts struct {
 	Labels []string
 	// Quiet suppresses informational output.
 	Quiet bool
-	// AgentPaths specifies which agent config directories to mount.
-	AgentPaths []AgentPaths
 	// ExtraEnv holds additional KEY=VALUE pairs to inject into the container's
 	// ~/.env at runtime.
 	ExtraEnv []string
@@ -989,7 +976,6 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 	startOpts := &StartOpts{
 		Quiet:        opts.Quiet,
 		Labels:       opts.Labels,
-		AgentPaths:   opts.AgentPaths,
 		ExtraEnv:     opts.ExtraEnv,
 		Mounts:       opts.Mounts,
 		Display:      c.Display || opts.Display,
@@ -1000,9 +986,6 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 		ExtraRunArgs: opts.ExtraRunArgs,
 	}
 	startOpts.resetTailscale = startOpts.Tailscale
-	if err := fork.prepare(startOpts.AgentPaths); err != nil {
-		return nil, err
-	}
 	fork.prepareTailscaleAuthKey(ctx, stdout, startOpts)
 	if err := fork.launchContainer(ctx, stdout, stderr, startOpts, snapshotImage); err != nil {
 		return nil, err
@@ -1343,50 +1326,6 @@ func (c *Container) readContainerFile(ctx context.Context, containerPath string)
 		return "", err
 	}
 	return string(data), nil
-}
-
-// prepare creates harness-specific config directories on the host so they can
-// be bind-mounted into the container. Always-mounted directories
-// (~/.config/agents, ~/.config/md) are created regardless.
-func (c *Container) prepare(paths []AgentPaths) error {
-	combined := mergePaths(paths)
-	dirs := make([]string, 0, len(combined.HomePaths)+len(combined.XDGConfigPaths)+len(combined.LocalSharePaths)+len(combined.LocalStatePaths))
-	for _, p := range combined.HomePaths {
-		dirs = append(dirs, filepath.Join(c.Home, p))
-	}
-	for _, p := range combined.XDGConfigPaths {
-		dirs = append(dirs, filepath.Join(c.XDGConfigHome, p))
-	}
-	for _, p := range combined.LocalSharePaths {
-		dirs = append(dirs, filepath.Join(c.XDGDataHome, p))
-	}
-	for _, p := range combined.LocalStatePaths {
-		dirs = append(dirs, filepath.Join(c.XDGStateHome, p))
-	}
-	for _, d := range dirs {
-		if err := os.MkdirAll(d, 0o700); err != nil {
-			return err
-		}
-	}
-	// Ensure ~/.claude.json symlink when ~/.claude is being prepared.
-	for _, p := range combined.HomePaths {
-		if p == ".claude" {
-			claudeJSON := filepath.Join(c.Home, ".claude.json")
-			target := filepath.Join(c.Home, ".claude", "claude.json")
-			if fi, err := os.Lstat(claudeJSON); err != nil {
-				if !os.IsNotExist(err) {
-					return fmt.Errorf("checking claude.json symlink: %w", err)
-				}
-				if err := os.Symlink(target, claudeJSON); err != nil {
-					return fmt.Errorf("creating claude.json symlink: %w", err)
-				}
-			} else if fi.Mode()&os.ModeSymlink == 0 {
-				return fmt.Errorf("file %s exists but is not a symlink", claudeJSON)
-			}
-			break
-		}
-	}
-	return nil
 }
 
 // waitForSSH runs a trivial SSH command in a retry loop until it succeeds or
@@ -1777,28 +1716,7 @@ func (c *Container) launchContainer(ctx context.Context, stdout, stderr io.Write
 			"--device-cgroup-rule=c 189:* rwm")
 	}
 
-	// Agent config mounts: always-mounted paths plus caller-specified harness paths.
-	combined := mergePaths(opts.AgentPaths)
 	home := c.Home
-	xdgConfig := c.XDGConfigHome
-	xdgData := c.XDGDataHome
-	xdgState := c.XDGStateHome
-	for _, p := range combined.HomePaths {
-		dockerArgs = append(dockerArgs, "-v", filepath.ToSlash(filepath.Join(home, p))+":/home/user/"+p)
-	}
-	for _, p := range combined.XDGConfigPaths {
-		ro := ""
-		if p == "md" {
-			ro = ":ro"
-		}
-		dockerArgs = append(dockerArgs, "-v", filepath.ToSlash(filepath.Join(xdgConfig, p))+":/home/user/.config/"+p+ro)
-	}
-	for _, p := range combined.LocalSharePaths {
-		dockerArgs = append(dockerArgs, "-v", filepath.ToSlash(filepath.Join(xdgData, p))+":/home/user/.local/share/"+p)
-	}
-	for _, p := range combined.LocalStatePaths {
-		dockerArgs = append(dockerArgs, "-v", filepath.ToSlash(filepath.Join(xdgState, p))+":/home/user/.local/state/"+p)
-	}
 	for _, m := range opts.Mounts {
 		arg, err := m.dockerArg(home)
 		if err != nil {

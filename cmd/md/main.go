@@ -435,6 +435,11 @@ func cmdStart(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	harnessMounts, err := ct.AgentMounts(slices.Collect(maps.Values(md.HarnessMounts))...)
+	if err != nil {
+		return err
+	}
+	mounts = append(harnessMounts, mounts...)
 	githubToken, err := resolveGithubToken(ctx, ct.Client, *github)
 	if err != nil {
 		return err
@@ -455,7 +460,6 @@ func cmdStart(ctx context.Context, args []string) error {
 		Mounts:           mounts,
 		Labels:           labels.values,
 		Quiet:            *quiet,
-		AgentPaths:       slices.Collect(maps.Values(md.HarnessMounts)),
 		ExtraEnv:         extraEnv,
 		MaxCPUs:          *cpus,
 		ExtraRunArgs:     dockerFlags.values,
@@ -582,6 +586,11 @@ func cmdRun(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	harnessMounts, err := ct.AgentMounts(slices.Collect(maps.Values(md.HarnessMounts))...)
+	if err != nil {
+		return err
+	}
+	mounts = append(harnessMounts, mounts...)
 	githubToken, err := resolveGithubToken(ctx, ct.Client, *github)
 	if err != nil {
 		return err
@@ -596,7 +605,6 @@ func cmdRun(ctx context.Context, args []string) error {
 		Caches:       caches,
 		Mounts:       mounts,
 		Quiet:        true,
-		AgentPaths:   slices.Collect(maps.Values(md.HarnessMounts)),
 		ExtraEnv:     extraEnv,
 		MaxCPUs:      *cpus,
 		ExtraRunArgs: dockerFlags.values,
@@ -1039,6 +1047,10 @@ func cmdFork(ctx context.Context, args []string) error {
 	if githubToken != "" {
 		extraEnv = append(extraEnv, "GITHUB_TOKEN="+githubToken)
 	}
+	mounts, err := sourceCt.AgentMounts(slices.Collect(maps.Values(md.HarnessMounts))...)
+	if err != nil {
+		return err
+	}
 	resolved, err := resolveRepoSpecs(ctx, extraRepos.values)
 	if err != nil {
 		return err
@@ -1051,8 +1063,8 @@ func cmdFork(ctx context.Context, args []string) error {
 		Sudo:         *sudoFlag,
 		Labels:       labels.values,
 		Quiet:        *quiet,
-		AgentPaths:   slices.Collect(maps.Values(md.HarnessMounts)),
 		ExtraEnv:     extraEnv,
+		Mounts:       mounts,
 		MaxCPUs:      *cpus,
 		ExtraRunArgs: dockerFlags.values,
 	}
