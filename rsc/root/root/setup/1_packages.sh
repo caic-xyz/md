@@ -107,6 +107,7 @@ apt-get install -qq -y --no-install-recommends \
 	tigervnc-standalone-server \
 	tigervnc-tools \
 	tigervnc-viewer \
+	tmux \
 	tokei \
 	uidmap \
 	unzip \
