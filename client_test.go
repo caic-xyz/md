@@ -7,6 +7,8 @@
 package md
 
 import (
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -16,6 +18,19 @@ import (
 	"strings"
 	"testing"
 )
+
+const (
+	fakeRuntimeEnv          = "MD_TEST_FAKE_RUNTIME"
+	fakeRuntimeLocalBaseEnv = "MD_TEST_FAKE_RUNTIME_LOCAL_BASE"
+	fakeRuntimeLogEnv       = "MD_TEST_FAKE_RUNTIME_LOG"
+)
+
+func TestMain(m *testing.M) {
+	if os.Getenv(fakeRuntimeEnv) == "1" {
+		os.Exit(runFakeRuntime(os.Args[1:], os.Getenv(fakeRuntimeLogEnv), os.Getenv(fakeRuntimeLocalBaseEnv) == "1"))
+	}
+	os.Exit(m.Run())
+}
 
 func TestSanitizeDockerName(t *testing.T) {
 	t.Parallel()
@@ -257,17 +272,11 @@ func TestDetectRuntime(t *testing.T) {
 	})
 }
 
-func TestBuildSpecializedImage(t *testing.T) {
-	t.Parallel()
-	t.Run("uses_local_remote_base_when_pull_fails", func(t *testing.T) {
-		t.Parallel()
+func TestBuildSpecializedImage(t *testing.T) { //nolint:paralleltest // fakeRuntime uses t.Setenv, which cannot run in parallel tests.
+	t.Run("uses_local_remote_base_when_pull_fails", func(t *testing.T) { //nolint:paralleltest // fakeRuntime uses t.Setenv, which cannot run in parallel tests.
 		home := t.TempDir()
 		logPath := filepath.Join(home, "runtime.log")
-		runtimePath := filepath.Join(home, "fake-runtime")
-		if err := os.WriteFile(runtimePath, []byte(fakeRuntimeScript(logPath, true)), 0o755); err != nil { //nolint:gosec // test runtime must be executable
-			t.Fatal(err)
-		}
-		c := newTestClient(t, home, runtimePath)
+		c := newTestClient(t, home, fakeRuntime(t, logPath, true))
 		var stdout strings.Builder
 		var stderr strings.Builder
 
@@ -293,15 +302,10 @@ func TestBuildSpecializedImage(t *testing.T) {
 		}
 	})
 
-	t.Run("fails_when_pull_fails_without_local_base", func(t *testing.T) {
-		t.Parallel()
+	t.Run("fails_when_pull_fails_without_local_base", func(t *testing.T) { //nolint:paralleltest // fakeRuntime uses t.Setenv, which cannot run in parallel tests.
 		home := t.TempDir()
 		logPath := filepath.Join(home, "runtime.log")
-		runtimePath := filepath.Join(home, "fake-runtime")
-		if err := os.WriteFile(runtimePath, []byte(fakeRuntimeScript(logPath, false)), 0o755); err != nil { //nolint:gosec // test runtime must be executable
-			t.Fatal(err)
-		}
-		c := newTestClient(t, home, runtimePath)
+		c := newTestClient(t, home, fakeRuntime(t, logPath, false))
 
 		err := c.buildSpecializedImage(t.Context(), io.Discard, io.Discard, "md-specialized-test", "ghcr.io/caic-xyz/md-user:latest", PlatformLinuxAMD64.String(), nil, nil, false)
 		if err == nil {
@@ -330,53 +334,82 @@ func newTestClient(t *testing.T, home, runtimePath string) *Client {
 	return c
 }
 
-func fakeRuntimeScript(logPath string, localBase bool) string {
-	local := "0"
+func fakeRuntime(t *testing.T, logPath string, localBase bool) string {
+	t.Setenv(fakeRuntimeEnv, "1")
+	t.Setenv(fakeRuntimeLogEnv, logPath)
 	if localBase {
-		local = "1"
+		t.Setenv(fakeRuntimeLocalBaseEnv, "1")
+	} else {
+		t.Setenv(fakeRuntimeLocalBaseEnv, "0")
 	}
-	return `#!/usr/bin/env bash
-set -eu
-printf '%s\n' "$*" >> ` + shellQuote(logPath) + `
-local_base=` + local + `
-if [[ "$1" == "image" && "$2" == "inspect" ]]; then
-  if [[ "$*" == *"{{.Id}}"* ]]; then
-    if [[ "$local_base" == "1" ]]; then
-      printf '%s\n' 'sha256:local'
-      exit 0
-    fi
-    exit 1
-  fi
-  if [[ "$*" == *"{{index .RepoDigests 0}}"* ]]; then
-    if [[ "$local_base" == "1" ]]; then
-      printf '%s\n' 'ghcr.io/caic-xyz/md-user@sha256:local'
-      exit 0
-    fi
-    exit 1
-  fi
-  if [[ "$*" == *"md.version"* ]]; then
-    exit 0
-  fi
-  printf 'unexpected image inspect command: %s\n' "$*" >&2
-  exit 1
-fi
-if [[ "$1" == "pull" ]]; then
-  printf '%s\n' 'network unreachable' >&2
-  exit 1
-fi
-if [[ "$1" == "build" ]]; then
-  exit 0
-fi
-if [[ "$1" == "manifest" && "$2" == "inspect" ]]; then
-  printf '%s\n' '{"manifests":[{"digest":"sha256:remote","platform":{"architecture":"amd64","os":"linux"}}]}'
-  exit 0
-fi
-if [[ "$1" == "builder" ]]; then
-  exit 0
-fi
-printf 'unexpected command: %s\n' "$*" >&2
-exit 1
-`
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return exe
+}
+
+func runFakeRuntime(args []string, logPath string, localBase bool) int {
+	if err := appendFakeRuntimeLog(logPath, args); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "writing fake runtime log: %v\n", err)
+		return 1
+	}
+	if len(args) >= 2 && args[0] == "image" && args[1] == "inspect" {
+		return fakeRuntimeInspect(args, localBase)
+	}
+	if len(args) >= 1 && args[0] == "pull" {
+		_, _ = fmt.Fprintln(os.Stderr, "network unreachable")
+		return 1
+	}
+	if len(args) >= 1 && args[0] == "build" {
+		return 0
+	}
+	if len(args) >= 2 && args[0] == "manifest" && args[1] == "inspect" {
+		_, _ = fmt.Fprintln(os.Stdout, `{"manifests":[{"digest":"sha256:remote","platform":{"architecture":"amd64","os":"linux"}}]}`)
+		return 0
+	}
+	if len(args) >= 1 && args[0] == "builder" {
+		return 0
+	}
+	_, _ = fmt.Fprintf(os.Stderr, "unexpected command: %s\n", strings.Join(args, " "))
+	return 1
+}
+
+func appendFakeRuntimeLog(logPath string, args []string) error {
+	if logPath == "" {
+		return errors.New("missing fake runtime log path")
+	}
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600) //nolint:gosec // test log path comes from t.TempDir.
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(f, strings.Join(args, " ")); err != nil {
+		return errors.Join(err, f.Close())
+	}
+	return f.Close()
+}
+
+func fakeRuntimeInspect(args []string, localBase bool) int {
+	argLine := strings.Join(args, " ")
+	if strings.Contains(argLine, "{{.Id}}") {
+		if localBase {
+			_, _ = fmt.Fprintln(os.Stdout, "sha256:local")
+			return 0
+		}
+		return 1
+	}
+	if strings.Contains(argLine, "{{index .RepoDigests 0}}") {
+		if localBase {
+			_, _ = fmt.Fprintln(os.Stdout, "ghcr.io/caic-xyz/md-user@sha256:local")
+			return 0
+		}
+		return 1
+	}
+	if strings.Contains(argLine, "md.version") {
+		return 0
+	}
+	_, _ = fmt.Fprintf(os.Stderr, "unexpected image inspect command: %s\n", argLine)
+	return 1
 }
 
 func TestBaseImageIsLocal(t *testing.T) {
