@@ -257,6 +257,128 @@ func TestDetectRuntime(t *testing.T) {
 	})
 }
 
+func TestBuildSpecializedImage(t *testing.T) {
+	t.Parallel()
+	t.Run("uses_local_remote_base_when_pull_fails", func(t *testing.T) {
+		t.Parallel()
+		home := t.TempDir()
+		logPath := filepath.Join(home, "runtime.log")
+		runtimePath := filepath.Join(home, "fake-runtime")
+		if err := os.WriteFile(runtimePath, []byte(fakeRuntimeScript(logPath, true)), 0o755); err != nil { //nolint:gosec // test runtime must be executable
+			t.Fatal(err)
+		}
+		c := newTestClient(t, home, runtimePath)
+		var stdout strings.Builder
+		var stderr strings.Builder
+
+		if err := c.buildSpecializedImage(t.Context(), &stdout, &stderr, "md-specialized-test", "ghcr.io/caic-xyz/md-user:latest", PlatformLinuxAMD64.String(), nil, nil, false); err != nil {
+			t.Fatalf("buildSpecializedImage: %v", err)
+		}
+		if !strings.Contains(stdout.String(), "using local copy") {
+			t.Fatalf("stdout = %q, want offline fallback warning", stdout.String())
+		}
+		logData, err := os.ReadFile(logPath) //nolint:gosec // path is from t.TempDir
+		if err != nil {
+			t.Fatal(err)
+		}
+		log := string(logData)
+		if !strings.Contains(log, "pull --platform linux/amd64 ghcr.io/caic-xyz/md-user:latest") {
+			t.Fatalf("runtime log missing pull command:\n%s", log)
+		}
+		if !strings.Contains(log, "build --no-cache --platform linux/amd64 -t md-specialized-test") {
+			t.Fatalf("runtime log missing build command:\n%s", log)
+		}
+		if strings.Contains(log, "manifest inspect") {
+			t.Fatalf("runtime log should not inspect remote manifest after pull failure:\n%s", log)
+		}
+	})
+
+	t.Run("fails_when_pull_fails_without_local_base", func(t *testing.T) {
+		t.Parallel()
+		home := t.TempDir()
+		logPath := filepath.Join(home, "runtime.log")
+		runtimePath := filepath.Join(home, "fake-runtime")
+		if err := os.WriteFile(runtimePath, []byte(fakeRuntimeScript(logPath, false)), 0o755); err != nil { //nolint:gosec // test runtime must be executable
+			t.Fatal(err)
+		}
+		c := newTestClient(t, home, runtimePath)
+
+		err := c.buildSpecializedImage(t.Context(), io.Discard, io.Discard, "md-specialized-test", "ghcr.io/caic-xyz/md-user:latest", PlatformLinuxAMD64.String(), nil, nil, false)
+		if err == nil {
+			t.Fatal("buildSpecializedImage succeeded, want pull failure")
+		}
+		if !strings.Contains(err.Error(), "pulling base image") {
+			t.Fatalf("err = %v, want pull failure", err)
+		}
+	})
+}
+
+func newTestClient(t *testing.T, home, runtimePath string) *Client {
+	c := &Client{
+		Home:          home,
+		XDGConfigHome: filepath.Join(home, ".config"),
+		XDGDataHome:   filepath.Join(home, ".local", "share"),
+		XDGStateHome:  filepath.Join(home, ".local", "state"),
+		HostKeyPath:   filepath.Join(home, ".config", "md", "ssh_host_ed25519_key"),
+		UserKeyPath:   filepath.Join(home, ".ssh", "md"),
+		Runtime:       runtimePath,
+	}
+	c.keysDir = filepath.Join(c.XDGConfigHome, "md")
+	if err := c.setupSSH(io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+func fakeRuntimeScript(logPath string, localBase bool) string {
+	local := "0"
+	if localBase {
+		local = "1"
+	}
+	return `#!/usr/bin/env bash
+set -eu
+printf '%s\n' "$*" >> ` + shellQuote(logPath) + `
+local_base=` + local + `
+if [[ "$1" == "image" && "$2" == "inspect" ]]; then
+  if [[ "$*" == *"{{.Id}}"* ]]; then
+    if [[ "$local_base" == "1" ]]; then
+      printf '%s\n' 'sha256:local'
+      exit 0
+    fi
+    exit 1
+  fi
+  if [[ "$*" == *"{{index .RepoDigests 0}}"* ]]; then
+    if [[ "$local_base" == "1" ]]; then
+      printf '%s\n' 'ghcr.io/caic-xyz/md-user@sha256:local'
+      exit 0
+    fi
+    exit 1
+  fi
+  if [[ "$*" == *"md.version"* ]]; then
+    exit 0
+  fi
+  printf 'unexpected image inspect command: %s\n' "$*" >&2
+  exit 1
+fi
+if [[ "$1" == "pull" ]]; then
+  printf '%s\n' 'network unreachable' >&2
+  exit 1
+fi
+if [[ "$1" == "build" ]]; then
+  exit 0
+fi
+if [[ "$1" == "manifest" && "$2" == "inspect" ]]; then
+  printf '%s\n' '{"manifests":[{"digest":"sha256:remote","platform":{"architecture":"amd64","os":"linux"}}]}'
+  exit 0
+fi
+if [[ "$1" == "builder" ]]; then
+  exit 0
+fi
+printf 'unexpected command: %s\n' "$*" >&2
+exit 1
+`
+}
+
 func TestBaseImageIsLocal(t *testing.T) {
 	t.Parallel()
 	t.Run("valid", func(t *testing.T) {

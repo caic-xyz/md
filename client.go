@@ -1309,6 +1309,7 @@ func (c *Client) buildSpecializedImage(ctx context.Context, stdout, stderr io.Wr
 	// local image tag or a Docker Hub repository. Prefer an existing local
 	// image; otherwise pull from the default registry.
 	isLocal := c.baseImageIsLocal(ctx, baseImage)
+	remoteBasePulled := false
 	if isLocal {
 		if _, err := c.runCmd(ctx, "", []string{c.Runtime, "image", "inspect", "--format", "{{.Id}}", baseImage}); err != nil {
 			return fmt.Errorf("local image %s not found; build it first with 'md build-image'", baseImage)
@@ -1322,33 +1323,45 @@ func (c *Client) buildSpecializedImage(ctx context.Context, stdout, stderr io.Wr
 		if !quiet {
 			_, _ = fmt.Fprintf(stdout, "- Pulling base image %s ...\n", baseImage)
 		}
+		var pullErr error
 		if quiet {
 			if _, err := c.runCmd(ctx, "", []string{c.Runtime, "pull", "--platform", platform, baseImage}); err != nil {
-				return cmdErrWithStderr("pulling base image", err)
+				pullErr = cmdErrWithStderr("pulling base image", err)
 			}
 		} else {
 			if err := c.runCmdOut(ctx, "", []string{c.Runtime, "pull", "--platform", platform, baseImage}, stdout, stderr); err != nil {
-				return fmt.Errorf("pulling base image: %w", err)
+				pullErr = fmt.Errorf("pulling base image: %w", err)
 			}
 		}
-		idAfter, _ := c.runCmd(ctx, "", []string{c.Runtime, "image", "inspect", "--format", "{{.Id}}", baseImage})
-		if !quiet {
-			if idBefore != "" && idBefore == idAfter {
-				_, _ = fmt.Fprintf(stdout, "  Base image is up to date.\n")
-			} else if v := c.getImageVersionLabel(ctx, baseImage); strings.HasPrefix(v, "v") {
-				_, _ = fmt.Fprintf(stdout, "  Version: %s\n", v)
+		if pullErr != nil {
+			if idBefore == "" {
+				return pullErr
+			}
+			slog.WarnContext(ctx, "md", "msg", "failed to pull base image; using local copy", "image", baseImage, "err", pullErr)
+			if !quiet {
+				_, _ = fmt.Fprintf(stdout, "- Warning: failed to pull base image %s; using local copy.\n", baseImage)
+			}
+		} else {
+			remoteBasePulled = true
+			idAfter, _ := c.runCmd(ctx, "", []string{c.Runtime, "image", "inspect", "--format", "{{.Id}}", baseImage})
+			if !quiet {
+				if idBefore != "" && idBefore == idAfter {
+					_, _ = fmt.Fprintf(stdout, "  Base image is up to date.\n")
+				} else if v := c.getImageVersionLabel(ctx, baseImage); strings.HasPrefix(v, "v") {
+					_, _ = fmt.Fprintf(stdout, "  Version: %s\n", v)
+				}
 			}
 		}
 	}
 
-	slog.DebugContext(ctx, "md", "msg", "pull complete, fetching base image digest")
+	slog.DebugContext(ctx, "md", "msg", "base image ready, fetching base image digest")
 	// Get base image digest for label.
 	baseDigest, err := c.runCmd(ctx, "", []string{c.Runtime, "image", "inspect", "--format", "{{index .RepoDigests 0}}", baseImage})
 	if err != nil || baseDigest == "" {
 		baseDigest, _ = c.runCmd(ctx, "", []string{c.Runtime, "image", "inspect", "--format", "{{.Id}}", baseImage})
 	}
 	var manifestDigest string
-	if !isLocal {
+	if remoteBasePulled {
 		manifestDigest, _ = c.getRemoteManifestDigest(ctx, baseImage, arch)
 	}
 
