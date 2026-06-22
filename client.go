@@ -16,6 +16,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -967,17 +968,63 @@ func cacheSpecKey(caches []CacheMount) string {
 	}
 	specs := make([]string, len(caches))
 	for i, c := range caches {
-		specs[i] = strings.Join([]string{
-			c.Name,
-			filepath.ToSlash(c.HostPath),
-			c.ContainerPath,
-			strconv.FormatBool(c.ReadOnly),
-			strconv.FormatBool(c.Shallow),
-		}, "\x00")
+		specs[i] = cacheSpecString(c)
 	}
 	sort.Strings(specs)
 	h := sha256.Sum256([]byte(strings.Join(specs, ",")))
 	return hex.EncodeToString(h[:8])
+}
+
+func cacheSpecString(c CacheMount) string {
+	return strings.Join([]string{
+		c.Name,
+		filepath.ToSlash(c.HostPath),
+		c.ContainerPath,
+		strconv.FormatBool(c.ReadOnly),
+		strconv.FormatBool(c.Shallow),
+	}, "\x00")
+}
+
+type cacheSpecLabelMount struct {
+	Name          string `json:"name"`
+	Description   string `json:"description,omitempty"`
+	HostPath      string `json:"hostPath"`
+	ContainerPath string `json:"containerPath"`
+	ReadOnly      bool   `json:"readOnly,omitempty"`
+	Shallow       bool   `json:"shallow,omitempty"`
+}
+
+// activeCacheSpecLabel returns a base64-encoded JSON list of active cache
+// specs. It is stored as a label so callers can inspect which caches were
+// actually baked into the specialized image, not just compare md.cache_key.
+func activeCacheSpecLabel(active []activeCM) string {
+	if len(active) == 0 {
+		return ""
+	}
+	mounts := make([]CacheMount, len(active))
+	for i, a := range active {
+		mounts[i] = a.cm
+		mounts[i].HostPath = a.hostPath
+	}
+	sort.Slice(mounts, func(i, j int) bool {
+		return cacheSpecString(mounts[i]) < cacheSpecString(mounts[j])
+	})
+	labelMounts := make([]cacheSpecLabelMount, len(mounts))
+	for i, m := range mounts {
+		labelMounts[i] = cacheSpecLabelMount{
+			Name:          m.Name,
+			Description:   m.Description,
+			HostPath:      filepath.ToSlash(m.HostPath),
+			ContainerPath: m.ContainerPath,
+			ReadOnly:      m.ReadOnly,
+			Shallow:       m.Shallow,
+		}
+	}
+	data, err := json.Marshal(labelMounts)
+	if err != nil {
+		panic("marshal active cache spec label: " + err.Error())
+	}
+	return base64.StdEncoding.EncodeToString(data)
 }
 
 // imageBuildNeeded reports whether the specialized Docker image needs to be
@@ -1240,6 +1287,7 @@ func generateDockerfile(baseImage string, active []activeCM, dirs []string, base
 	fmt.Fprintf(&df, "LABEL md.base_digest=%q\n", baseDigest)
 	fmt.Fprintf(&df, "LABEL md.context_sha=%q\n", contextSHA)
 	fmt.Fprintf(&df, "LABEL md.cache_key=%q\n", activeKey)
+	fmt.Fprintf(&df, "LABEL md.cache_spec=%q\n", activeCacheSpecLabel(active))
 	fmt.Fprintf(&df, "LABEL md.base_manifest_digest=%q\n", manifestDigest)
 	df.WriteString("CMD [\"/root/start.sh\"]\n")
 	return df.String()

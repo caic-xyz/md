@@ -7,6 +7,8 @@
 package md
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -345,6 +347,44 @@ func TestCacheSpecKey(t *testing.T) {
 		b := cacheSpecKey([]CacheMount{{Name: "go-mod", ContainerPath: "/home/user/go/pkg/mod", ReadOnly: true}})
 		if a == b {
 			t.Error("read-only and writable caches with same name/path should produce different keys")
+		}
+	})
+}
+
+func TestActiveCacheSpecLabel(t *testing.T) {
+	t.Parallel()
+	t.Run("valid", func(t *testing.T) {
+		t.Parallel()
+		active := []activeCM{
+			{cm: CacheMount{Name: "npm", Description: "Node", HostPath: "~/npm", ContainerPath: "/home/user/.npm", ReadOnly: true}, hostPath: "/home/me/.npm"},
+			{cm: CacheMount{Name: "go-mod", HostPath: "~/go/pkg/mod", ContainerPath: "/home/user/go/pkg/mod", Shallow: true}, hostPath: "/home/me/go/pkg/mod"},
+		}
+		got := activeCacheSpecLabel(active)
+		if got == "" {
+			t.Fatal("activeCacheSpecLabel returned empty")
+		}
+		data, err := base64.StdEncoding.DecodeString(got)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var mounts []cacheSpecLabelMount
+		if err := json.Unmarshal(data, &mounts); err != nil {
+			t.Fatal(err)
+		}
+		if len(mounts) != 2 {
+			t.Fatalf("len = %d, want 2", len(mounts))
+		}
+		if mounts[0].Name != "go-mod" || mounts[0].HostPath != "/home/me/go/pkg/mod" || !mounts[0].Shallow {
+			t.Errorf("mounts[0] = %+v", mounts[0])
+		}
+		if mounts[1].Name != "npm" || mounts[1].Description != "Node" || mounts[1].HostPath != "/home/me/.npm" || !mounts[1].ReadOnly {
+			t.Errorf("mounts[1] = %+v", mounts[1])
+		}
+	})
+	t.Run("empty", func(t *testing.T) {
+		t.Parallel()
+		if got := activeCacheSpecLabel(nil); got != "" {
+			t.Errorf("activeCacheSpecLabel(nil) = %q, want empty", got)
 		}
 	})
 }
@@ -730,6 +770,7 @@ func TestGenerateDockerfile(t *testing.T) {
 			`LABEL md.base_digest="dig"`,
 			`LABEL md.context_sha="ctx"`,
 			`LABEL md.cache_key="ckey"`,
+			`LABEL md.cache_spec=""`,
 			`LABEL md.base_manifest_digest="mdig"`,
 		} {
 			if !strings.Contains(got, want) {
