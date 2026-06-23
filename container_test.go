@@ -612,6 +612,81 @@ func TestMount(t *testing.T) {
 	})
 }
 
+func TestParseInspectInfo(t *testing.T) {
+	t.Parallel()
+	t.Run("valid_docker", func(t *testing.T) {
+		t.Parallel()
+		cacheLabel := activeCacheSpecLabel([]activeCM{{cm: CacheMount{Name: "npm", Description: "Node", HostPath: "~/npm", ContainerPath: "/home/user/.npm", ReadOnly: true}, hostPath: "/home/me/.npm"}})
+		rw := `[
+			{
+				"Id":"sha256:container",
+				"Name":"/md-test",
+				"Image":"sha256:image",
+				"Architecture":"amd64",
+				"Os":"linux",
+				"Config":{"Image":"ghcr.io/caic/base:latest","Labels":{"md.cache_spec":"` + cacheLabel + `"}},
+				"State":{"Status":"running"},
+				"HostConfig":{"NanoCpus":2500000000,"CpuQuota":0,"CpuPeriod":0},
+				"Mounts":[{"Source":"/host/rw","Destination":"/mnt/rw","RW":true},{"Source":"/host/ro","Destination":"/mnt/ro","RW":false}]
+			}
+		]`
+		got, err := parseInspectInfo("docker", "md-test", []byte(rw))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Runtime != "docker" || got.ID != "sha256:container" || got.Name != "md-test" || got.ImageID != "sha256:image" || got.ImageRef != "ghcr.io/caic/base:latest" {
+			t.Fatalf("inspect identity = %+v", got)
+		}
+		if got.Platform != "linux/amd64" {
+			t.Errorf("Platform = %q, want linux/amd64", got.Platform)
+		}
+		if got.CPULimit != 3 {
+			t.Errorf("CPULimit = %d, want 3", got.CPULimit)
+		}
+		if len(got.Mounts) != 2 || got.Mounts[0].ReadOnly || !got.Mounts[1].ReadOnly {
+			t.Errorf("Mounts = %+v", got.Mounts)
+		}
+		if len(got.Caches) != 1 || got.Caches[0].Name != "npm" || got.Caches[0].Description != "Node" || got.Caches[0].HostPath != "/home/me/.npm" || !got.Caches[0].ReadOnly {
+			t.Errorf("Caches = %+v", got.Caches)
+		}
+	})
+
+	t.Run("valid_podman", func(t *testing.T) {
+		t.Parallel()
+		rw := `[
+			{
+				"Id":"ctr",
+				"Image":"sha256:image2",
+				"Platform":"linux/arm64",
+				"Config":{"Image":"base:v2","Labels":{}},
+				"State":{"Status":"exited"},
+				"HostConfig":{"NanoCpus":0,"CpuQuota":150000,"CpuPeriod":100000},
+				"Mounts":[{"Source":"/src","Destination":"/workspace"}]
+			}
+		]`
+		got, err := parseInspectInfo("podman", "ctr-2", []byte(rw))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Platform != "linux/arm64" {
+			t.Errorf("Platform = %q, want linux/arm64", got.Platform)
+		}
+		if got.CPULimit != 2 {
+			t.Errorf("CPULimit = %d, want 2", got.CPULimit)
+		}
+		if got.Name != "ctr-2" {
+			t.Errorf("Name = %q, want ctr-2", got.Name)
+		}
+	})
+
+	t.Run("error_empty", func(t *testing.T) {
+		t.Parallel()
+		if _, err := parseInspectInfo("docker", "ctr", []byte(`[]`)); err == nil {
+			t.Fatal("parseInspectInfo error = nil, want error")
+		}
+	})
+}
+
 func TestFillFromInspect(t *testing.T) {
 	t.Parallel()
 	// Both Docker and Podman inspect return a JSON array.

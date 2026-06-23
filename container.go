@@ -1188,6 +1188,19 @@ func (c *Container) GetHostPort(ctx context.Context, containerPort string) (int3
 	return c.getHostPort(ctx, c.Name, containerPort)
 }
 
+// Inspect returns detailed observed runtime configuration for the container.
+func (c *Container) Inspect(ctx context.Context) (*InspectInfo, error) {
+	out, err := c.runCmd(ctx, "", []string{c.Runtime, "inspect", c.Name})
+	if err != nil {
+		return nil, fmt.Errorf("inspecting container %s: %w", c.Name, err)
+	}
+	info, err := parseInspectInfo(c.Runtime, c.Name, []byte(out))
+	if err != nil {
+		return nil, fmt.Errorf("parsing container %s: %w", c.Name, err)
+	}
+	return info, nil
+}
+
 // SudoPassword retrieves the random sudo password set at container startup,
 // or "" if no password was configured.
 //
@@ -2201,16 +2214,54 @@ type containerJSON struct {
 	Ports     psPorts  `json:"Ports"`
 }
 
+// InspectInfo describes observed Docker/Podman runtime configuration for a container.
+type InspectInfo struct {
+	Runtime  string
+	ID       string
+	Name     string
+	State    string
+	ImageRef string
+	ImageID  string
+	Platform string
+	CPULimit int
+	Mounts   []Mount
+	Caches   []CacheMount
+}
+
 // containerInspectJSON is the subset of `docker inspect` output we parse.
 type containerInspectJSON struct {
-	Name  string `json:"Name"`
-	State struct {
-		Status string `json:"Status"`
-	} `json:"State"`
-	Created string `json:"Created"`
-	Config  struct {
-		Labels map[string]string `json:"Labels"`
-	} `json:"Config"`
+	ID           string             `json:"Id"`
+	Name         string             `json:"Name"`
+	Image        string             `json:"Image"`
+	Platform     string             `json:"Platform"`
+	Architecture string             `json:"Architecture"`
+	OS           string             `json:"Os"`
+	State        inspectStateJSON   `json:"State"`
+	Created      string             `json:"Created"`
+	Config       inspectConfigJSON  `json:"Config"`
+	HostConfig   inspectHostJSON    `json:"HostConfig"`
+	Mounts       []inspectMountJSON `json:"Mounts"`
+}
+
+type inspectConfigJSON struct {
+	Image  string            `json:"Image"`
+	Labels map[string]string `json:"Labels"`
+}
+
+type inspectHostJSON struct {
+	NanoCpus  int64 `json:"NanoCpus"`
+	CPUQuota  int64 `json:"CpuQuota"`
+	CPUPeriod int64 `json:"CpuPeriod"`
+}
+
+type inspectMountJSON struct {
+	Source      string `json:"Source"`
+	Destination string `json:"Destination"`
+	RW          *bool  `json:"RW"`
+}
+
+type inspectStateJSON struct {
+	Status string `json:"Status"`
 }
 
 // parseCreatedAt parses a container creation timestamp. Docker uses
@@ -2305,20 +2356,100 @@ func unmarshalContainer(data []byte) (Container, error) {
 	return ct, nil
 }
 
+func parseInspectInfo(runtimeName, requestedName string, data []byte) (*InspectInfo, error) {
+	raw, err := inspectDocument(data)
+	if err != nil {
+		return nil, err
+	}
+	mounts := make([]Mount, 0, len(raw.Mounts))
+	for _, m := range raw.Mounts {
+		if m.Source == "" && m.Destination == "" {
+			continue
+		}
+		readOnly := false
+		if m.RW != nil {
+			readOnly = !*m.RW
+		}
+		mounts = append(mounts, Mount{HostPath: m.Source, ContainerPath: m.Destination, ReadOnly: readOnly})
+	}
+	name := strings.TrimPrefix(raw.Name, "/")
+	if name == "" {
+		name = requestedName
+	}
+	return &InspectInfo{
+		Runtime:  runtimeName,
+		ID:       raw.ID,
+		Name:     name,
+		State:    raw.State.Status,
+		ImageRef: raw.Config.Image,
+		ImageID:  raw.Image,
+		Platform: inspectPlatform(&raw),
+		CPULimit: inspectCPULimit(raw.HostConfig),
+		Mounts:   mounts,
+		Caches:   cacheSpecFromLabel(raw.Config.Labels["md.cache_spec"]),
+	}, nil
+}
+
+func inspectDocument(data []byte) (containerInspectJSON, error) {
+	var raws []containerInspectJSON
+	if err := json.Unmarshal(data, &raws); err != nil {
+		return containerInspectJSON{}, err
+	}
+	if len(raws) != 1 {
+		return containerInspectJSON{}, fmt.Errorf("inspect returned %d results, expected 1", len(raws))
+	}
+	return raws[0], nil
+}
+
+func inspectPlatform(raw *containerInspectJSON) string {
+	if raw.Platform != "" {
+		return raw.Platform
+	}
+	if raw.OS != "" && raw.Architecture != "" {
+		return raw.OS + "/" + raw.Architecture
+	}
+	return ""
+}
+
+func inspectCPULimit(c inspectHostJSON) int {
+	if c.NanoCpus > 0 {
+		return int((c.NanoCpus + 1_000_000_000 - 1) / 1_000_000_000)
+	}
+	if c.CPUQuota > 0 && c.CPUPeriod > 0 {
+		return int((c.CPUQuota + c.CPUPeriod - 1) / c.CPUPeriod)
+	}
+	return 0
+}
+
+func cacheSpecFromLabel(label string) []CacheMount {
+	if label == "" || label == "<no value>" {
+		return nil
+	}
+	data, err := base64.StdEncoding.DecodeString(label)
+	if err != nil {
+		return nil
+	}
+	var labelMounts []cacheSpecLabelMount
+	if err := json.Unmarshal(data, &labelMounts); err != nil {
+		return nil
+	}
+	caches := make([]CacheMount, len(labelMounts))
+	for i, m := range labelMounts {
+		caches[i] = CacheMount(m)
+	}
+	return caches
+}
+
 // fillFromInspect parses docker/podman inspect JSON output and fills a Container.
 //
 // Both Docker and Podman inspect return a JSON array, even for a single
 // container.
 // The Container must already have its Client set.
 func fillFromInspect(ct *Container, data []byte) error {
-	var raws []containerInspectJSON
-	if err := json.Unmarshal(data, &raws); err != nil {
+	raw, err := inspectDocument(data)
+	if err != nil {
 		return err
 	}
-	if len(raws) != 1 {
-		return fmt.Errorf("inspect returned %d results, expected 1", len(raws))
-	}
-	raw := raws[0]
 	ct.Name = strings.TrimPrefix(raw.Name, "/")
 	ct.State = raw.State.Status
 	if t, err := parseCreatedAt(raw.Created); err == nil {
