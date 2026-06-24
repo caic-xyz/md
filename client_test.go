@@ -152,6 +152,46 @@ func TestWellKnownCaches(t *testing.T) {
 
 func TestClient(t *testing.T) {
 	t.Parallel()
+	t.Run("WatchDieEvents", func(t *testing.T) {
+		t.Parallel()
+		t.Run("valid", func(t *testing.T) {
+			t.Parallel()
+			tests := []struct {
+				name string
+				in   string
+				want ContainerEvent
+			}{
+				{
+					name: "docker",
+					in:   `{"Actor":{"Attributes":{"name":"md-docker","image":"img"}}}`,
+					want: ContainerEvent{Name: "md-docker", Attributes: map[string]string{"image": "img"}},
+				},
+				{
+					name: "podman",
+					in:   `{"Name":"md-podman","Attributes":{"image":"img"}}`,
+					want: ContainerEvent{Name: "md-podman", Attributes: map[string]string{"image": "img"}},
+				},
+			}
+			for _, tt := range tests {
+				t.Run(tt.name, func(t *testing.T) {
+					t.Parallel()
+					ev, ok := parseContainerEvent([]byte(tt.in))
+					if !ok {
+						t.Fatal("parseContainerEvent returned ok=false")
+					}
+					if ev.Name != tt.want.Name || ev.Attributes["image"] != tt.want.Attributes["image"] {
+						t.Fatalf("event = %+v, want %+v", ev, tt.want)
+					}
+				})
+			}
+		})
+		t.Run("error", func(t *testing.T) {
+			t.Parallel()
+			if _, ok := parseContainerEvent([]byte(`{"Attributes":{"image":"img"}}`)); ok {
+				t.Fatal("parseContainerEvent ok=true, want false")
+			}
+		})
+	})
 	t.Run("AgentMounts", func(t *testing.T) {
 		t.Parallel()
 		home := t.TempDir()

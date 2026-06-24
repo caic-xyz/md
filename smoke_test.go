@@ -101,9 +101,12 @@ func prebuildSpecializedImage(t *testing.T, ctx context.Context, c *Client, base
 }
 
 // launchSmokeContainer creates a Container with the given name suffix and
-// calls Launch+Connect with -sudo. Returns the live container (caller must
-// Purge via t.Cleanup).
-func launchSmokeContainer(t *testing.T, ctx context.Context, c *Client, baseImage, nameSuffix string, caches ...CacheMount) *Container {
+// calls Launch+Connect. Returns the live container (caller must Purge via
+// t.Cleanup).
+func launchSmokeContainer(t *testing.T, ctx context.Context, c *Client, baseImage, nameSuffix string, sudo bool, caches ...CacheMount) *Container {
+	if sudo && isRootlessPodman(c.Runtime) {
+		t.Skip("skipping: sudo is not supported with rootless podman")
+	}
 	ct, err := c.Container()
 	if err != nil {
 		t.Fatalf("Container: %v", err)
@@ -114,7 +117,7 @@ func launchSmokeContainer(t *testing.T, ctx context.Context, c *Client, baseImag
 
 	opts := &StartOpts{
 		BaseImage: baseImage,
-		Sudo:      true,
+		Sudo:      sudo,
 		Quiet:     true,
 		Caches:    caches,
 	}
@@ -148,7 +151,6 @@ func launchSmokeRepoContainer(t *testing.T, ctx context.Context, c *Client, base
 
 	opts := &StartOpts{
 		BaseImage: baseImage,
-		Sudo:      true,
 		Quiet:     true,
 	}
 
@@ -204,8 +206,8 @@ func runSmokeGit(t *testing.T, ctx context.Context, wd string, args ...string) s
 	return strings.TrimSpace(string(out))
 }
 
-// TestSmoke verifies end-to-end: build images, start a sudo-enabled container,
-// confirm rootless podman works inside, pull from registries, and exercise the
+// TestSmoke verifies end-to-end: build images, start containers, confirm sudo
+// and nested podman where supported, pull from registries, and exercise the
 // container lifecycle. Runs under each available container runtime.
 func TestSmoke(t *testing.T) {
 	for _, rt := range []string{"docker", "podman"} {
@@ -239,9 +241,10 @@ func TestSmoke(t *testing.T) {
 			// redundant image-build checks.
 			t.Run("serialized", func(t *testing.T) {
 				t.Run("launch", func(t *testing.T) {
-					ct := launchSmokeContainer(t, t.Context(), client, baseImage, rt+"-launch")
+					ct := launchSmokeContainer(t, t.Context(), client, baseImage, rt+"-launch", false)
 
 					t.Run("sudo", func(t *testing.T) {
+						ct := launchSmokeContainer(t, t.Context(), client, baseImage, rt+"-sudo", true)
 						out, err := ct.runCmd(t.Context(), "", ct.SSHCommand(nil, "echo '"+ct.sudoPassword+"' | sudo -S whoami"))
 						if err != nil {
 							t.Fatalf("sudo whoami: %v", err)
@@ -281,8 +284,8 @@ func TestSmoke(t *testing.T) {
 						if found.VNCPort > 0 {
 							t.Logf("VNCPort=%d", found.VNCPort)
 						}
-						if !found.Sudo {
-							t.Error("Sudo is false, expected true")
+						if found.Sudo != ct.Sudo {
+							t.Errorf("Sudo = %v, want %v", found.Sudo, ct.Sudo)
 						}
 						t.Logf("Sudo=%v", found.Sudo)
 					})
@@ -292,7 +295,7 @@ func TestSmoke(t *testing.T) {
 					if !nestedOK {
 						t.Skip("skipping: nested newuidmap fails with rootless podman (user namespace stacking)")
 					}
-					ct := launchSmokeContainer(t, t.Context(), client, baseImage, rt+"-nested")
+					ct := launchSmokeContainer(t, t.Context(), client, baseImage, rt+"-nested", true)
 
 					t.Run("version", func(t *testing.T) {
 						out, err := ct.runCmd(t.Context(), "", ct.SSHCommand(nil, "podman version --format '{{.Version}}'"))
@@ -364,7 +367,7 @@ func TestSmoke(t *testing.T) {
 				})
 
 				t.Run("lifecycle", func(t *testing.T) {
-					ct := launchSmokeContainer(t, t.Context(), client, baseImage, rt+"-lifecycle")
+					ct := launchSmokeContainer(t, t.Context(), client, baseImage, rt+"-lifecycle", false)
 
 					// Verify Status returns "running" after launch.
 					if s := ct.Status(t.Context()); s != "running" {
@@ -557,7 +560,7 @@ func TestSmoke(t *testing.T) {
 				if err := os.WriteFile(filepath.Join(src, "hello.txt"), []byte("cache-works"), 0o644); err != nil {
 					t.Fatal(err)
 				}
-				ct := launchSmokeContainer(t, t.Context(), client, baseImage, rt+"-cache", CacheMount{
+				ct := launchSmokeContainer(t, t.Context(), client, baseImage, rt+"-cache", false, CacheMount{
 					Name:          "smoke-cache",
 					HostPath:      src,
 					ContainerPath: "/home/user/.cache/smoke",

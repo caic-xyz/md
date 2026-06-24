@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"math/big"
 	"net"
 	"os"
@@ -128,6 +129,18 @@ type StartResult struct {
 	TailscaleAuthURL string
 }
 
+// ProcessInfo describes a single process running inside a container.
+type ProcessInfo struct {
+	PID     int
+	PPID    int
+	User    string
+	State   string
+	CPU     float64
+	Mem     float64
+	Time    string
+	Command string
+}
+
 // Container holds state for a single container instance.
 //
 // Fields marked with a label are persisted as Docker container labels
@@ -146,6 +159,8 @@ type Container struct {
 	State string
 	// CreatedAt is when the container was created.
 	CreatedAt time.Time
+	// Labels contains all Docker/Podman labels observed on the container.
+	Labels map[string]string
 	// Display indicates the container was started with X11/VNC enabled.
 	// Label: md.display
 	Display bool
@@ -191,6 +206,35 @@ func (c *Container) SSHCommand(opts []string, cmd string) []string {
 		args = append(args, cmd)
 	}
 	return args
+}
+
+// Processes returns the running processes inside the container.
+func (c *Container) Processes(ctx context.Context) ([]ProcessInfo, error) {
+	cmd := "ps -eo pid,ppid,user,stat,%cpu,%mem,time,args --no-headers"
+	sshArgs := c.SSHCommand(nil, cmd)
+	ec := exec.CommandContext(ctx, sshArgs[0], sshArgs[1:]...) //nolint:gosec // SSH target is an md container name; command is a constant literal.
+	ec.Env = c.commandEnv()
+	out, err := ec.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("ps in container %s: %w (output: %s)", c.Name, err, string(out))
+	}
+	return parsePSOutput(string(out))
+}
+
+// Signal sends sig to pid inside the container.
+func (c *Container) Signal(ctx context.Context, pid int, sig string) error {
+	if pid <= 0 {
+		return fmt.Errorf("pid must be positive, got %d", pid)
+	}
+	cmd := fmt.Sprintf("kill -s %s %d", shellQuote(sig), pid)
+	sshArgs := c.SSHCommand(nil, cmd)
+	ec := exec.CommandContext(ctx, sshArgs[0], sshArgs[1:]...) //nolint:gosec // SSH target is an md container name; pid is an integer and sig is shell-quoted.
+	ec.Env = c.commandEnv()
+	out, err := ec.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("signal %s pid %d in container %s: %w (output: %s)", sig, pid, c.Name, err, string(out))
+	}
+	return nil
 }
 
 // Validate returns an error for invalid repo fields.
@@ -484,16 +528,13 @@ func (c *Container) Revive(ctx context.Context, stdout, stderr io.Writer) error 
 		return fmt.Errorf("docker start %s: %w", c.Name, err)
 	}
 
-	// Query the new SSH port (port mapping changes on restart).
-	port, err := c.getHostPort(ctx, c.Name, "22/tcp")
-	if err != nil {
-		return fmt.Errorf("getting SSH port after revive: %w", err)
+	// Query the new port mappings in one inspect call. They change on restart.
+	if err := c.refreshRuntimeFields(ctx); err != nil {
+		return fmt.Errorf("inspecting container after revive: %w", err)
 	}
-	c.SSHPort = port
-
-	if c.Display {
-		vncPort, _ := c.getHostPort(ctx, c.Name, "5901/tcp")
-		c.VNCPort = vncPort
+	port := c.SSHPort
+	if port == 0 {
+		return fmt.Errorf("container %s has no SSH port mapping after revive", c.Name)
 	}
 
 	// Rewrite SSH config with the new port. The known_hosts file also
@@ -1198,6 +1239,7 @@ func (c *Container) Inspect(ctx context.Context) (*InspectInfo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parsing container %s: %w", c.Name, err)
 	}
+	c.fillInspectOSArch(ctx, info)
 	return info, nil
 }
 
@@ -1417,6 +1459,14 @@ func (c *Container) checkContainerState(ctx context.Context) error {
 	return nil
 }
 
+func (c *Container) refreshRuntimeFields(ctx context.Context) error {
+	out, err := c.runCmd(ctx, "", []string{c.Runtime, "inspect", c.Name})
+	if err != nil {
+		return err
+	}
+	return fillFromInspect(c, []byte(out))
+}
+
 // ensureImage checks whether the user image needs rebuilding and, if so,
 // builds it. Returns the computed image name (keyed by base image and active
 // caches). The build is serialized via Client.buildMu.
@@ -1612,6 +1662,9 @@ func (c *Container) launchContainer(ctx context.Context, stdout, stderr io.Write
 	if len(c.Repos) > 1000 {
 		return fmt.Errorf("too many repositories: %d (max 1000)", len(c.Repos))
 	}
+	if opts.Sudo && isRootlessPodman(c.Runtime) {
+		return errors.New("sudo is not supported with rootless podman; use docker instead")
+	}
 	p := Platform(opts.Platform).Resolve()
 	if err := p.Validate(); err != nil {
 		return err
@@ -1792,32 +1845,19 @@ func (c *Container) launchContainer(ctx context.Context, stdout, stderr io.Write
 		}
 	}
 
-	// Get SSH port and creation time.
-	port, err := c.getHostPort(ctx, c.Name, "22/tcp")
-	if err != nil {
-		return fmt.Errorf("getting SSH port: %w", err)
+	// Get creation time and port mappings in one inspect call.
+	if err := c.refreshRuntimeFields(ctx); err != nil {
+		return fmt.Errorf("inspecting started container: %w", err)
 	}
-	c.SSHPort = port
+	port := c.SSHPort
+	if port == 0 {
+		return fmt.Errorf("container %s has no SSH port mapping", c.Name)
+	}
 	if !opts.Quiet {
 		_, _ = fmt.Fprintf(stdout, "- Found ssh port %d\n", port)
 	}
-	createdStr, err := c.runCmd(ctx, "", []string{c.Runtime, "inspect", "--format", "{{.Created}}", c.Name})
-	if err != nil {
-		return fmt.Errorf("getting container creation time: %w", err)
-	}
-	created, err := parseCreatedAt(createdStr)
-	if err != nil {
-		return fmt.Errorf("parsing container creation time %q: %w", createdStr, err)
-	}
-	c.CreatedAt = created
-
-	// Get VNC port if display enabled.
-	if opts.Display {
-		vncPort, _ := c.getHostPort(ctx, c.Name, "5901/tcp")
-		c.VNCPort = vncPort
-		if vncPort != 0 && !opts.Quiet {
-			_, _ = fmt.Fprintf(stdout, "- Found VNC port %d (display :1)\n", vncPort)
-		}
+	if opts.Display && c.VNCPort != 0 && !opts.Quiet {
+		_, _ = fmt.Fprintf(stdout, "- Found VNC port %d (display :1)\n", c.VNCPort)
 	}
 
 	// Write SSH config.
@@ -2063,6 +2103,53 @@ func convertGitURLToHTTPS(url string) string {
 	return url
 }
 
+// parsePSOutput parses ps output. The last column (args) may contain spaces;
+// the first seven fields are whitespace-separated and the remainder is the command.
+func parsePSOutput(out string) ([]ProcessInfo, error) {
+	var procs []ProcessInfo
+	for line := range strings.SplitSeq(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, " ", 8)
+		var clean []string
+		for _, p := range parts {
+			if p = strings.TrimSpace(p); p != "" {
+				clean = append(clean, p)
+			}
+		}
+		if len(clean) < 8 {
+			clean = strings.Fields(line)
+			if len(clean) < 8 {
+				continue
+			}
+			cmd := strings.Join(clean[7:], " ")
+			clean = append(clean[:7], cmd)
+		}
+		pid, err := strconv.Atoi(clean[0])
+		if err != nil {
+			continue
+		}
+		ppid, _ := strconv.Atoi(clean[1])
+		cpu, _ := strconv.ParseFloat(clean[4], 64)
+		mem, _ := strconv.ParseFloat(clean[5], 64)
+		procs = append(procs, ProcessInfo{
+			PID:     pid,
+			PPID:    ppid,
+			User:    clean[2],
+			State:   clean[3],
+			CPU:     cpu,
+			Mem:     mem,
+			Time:    clean[6],
+			Command: clean[7],
+		})
+	}
+	return slices.DeleteFunc(procs, func(p ProcessInfo) bool {
+		return strings.HasPrefix(p.Command, "ps ")
+	}), nil
+}
+
 // parseByteSize parses a size string like "150MiB" or "7.5GiB" into bytes.
 func parseByteSize(s string) (uint64, error) {
 	for _, u := range byteUnits {
@@ -2216,31 +2303,34 @@ type containerJSON struct {
 
 // InspectInfo describes observed Docker/Podman runtime configuration for a container.
 type InspectInfo struct {
-	Runtime  string
-	ID       string
-	Name     string
-	State    string
-	ImageRef string
-	ImageID  string
-	Platform string
-	CPULimit int
-	Mounts   []Mount
-	Caches   []CacheMount
+	Runtime      string
+	ID           string
+	Name         string
+	State        string
+	ImageRef     string
+	ImageID      string
+	Platform     string
+	OS           string
+	Architecture string
+	CPULimit     int
+	Mounts       []Mount
+	Caches       []CacheMount
 }
 
 // containerInspectJSON is the subset of `docker inspect` output we parse.
 type containerInspectJSON struct {
-	ID           string             `json:"Id"`
-	Name         string             `json:"Name"`
-	Image        string             `json:"Image"`
-	Platform     string             `json:"Platform"`
-	Architecture string             `json:"Architecture"`
-	OS           string             `json:"Os"`
-	State        inspectStateJSON   `json:"State"`
-	Created      string             `json:"Created"`
-	Config       inspectConfigJSON  `json:"Config"`
-	HostConfig   inspectHostJSON    `json:"HostConfig"`
-	Mounts       []inspectMountJSON `json:"Mounts"`
+	ID              string             `json:"Id"`
+	Name            string             `json:"Name"`
+	Image           string             `json:"Image"`
+	Platform        string             `json:"Platform"`
+	Architecture    string             `json:"Architecture"`
+	OS              string             `json:"Os"`
+	State           inspectStateJSON   `json:"State"`
+	Created         string             `json:"Created"`
+	Config          inspectConfigJSON  `json:"Config"`
+	HostConfig      inspectHostJSON    `json:"HostConfig"`
+	NetworkSettings inspectNetworkJSON `json:"NetworkSettings"`
+	Mounts          []inspectMountJSON `json:"Mounts"`
 }
 
 type inspectConfigJSON struct {
@@ -2252,6 +2342,14 @@ type inspectHostJSON struct {
 	NanoCpus  int64 `json:"NanoCpus"`
 	CPUQuota  int64 `json:"CpuQuota"`
 	CPUPeriod int64 `json:"CpuPeriod"`
+}
+
+type inspectNetworkJSON struct {
+	Ports map[string][]inspectPortBindingJSON `json:"Ports"`
+}
+
+type inspectPortBindingJSON struct {
+	HostPort string `json:"HostPort"`
 }
 
 type inspectMountJSON struct {
@@ -2289,8 +2387,9 @@ func unmarshalContainer(data []byte) (Container, error) {
 		return Container{}, err
 	}
 	ct := Container{
-		Name:  string(raw.Names),
-		State: raw.State,
+		Name:   string(raw.Names),
+		State:  raw.State,
+		Labels: maps.Clone(map[string]string(raw.Labels)),
 	}
 	if raw.CreatedAt != "" {
 		t, err := parseCreatedAt(raw.CreatedAt)
@@ -2376,18 +2475,62 @@ func parseInspectInfo(runtimeName, requestedName string, data []byte) (*InspectI
 	if name == "" {
 		name = requestedName
 	}
+	osName, architecture := inspectOSArch(&raw)
 	return &InspectInfo{
-		Runtime:  runtimeName,
-		ID:       raw.ID,
-		Name:     name,
-		State:    raw.State.Status,
-		ImageRef: raw.Config.Image,
-		ImageID:  raw.Image,
-		Platform: inspectPlatform(&raw),
-		CPULimit: inspectCPULimit(raw.HostConfig),
-		Mounts:   mounts,
-		Caches:   cacheSpecFromLabel(raw.Config.Labels["md.cache_spec"]),
+		Runtime:      runtimeName,
+		ID:           raw.ID,
+		Name:         name,
+		State:        raw.State.Status,
+		ImageRef:     raw.Config.Image,
+		ImageID:      raw.Image,
+		Platform:     inspectPlatform(&raw),
+		OS:           osName,
+		Architecture: architecture,
+		CPULimit:     inspectCPULimit(raw.HostConfig),
+		Mounts:       mounts,
+		Caches:       cacheSpecFromLabel(raw.Config.Labels["md.cache_spec"]),
 	}, nil
+}
+
+func (c *Container) fillInspectOSArch(ctx context.Context, info *InspectInfo) {
+	if info.OS != "" && info.Architecture != "" {
+		return
+	}
+	fallbackOS := info.OS
+	if fallbackOS == "" {
+		fallbackOS = cleanInspectValue(info.Platform)
+	}
+	if observedOS, observedArchitecture, ok := c.inspectTargetOSArch(ctx, []string{"inspect", c.Name, "--format", "{{.Os}}/{{.Architecture}}"}, fallbackOS); ok {
+		info.OS = observedOS
+		info.Architecture = observedArchitecture
+		return
+	}
+	for _, image := range []string{info.ImageID, info.ImageRef} {
+		if image == "" {
+			continue
+		}
+		observedOS, observedArchitecture, ok := c.inspectTargetOSArch(ctx, []string{"image", "inspect", image, "--format", "{{.Os}}/{{.Architecture}}"}, fallbackOS)
+		if ok {
+			info.OS = observedOS
+			info.Architecture = observedArchitecture
+			return
+		}
+	}
+}
+
+func (c *Container) inspectTargetOSArch(ctx context.Context, args []string, fallbackOS string) (osName, architecture string, ok bool) {
+	if c.Runtime == "" {
+		return "", "", false
+	}
+	out, err := c.runCmd(ctx, "", append([]string{c.Runtime}, args...))
+	if err != nil {
+		return "", "", false
+	}
+	osName, architecture, ok = splitOSArch(out, fallbackOS)
+	if !ok || fallbackOS != "" && osName != fallbackOS {
+		return "", "", false
+	}
+	return osName, architecture, true
 }
 
 func inspectDocument(data []byte) (containerInspectJSON, error) {
@@ -2405,10 +2548,47 @@ func inspectPlatform(raw *containerInspectJSON) string {
 	if raw.Platform != "" {
 		return raw.Platform
 	}
-	if raw.OS != "" && raw.Architecture != "" {
-		return raw.OS + "/" + raw.Architecture
+	osName, architecture := inspectOSArch(raw)
+	if osName != "" && architecture != "" {
+		return osName + "/" + architecture
 	}
 	return ""
+}
+
+func inspectOSArch(raw *containerInspectJSON) (osName, architecture string) {
+	if osName, architecture, ok := splitOSArch(raw.Platform, ""); ok {
+		return osName, architecture
+	}
+	osName = cleanInspectValue(raw.OS)
+	if osName == "" {
+		osName = cleanInspectValue(raw.Platform)
+	}
+	architecture = cleanInspectValue(raw.Architecture)
+	return osName, architecture
+}
+
+func splitOSArch(platform, fallbackOS string) (osName, architecture string, ok bool) {
+	osName, architecture, ok = strings.Cut(platform, "/")
+	if !ok {
+		return "", "", false
+	}
+	osName = cleanInspectValue(osName)
+	if osName == "" {
+		osName = fallbackOS
+	}
+	architecture = cleanInspectValue(architecture)
+	if osName == "" || architecture == "" {
+		return "", "", false
+	}
+	return osName, architecture, true
+}
+
+func cleanInspectValue(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "<no value>" {
+		return ""
+	}
+	return v
 }
 
 func inspectCPULimit(c inspectHostJSON) int {
@@ -2419,6 +2599,18 @@ func inspectCPULimit(c inspectHostJSON) int {
 		return int((c.CPUQuota + c.CPUPeriod - 1) / c.CPUPeriod)
 	}
 	return 0
+}
+
+func hostPort(ports map[string][]inspectPortBindingJSON, containerPort string) int32 {
+	bindings := ports[containerPort]
+	if len(bindings) == 0 {
+		return 0
+	}
+	port, err := strconv.ParseInt(bindings[0].HostPort, 10, 32)
+	if err != nil {
+		return 0
+	}
+	return int32(port)
 }
 
 func cacheSpecFromLabel(label string) []CacheMount {
@@ -2452,6 +2644,9 @@ func fillFromInspect(ct *Container, data []byte) error {
 	}
 	ct.Name = strings.TrimPrefix(raw.Name, "/")
 	ct.State = raw.State.Status
+	ct.Labels = maps.Clone(raw.Config.Labels)
+	ct.SSHPort = hostPort(raw.NetworkSettings.Ports, "22/tcp")
+	ct.VNCPort = hostPort(raw.NetworkSettings.Ports, "5901/tcp")
 	if t, err := parseCreatedAt(raw.Created); err == nil {
 		ct.CreatedAt = t
 	}

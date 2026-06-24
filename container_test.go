@@ -178,6 +178,15 @@ func TestContainer(t *testing.T) {
 			}
 		})
 	})
+	t.Run("Signal", func(t *testing.T) {
+		t.Run("error invalid pid", func(t *testing.T) {
+			t.Parallel()
+			ct := &Container{Name: "md-test"}
+			if err := ct.Signal(t.Context(), 0, "SIGTERM"); err == nil {
+				t.Fatal("Signal error = nil, want invalid pid error")
+			}
+		})
+	})
 }
 
 func TestUnmarshalContainer(t *testing.T) {
@@ -640,6 +649,9 @@ func TestParseInspectInfo(t *testing.T) {
 		if got.Platform != "linux/amd64" {
 			t.Errorf("Platform = %q, want linux/amd64", got.Platform)
 		}
+		if got.OS != "linux" || got.Architecture != "amd64" {
+			t.Errorf("OS/Architecture = %q/%q, want linux/amd64", got.OS, got.Architecture)
+		}
 		if got.CPULimit != 3 {
 			t.Errorf("CPULimit = %d, want 3", got.CPULimit)
 		}
@@ -671,6 +683,9 @@ func TestParseInspectInfo(t *testing.T) {
 		if got.Platform != "linux/arm64" {
 			t.Errorf("Platform = %q, want linux/arm64", got.Platform)
 		}
+		if got.OS != "linux" || got.Architecture != "arm64" {
+			t.Errorf("OS/Architecture = %q/%q, want linux/arm64", got.OS, got.Architecture)
+		}
 		if got.CPULimit != 2 {
 			t.Errorf("CPULimit = %d, want 2", got.CPULimit)
 		}
@@ -687,6 +702,43 @@ func TestParseInspectInfo(t *testing.T) {
 	})
 }
 
+func TestContainerInspect(t *testing.T) {
+	t.Parallel()
+
+	t.Run("valid fills missing architecture", func(t *testing.T) {
+		t.Parallel()
+		runtimePath := writeFakeRuntime(t, t.TempDir(), `#!/bin/sh
+if [ "$1" = "inspect" ] && [ "$2" = "md-test" ] && [ "$3" = "--format" ]; then
+	echo linux/amd64
+	exit 0
+fi
+if [ "$1" = "inspect" ] && [ "$2" = "md-test" ]; then
+	cat <<'JSON'
+[{"Name":"/md-test","Id":"ctr","Image":"sha256:image","Platform":"linux","Config":{"Image":"base:latest","Labels":{}},"State":{"Status":"running"}}]
+JSON
+	exit 0
+fi
+exit 1
+`)
+		c := &Client{Runtime: runtimePath}
+		info, err := (&Container{Client: c, Name: "md-test"}).Inspect(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.OS != "linux" || info.Architecture != "amd64" {
+			t.Fatalf("Inspect OS/Architecture = %q/%q, want linux/amd64", info.OS, info.Architecture)
+		}
+	})
+}
+
+func writeFakeRuntime(t *testing.T, dir, script string) string {
+	path := filepath.Join(dir, "docker")
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil { //nolint:gosec // Test creates a fake runtime executable.
+		t.Fatal(err)
+	}
+	return path
+}
+
 func TestFillFromInspect(t *testing.T) {
 	t.Parallel()
 	// Both Docker and Podman inspect return a JSON array.
@@ -699,7 +751,14 @@ func TestFillFromInspect(t *testing.T) {
       "md.display": "1",
       "md.tailscale": "1",
       "md.usb": "1",
-      "md.sudo": "1"
+      "md.sudo": "1",
+      "custom": "value"
+    }
+  },
+  "NetworkSettings": {
+    "Ports": {
+      "22/tcp": [{"HostPort": "32768"}],
+      "5901/tcp": [{"HostPort": "32769"}]
     }
   }
 }]`
@@ -716,6 +775,12 @@ func TestFillFromInspect(t *testing.T) {
 	}
 	if !ct.Display || !ct.Tailscale || !ct.USB || !ct.Sudo {
 		t.Errorf("expected all flags true, got Display=%v Tailscale=%v USB=%v Sudo=%v", ct.Display, ct.Tailscale, ct.USB, ct.Sudo)
+	}
+	if ct.Labels["custom"] != "value" {
+		t.Errorf("custom label = %q, want value", ct.Labels["custom"])
+	}
+	if ct.SSHPort != 32768 || ct.VNCPort != 32769 {
+		t.Errorf("ports = ssh %d vnc %d, want 32768/32769", ct.SSHPort, ct.VNCPort)
 	}
 
 	// Name without leading slash (Docker sometimes omits it).
@@ -739,6 +804,25 @@ func TestFillFromInspect(t *testing.T) {
 	// Bad JSON.
 	if err := fillFromInspect(&Container{}, []byte(`{bad}`)); err == nil {
 		t.Error("expected error for bad JSON")
+	}
+}
+
+func TestParsePSOutput(t *testing.T) {
+	t.Parallel()
+	out := `    1     0 root     Ss    0.0  0.1 00:00:01 /sbin/init
+  123     1 user     Sl    1.5  2.5 00:00:03 agent run --flag value
+  124   123 user     R     0.0  0.0 00:00:00 ps -eo pid,ppid,user,stat,%cpu,%mem,time,args --no-headers
+broken
+`
+	procs, err := parsePSOutput(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(procs) != 2 {
+		t.Fatalf("processes = %+v, want 2 entries after filtering ps", procs)
+	}
+	if procs[1].PID != 123 || procs[1].PPID != 1 || procs[1].User != "user" || procs[1].CPU != 1.5 || procs[1].Mem != 2.5 || procs[1].Command != "agent run --flag value" {
+		t.Errorf("process = %+v, want parsed agent command", procs[1])
 	}
 }
 

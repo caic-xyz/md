@@ -12,6 +12,7 @@
 package md
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -23,6 +24,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"iter"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -93,6 +95,12 @@ type Client struct {
 	// back-to-back checks (e.g. Warmup then Launch) skip redundant
 	// docker inspect calls. Protected by mu; invalidated on successful build.
 	imageBuildCache *imageBuildCacheEntry
+}
+
+// ContainerEvent describes a Docker/Podman lifecycle event for an md container.
+type ContainerEvent struct {
+	Name       string
+	Attributes map[string]string
 }
 
 // New creates a Client with global MD tool config and initialises SSH
@@ -209,6 +217,7 @@ func (c *Client) List(ctx context.Context) ([]*Container, error) {
 		}
 		if strings.HasPrefix(ct.Name, "md-") {
 			ct.Client = c
+			ct.sshConfigPath = filepath.Join(c.Home, ".ssh", "config.d", ct.Name+".conf")
 			containers = append(containers, &ct)
 		}
 	}
@@ -230,7 +239,85 @@ func (c *Client) Get(ctx context.Context, name string) (*Container, error) {
 	if err := fillFromInspect(ct, []byte(out)); err != nil {
 		return nil, fmt.Errorf("parsing container %s: %w", name, err)
 	}
+	if ct.Name == "" {
+		ct.Name = name
+	}
+	ct.sshConfigPath = filepath.Join(c.Home, ".ssh", "config.d", ct.Name+".conf")
 	return ct, nil
+}
+
+// WatchDieEvents streams container die events for containers carrying labelKey.
+func (c *Client) WatchDieEvents(ctx context.Context, labelKey string) (iter.Seq2[ContainerEvent, error], error) {
+	eventCtx, cancel := context.WithCancel(ctx)
+	cmd := exec.CommandContext(eventCtx, c.Runtime, "events", //nolint:gosec // Runtime is detected by md; labelKey is passed as a Docker label filter.
+		"--filter", "event=die",
+		"--filter", "label="+labelKey,
+		"--format", "{{json .}}",
+	)
+	cmd.Env = c.commandEnv("LANG=C")
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("%s events stdout: %w", c.Runtime, err)
+	}
+	if err := cmd.Start(); err != nil {
+		cancel()
+		return nil, fmt.Errorf("%s events start: %w", c.Runtime, err)
+	}
+	return func(yield func(ContainerEvent, error) bool) {
+		waited := false
+		defer func() {
+			cancel()
+			if !waited {
+				_ = cmd.Wait()
+			}
+		}()
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			ev, ok := parseContainerEvent(scanner.Bytes())
+			if !ok {
+				continue
+			}
+			if !yield(ev, nil) {
+				return
+			}
+		}
+		if err := scanner.Err(); err != nil && eventCtx.Err() == nil {
+			_ = yield(ContainerEvent{}, fmt.Errorf("%s events scan: %w", c.Runtime, err))
+			return
+		}
+		waited = true
+		if err := cmd.Wait(); err != nil && eventCtx.Err() == nil {
+			_ = yield(ContainerEvent{}, fmt.Errorf("%s events wait: %w", c.Runtime, err))
+		}
+	}, nil
+}
+
+func parseContainerEvent(data []byte) (ContainerEvent, bool) {
+	var ev containerEventJSON
+	if json.Unmarshal(data, &ev) != nil {
+		return ContainerEvent{}, false
+	}
+	attributes := ev.Actor.Attributes
+	if len(attributes) == 0 {
+		attributes = ev.Attributes
+	}
+	name := attributes["name"]
+	if name == "" {
+		name = ev.Name
+	}
+	if name == "" {
+		return ContainerEvent{}, false
+	}
+	return ContainerEvent{Name: name, Attributes: attributes}, true
+}
+
+type containerEventJSON struct {
+	Name       string            `json:"Name"`
+	Attributes map[string]string `json:"Attributes"`
+	Actor      struct {
+		Attributes map[string]string `json:"Attributes"`
+	} `json:"Actor"`
 }
 
 // BuildImage builds the base Docker images locally for platform:
