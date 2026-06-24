@@ -394,6 +394,9 @@ func runFakeRuntime(args []string, logPath string, localBase bool) int {
 		_, _ = fmt.Fprintf(os.Stderr, "writing fake runtime log: %v\n", err)
 		return 1
 	}
+	if len(args) >= 2 && args[0] == "inspect" {
+		return fakeRuntimeContainerInspect(args)
+	}
 	if len(args) >= 2 && args[0] == "image" && args[1] == "inspect" {
 		return fakeRuntimeInspect(args, localBase)
 	}
@@ -412,6 +415,19 @@ func runFakeRuntime(args []string, logPath string, localBase bool) int {
 		return 0
 	}
 	_, _ = fmt.Fprintf(os.Stderr, "unexpected command: %s\n", strings.Join(args, " "))
+	return 1
+}
+
+func fakeRuntimeContainerInspect(args []string) int {
+	if len(args) == 4 && args[1] == "md-test" && args[2] == "--format" && args[3] == "{{.Os}}/{{.Architecture}}" {
+		_, _ = fmt.Fprintln(os.Stdout, "linux/amd64")
+		return 0
+	}
+	if len(args) == 2 && args[1] == "md-test" {
+		_, _ = fmt.Fprintln(os.Stdout, `[{"Name":"/md-test","Id":"ctr","Image":"sha256:image","Platform":"linux","Config":{"Image":"base:latest","Labels":{}},"State":{"Status":"running"}}]`)
+		return 0
+	}
+	_, _ = fmt.Fprintf(os.Stderr, "unexpected inspect command: %s\n", strings.Join(args, " "))
 	return 1
 }
 

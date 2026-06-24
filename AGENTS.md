@@ -12,6 +12,7 @@ A file to [guide coding agents](https://agents.md/).
 - No tests should be written for Python or shell script changes.
 - **NEVER run `go build ./cmd/md/` without `-o`** — the repo root contains a Python script named `md` and `go build` will overwrite it. Always use `go build -o /tmp/md-test ./cmd/md/` or similar.
 - For Go code changes, ensure code passes `go test ./...`, `go vet ./...`, and `golangci-lint run ./...`.
+- **Cross-platform fake executables in Go tests**: Prefer re-entering the current test binary with `os.Executable()` plus `TestMain`/environment switches. Do not create POSIX shell-script fake executables for tests that must run on Windows CI; Windows cannot execute a temp `docker` shell script without a native `.exe`/`.cmd` wrapper.
 - **Cross-platform paths**: When passing host paths to Docker CLI or SSH config files, always use `filepath.ToSlash()`.
   Docker Desktop on Windows expects forward slashes; SSH config uses POSIX convention.
 - For Python code changes, ensure code passes `pylint .` and `ruff check --no-cache` as defined in `.github/workflows/test.yml`

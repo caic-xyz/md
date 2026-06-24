@@ -707,20 +707,17 @@ func TestContainerInspect(t *testing.T) {
 
 	t.Run("valid fills missing architecture", func(t *testing.T) {
 		t.Parallel()
-		runtimePath := writeFakeRuntime(t, t.TempDir(), `#!/bin/sh
-if [ "$1" = "inspect" ] && [ "$2" = "md-test" ] && [ "$3" = "--format" ]; then
-	echo linux/amd64
-	exit 0
-fi
-if [ "$1" = "inspect" ] && [ "$2" = "md-test" ]; then
-	cat <<'JSON'
-[{"Name":"/md-test","Id":"ctr","Image":"sha256:image","Platform":"linux","Config":{"Image":"base:latest","Labels":{}},"State":{"Status":"running"}}]
-JSON
-	exit 0
-fi
-exit 1
-`)
-		c := &Client{Runtime: runtimePath}
+		runtimePath, err := os.Executable()
+		if err != nil {
+			t.Fatal(err)
+		}
+		c := &Client{
+			Runtime: runtimePath,
+			env: []string{
+				fakeRuntimeEnv + "=1",
+				fakeRuntimeLogEnv + "=" + filepath.Join(t.TempDir(), "runtime.log"),
+			},
+		}
 		info, err := (&Container{Client: c, Name: "md-test"}).Inspect(t.Context())
 		if err != nil {
 			t.Fatal(err)
@@ -729,14 +726,6 @@ exit 1
 			t.Fatalf("Inspect OS/Architecture = %q/%q, want linux/amd64", info.OS, info.Architecture)
 		}
 	})
-}
-
-func writeFakeRuntime(t *testing.T, dir, script string) string {
-	path := filepath.Join(dir, "docker")
-	if err := os.WriteFile(path, []byte(script), 0o700); err != nil { //nolint:gosec // Test creates a fake runtime executable.
-		t.Fatal(err)
-	}
-	return path
 }
 
 func TestFillFromInspect(t *testing.T) {
