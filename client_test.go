@@ -192,6 +192,41 @@ func TestClient(t *testing.T) {
 			}
 		})
 	})
+	t.Run("WatchStats", func(t *testing.T) {
+		t.Parallel()
+		rt, err := os.Executable()
+		if err != nil {
+			t.Fatal(err)
+		}
+		c := &Client{
+			Runtime: rt,
+			env: []string{
+				fakeRuntimeEnv + "=1",
+				fakeRuntimeLogEnv + "=" + filepath.Join(t.TempDir(), "runtime.log"),
+				fakeRuntimeLocalBaseEnv + "=0",
+			},
+		}
+		stats, err := c.WatchStats(t.Context(), []string{"md-one"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got []ContainerStatsSample
+		for s, err := range stats {
+			if err != nil {
+				t.Fatal(err)
+			}
+			got = append(got, s)
+		}
+		if len(got) != 1 {
+			t.Fatalf("stats len = %d, want 1", len(got))
+		}
+		if got[0].Name != "md-one" || got[0].Stats.CPUPerc != 1.5 || got[0].Stats.PIDs != 3 {
+			t.Fatalf("stats = %+v", got[0])
+		}
+		if got[0].Stats.DiskUsed != -1 {
+			t.Fatalf("DiskUsed = %d, want -1", got[0].Stats.DiskUsed)
+		}
+	})
 	t.Run("AgentMounts", func(t *testing.T) {
 		t.Parallel()
 		home := t.TempDir()
@@ -405,6 +440,10 @@ func runFakeRuntime(args []string, logPath string, localBase bool) int {
 		return 1
 	}
 	if len(args) >= 1 && args[0] == "build" {
+		return 0
+	}
+	if len(args) >= 1 && args[0] == "stats" {
+		_, _ = fmt.Fprintln(os.Stdout, `{"Name":"md-one","CPUPerc":"1.5%","MemUsage":"10MiB / 1GiB","MemPerc":"1%","PIDs":"3","NetIO":"2kB / 3kB","BlockIO":"4kB / 5kB"}`)
 		return 0
 	}
 	if len(args) >= 2 && args[0] == "manifest" && args[1] == "inspect" {

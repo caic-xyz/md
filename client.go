@@ -103,6 +103,12 @@ type ContainerEvent struct {
 	Attributes map[string]string
 }
 
+// ContainerStatsSample describes one streamed Docker/Podman stats sample.
+type ContainerStatsSample struct {
+	Name  string
+	Stats *ContainerStats
+}
+
 // New creates a Client with global MD tool config and initialises SSH
 // infrastructure (keys, authorized_keys, config.d include).
 func New(stdout io.Writer) (*Client, error) {
@@ -491,6 +497,66 @@ func (c *Client) PruneImages(ctx context.Context, stdout, stderr io.Writer) ([]s
 		_, _ = fmt.Fprintf(stdout, "- Warning: pruning build cache: %v\n", err)
 	}
 	return removed, nil
+}
+
+// WatchStats streams resource usage for the named running containers.
+//
+// DiskUsed is unavailable from the runtime stats stream and is set to -1.
+func (c *Client) WatchStats(ctx context.Context, names []string) (iter.Seq2[ContainerStatsSample, error], error) {
+	args := make([]string, 0, 5+len(names))
+	args = append(args, c.Runtime, "stats", "--no-trunc", "--format", "{{json .}}")
+	args = append(args, names...)
+	slog.DebugContext(ctx, "md", "msg", "exec", "cmd", args)
+	cmd := exec.CommandContext(ctx, args[0], args[1:]...) //nolint:gosec // args are trusted container names.
+	cmd.Env = c.commandEnv("LANG=C")
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("%s stats stdout: %w", c.Runtime, err)
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("%s stats: %w", c.Runtime, err)
+	}
+	return func(yield func(ContainerStatsSample, error) bool) {
+		stoppedEarly := false
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" {
+				continue
+			}
+			s, name, err := parseStatsLine(line)
+			if err != nil {
+				_ = yield(ContainerStatsSample{}, fmt.Errorf("%s stats: %w", c.Runtime, err))
+				stoppedEarly = true
+				break
+			}
+			s.DiskUsed = -1
+			if !yield(ContainerStatsSample{Name: name, Stats: s}, nil) {
+				stoppedEarly = true
+				break
+			}
+		}
+		if stoppedEarly && ctx.Err() == nil && cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		scanErr := scanner.Err()
+		waitErr := cmd.Wait()
+		if stoppedEarly || ctx.Err() != nil {
+			return
+		}
+		if scanErr != nil {
+			_ = yield(ContainerStatsSample{}, fmt.Errorf("%s stats: %w", c.Runtime, scanErr))
+			return
+		}
+		if waitErr != nil {
+			if msg := strings.TrimSpace(stderr.String()); msg != "" {
+				waitErr = fmt.Errorf("%w: %s", waitErr, msg)
+			}
+			_ = yield(ContainerStatsSample{}, fmt.Errorf("%s stats: %w", c.Runtime, waitErr))
+		}
+	}, nil
 }
 
 // StatsAll fetches resource usage for multiple containers in batch (2 docker
