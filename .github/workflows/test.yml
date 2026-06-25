@@ -203,6 +203,8 @@ jobs:
           sudo systemctl start containerd.service docker.service
           sudo mkdir -p /mnt/user-containers
           sudo chown "$USER:$USER" /mnt/user-containers
+          sudo mkdir -p /mnt/go-test-tmp
+          sudo chown "$USER:$USER" /mnt/go-test-tmp
           mkdir -p ~/.local/share
           ln -s /mnt/user-containers ~/.local/share/containers
       - uses: actions/checkout@v6
@@ -212,6 +214,7 @@ jobs:
       - name: "Check: go test -tags=smoke (short)"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TMPDIR: /mnt/go-test-tmp
         run: go test -tags=smoke -run TestSmoke -short -v -timeout 30m -covermode=count -coverprofile coverage_smoke.txt
       - uses: codecov/codecov-action@v6
         with:
