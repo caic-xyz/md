@@ -94,7 +94,10 @@ func TestDiff(t *testing.T) {
 		writeTestFile(t, filepath.Join(dir, "staged.txt"), "old\n")
 		runTestGit(t, ctx, dir, "add", ".")
 		runTestGit(t, ctx, dir, "commit", "-q", "-m", "init")
-		runTestGit(t, ctx, dir, "branch", "base")
+		runTestGit(t, ctx, dir, "update-ref", "refs/remotes/host/main", "HEAD")
+		runTestGit(t, ctx, dir, "config", "--replace-all", "remote.host.url", ".")
+		runTestGit(t, ctx, dir, "config", "--replace-all", "remote.host.fetch", "+refs/remotes/host/*:refs/remotes/host/*")
+		runTestGit(t, ctx, dir, "branch", "-q", "--set-upstream-to=host/main", "main")
 
 		writeTestFile(t, filepath.Join(dir, "tracked.txt"), "new\n")
 		writeTestFile(t, filepath.Join(dir, "staged.txt"), "new\n")
@@ -131,6 +134,33 @@ func TestDiff(t *testing.T) {
 			if !strings.Contains(status, want) {
 				t.Errorf("status missing %q:\n%s", want, status)
 			}
+		}
+	})
+	t.Run("valid_legacy_base_upstream", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		dir := t.TempDir()
+		runTestGit(t, ctx, dir, "init", "-q", "--initial-branch=main")
+		runTestGit(t, ctx, dir, "config", "user.name", "Test")
+		runTestGit(t, ctx, dir, "config", "user.email", "test@test")
+		writeTestFile(t, filepath.Join(dir, "tracked.txt"), "old\n")
+		runTestGit(t, ctx, dir, "add", ".")
+		runTestGit(t, ctx, dir, "commit", "-q", "-m", "init")
+		runTestGit(t, ctx, dir, "branch", "base")
+		runTestGit(t, ctx, dir, "checkout", "-q", "-B", "caic-2", "base")
+		runTestGit(t, ctx, dir, "branch", "-q", "--set-upstream-to=base", "caic-2")
+		writeTestFile(t, filepath.Join(dir, "tracked.txt"), "new\n")
+
+		cmd := exec.CommandContext(ctx, "bash", "-c", gitDiffCommand(dir, nil, false)) //nolint:gosec // repo path is a test temp dir
+		cmd.Env = append(os.Environ(), "LANG=C")
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("diff command: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+		}
+		if out := stdout.String(); !strings.Contains(out, "tracked.txt") {
+			t.Errorf("diff output missing tracked.txt:\n%s", out)
 		}
 	})
 }
@@ -173,10 +203,133 @@ func TestContainer(t *testing.T) {
 			if err := ct.SyncDefaultBranch(ctx, 0); err != nil {
 				t.Fatal(err)
 			}
-			if got := runTestGit(t, ctx, remoteDir, "rev-parse", "migration"); got != migrationCommit {
-				t.Errorf("pushed migration = %q, want %q", got, migrationCommit)
+			if got := runTestGit(t, ctx, remoteDir, "rev-parse", "refs/remotes/origin/migration"); got != migrationCommit {
+				t.Errorf("pushed origin/migration = %q, want %q", got, migrationCommit)
 			}
 		})
+		t.Run("default_branch_also_updates_origin_ref", func(t *testing.T) {
+			t.Parallel()
+			ctx := t.Context()
+			dir := t.TempDir()
+			originDir := filepath.Join(t.TempDir(), "origin.git")
+			remoteDir := filepath.Join(t.TempDir(), "container.git")
+
+			runTestGit(t, ctx, "", "init", "-q", "--bare", originDir)
+			runTestGit(t, ctx, "", "init", "-q", "--bare", remoteDir)
+			runTestGit(t, ctx, dir, "init", "-q", "--initial-branch=main")
+			runTestGit(t, ctx, dir, "config", "user.name", "Test")
+			runTestGit(t, ctx, dir, "config", "user.email", "test@test")
+			writeTestFile(t, filepath.Join(dir, "tracked.txt"), "remote main\n")
+			runTestGit(t, ctx, dir, "add", ".")
+			runTestGit(t, ctx, dir, "commit", "-q", "-m", "remote main")
+			runTestGit(t, ctx, dir, "remote", "add", "origin", originDir)
+			runTestGit(t, ctx, dir, "push", "-q", "-u", "origin", "main")
+			remoteCommit := runTestGit(t, ctx, dir, "rev-parse", "refs/remotes/origin/main")
+			writeTestFile(t, filepath.Join(dir, "tracked.txt"), "local main\n")
+			runTestGit(t, ctx, dir, "commit", "-q", "-am", "local main")
+
+			ct := &Container{
+				Client: &Client{},
+				Name:   remoteDir,
+				Repos: []Repo{{
+					GitRoot:       dir,
+					Branch:        "main",
+					DefaultRemote: "origin",
+					DefaultBranch: "main",
+				}},
+			}
+			if err := ct.SyncDefaultBranch(ctx, 0); err != nil {
+				t.Fatal(err)
+			}
+			if got := runTestGit(t, ctx, remoteDir, "rev-parse", "refs/remotes/origin/main"); got != remoteCommit {
+				t.Errorf("pushed origin/main = %q, want %q", got, remoteCommit)
+			}
+		})
+		t.Run("tracked_branch_origin_ref_uses_upstream", func(t *testing.T) {
+			t.Parallel()
+			ctx := t.Context()
+			dir := t.TempDir()
+			originDir := filepath.Join(t.TempDir(), "origin.git")
+			remoteDir := filepath.Join(t.TempDir(), "container.git")
+
+			runTestGit(t, ctx, "", "init", "-q", "--bare", originDir)
+			runTestGit(t, ctx, "", "init", "-q", "--bare", remoteDir)
+			runTestGit(t, ctx, dir, "init", "-q", "--initial-branch=main")
+			runTestGit(t, ctx, dir, "config", "user.name", "Test")
+			runTestGit(t, ctx, dir, "config", "user.email", "test@test")
+			writeTestFile(t, filepath.Join(dir, "tracked.txt"), "main\n")
+			runTestGit(t, ctx, dir, "add", ".")
+			runTestGit(t, ctx, dir, "commit", "-q", "-m", "main")
+			runTestGit(t, ctx, dir, "remote", "add", "origin", originDir)
+			runTestGit(t, ctx, dir, "push", "-q", "-u", "origin", "main")
+			runTestGit(t, ctx, dir, "checkout", "-q", "-b", "feature")
+			writeTestFile(t, filepath.Join(dir, "tracked.txt"), "remote feature\n")
+			runTestGit(t, ctx, dir, "commit", "-q", "-am", "remote feature")
+			runTestGit(t, ctx, dir, "push", "-q", "-u", "origin", "feature")
+			remoteFeatureCommit := runTestGit(t, ctx, dir, "rev-parse", "refs/remotes/origin/feature")
+			writeTestFile(t, filepath.Join(dir, "tracked.txt"), "local feature\n")
+			runTestGit(t, ctx, dir, "commit", "-q", "-am", "local feature")
+			localFeatureCommit := runTestGit(t, ctx, dir, "rev-parse", "feature")
+
+			ct := &Container{
+				Client: &Client{},
+				Name:   remoteDir,
+				Repos: []Repo{{
+					GitRoot:       dir,
+					Branch:        "feature",
+					DefaultRemote: "origin",
+					DefaultBranch: "main",
+				}},
+			}
+			if err := ct.SyncDefaultBranch(ctx, 0); err != nil {
+				t.Fatal(err)
+			}
+			gotFeatureCommit := runTestGit(t, ctx, remoteDir, "rev-parse", "refs/remotes/origin/feature")
+			if gotFeatureCommit != remoteFeatureCommit {
+				t.Errorf("pushed origin/feature = %q, want upstream %q", gotFeatureCommit, remoteFeatureCommit)
+			}
+			if gotFeatureCommit == localFeatureCommit {
+				t.Errorf("pushed origin/feature = local unpushed commit %q", gotFeatureCommit)
+			}
+		})
+	})
+	t.Run("resolveContainerBranchBase", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		dir := t.TempDir()
+		upstreamDir := filepath.Join(t.TempDir(), "upstream.git")
+
+		runTestGit(t, ctx, "", "init", "-q", "--bare", upstreamDir)
+		runTestGit(t, ctx, dir, "init", "-q", "--initial-branch=main")
+		runTestGit(t, ctx, dir, "config", "user.name", "Test")
+		runTestGit(t, ctx, dir, "config", "user.email", "test@test")
+		writeTestFile(t, filepath.Join(dir, "tracked.txt"), "main\n")
+		runTestGit(t, ctx, dir, "add", ".")
+		runTestGit(t, ctx, dir, "commit", "-q", "-m", "main")
+		runTestGit(t, ctx, dir, "remote", "add", "upstream", upstreamDir)
+		runTestGit(t, ctx, dir, "push", "-q", "-u", "upstream", "main")
+
+		repo := Repo{GitRoot: dir, Branch: "main"}
+		if err := repo.resolveDefaults(ctx); err != nil {
+			t.Fatal(err)
+		}
+		base, err := repo.resolveContainerBranchBase(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if base.ref != "upstream/main" || base.useHost || base.destination != "refs/remotes/upstream/main" {
+			t.Fatalf("remote base = %+v, want upstream/main without host", base)
+		}
+
+		writeTestFile(t, filepath.Join(dir, "tracked.txt"), "local main\n")
+		runTestGit(t, ctx, dir, "commit", "-q", "-am", "local main")
+		base, err = repo.resolveContainerBranchBase(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if base.ref != "host/main" || !base.useHost || base.destination != "refs/remotes/host/main" {
+			t.Fatalf("local base = %+v, want host/main", base)
+		}
 	})
 	t.Run("Signal", func(t *testing.T) {
 		t.Run("error invalid pid", func(t *testing.T) {

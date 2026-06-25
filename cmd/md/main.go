@@ -136,7 +136,7 @@ func usage() {
 		"\n"+
 		"Commands:\n"+
 		"  build-image   Build the base Docker image locally\n"+
-		"  diff          Show differences between base and current changes\n"+
+		"  diff          Show differences between host branch and current changes\n"+
 		"  fork          Snapshot container and create a new one on forked branches\n"+
 		"  list          List running md containers\n"+
 		"  prune         Remove unused md-specialized-* and md-fork-* images\n"+
@@ -520,10 +520,8 @@ func printContainerSummary(ctx context.Context, ct *md.Container, r *md.StartRes
 		for _, r := range ct.Repos {
 			fmt.Printf("  > Repo %s on branch '%s'\n", filepath.Base(r.MountedPath), r.Branch)
 		}
-		if r != nil {
-			fmt.Printf("  > Host branch '%s' is mapped in the container as 'base'\n", ct.Repos[0].Branch)
-		}
-		fmt.Println("  > See changes (in container): git diff base")
+		fmt.Println("  > Host state is mapped to the branch upstream")
+		fmt.Println("  > See changes (in container): git diff @{upstream}")
 		fmt.Println("  > See changes (on host)     : md diff")
 	}
 	fmt.Println("  > Stop container            : md stop")
