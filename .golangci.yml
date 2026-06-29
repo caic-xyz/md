@@ -99,6 +99,11 @@ linters:
     rules:
       - path: (.+)\.go$
         text: should have a package comment
+      # Smoke tests deliberately serialize expensive container lifecycle steps.
+      - path: smoke_test\.go
+        linters:
+          - paralleltest
+          - tparallel
     paths:
       - third_party$
       - builtin$

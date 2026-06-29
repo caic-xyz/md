@@ -165,8 +165,7 @@ func TestDiff(t *testing.T) {
 	})
 }
 
-func TestContainer(t *testing.T) {
-	t.Parallel()
+func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses t.Setenv for fake ssh.
 	t.Run("SyncDefaultBranch", func(t *testing.T) {
 		t.Parallel()
 		t.Run("local_only_default_branch", func(t *testing.T) {
@@ -330,6 +329,76 @@ func TestContainer(t *testing.T) {
 		if base.ref != "host/main" || !base.useHost || base.destination != "refs/remotes/host/main" {
 			t.Fatalf("local base = %+v, want host/main", base)
 		}
+	})
+	t.Run("Pull", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
+		t.Run("updates_container_diff_base", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
+			ctx := t.Context()
+			fakeSSH(t)
+			home := t.TempDir()
+			sshConfigDir := filepath.Join(home, ".ssh", "config.d")
+			if err := os.MkdirAll(sshConfigDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(sshConfigDir, "md-test.conf"), []byte("Host md-test\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			originDir := filepath.Join(t.TempDir(), "origin.git")
+			hostDir := t.TempDir()
+			containerDir := t.TempDir()
+			containerPath := filepath.ToSlash(containerDir)
+			runTestGit(t, ctx, "", "init", "-q", "--bare", "--initial-branch=main", originDir)
+			runTestGit(t, ctx, hostDir, "init", "-q", "--initial-branch=main")
+			runTestGit(t, ctx, hostDir, "config", "user.name", "Test")
+			runTestGit(t, ctx, hostDir, "config", "user.email", "test@test")
+			writeTestFile(t, filepath.Join(hostDir, "tracked.txt"), "base\n")
+			runTestGit(t, ctx, hostDir, "add", ".")
+			runTestGit(t, ctx, hostDir, "commit", "-q", "-m", "base")
+			runTestGit(t, ctx, hostDir, "remote", "add", "origin", originDir)
+			runTestGit(t, ctx, hostDir, "push", "-q", "-u", "origin", "main")
+			runTestGit(t, ctx, "", "clone", "-q", originDir, containerDir)
+			writeTestFile(t, filepath.Join(hostDir, "host.txt"), "host\n")
+			runTestGit(t, ctx, hostDir, "add", ".")
+			runTestGit(t, ctx, hostDir, "commit", "-q", "-m", "host")
+			runTestGit(t, ctx, containerDir, "config", "user.name", "Test")
+			runTestGit(t, ctx, containerDir, "config", "user.email", "test@test")
+			writeTestFile(t, filepath.Join(containerDir, "container.txt"), "container\n")
+			runTestGit(t, ctx, containerDir, "add", ".")
+			runTestGit(t, ctx, containerDir, "commit", "-q", "-m", "container")
+			runTestGit(t, ctx, hostDir, "remote", "add", "md-test", containerDir)
+
+			ct := &Container{
+				Client: &Client{Home: home, Runtime: "true"},
+				Name:   "md-test",
+				Repos: []Repo{{
+					GitRoot:       hostDir,
+					Branch:        "main",
+					MountedPath:   containerPath,
+					DefaultRemote: "origin",
+					DefaultBranch: "main",
+				}},
+			}
+			var stdout, stderr bytes.Buffer
+			if err := ct.Pull(ctx, &stdout, &stderr, 0, nil); err != nil {
+				t.Fatalf("Pull: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+			}
+			if got := runTestGit(t, ctx, containerDir, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"); got != "host/main" {
+				t.Fatalf("container upstream = %q, want host/main", got)
+			}
+
+			cmd := exec.CommandContext(ctx, "bash", "-c", gitDiffCommand(containerPath, nil, false)) //nolint:gosec // repo path is a test temp dir
+			cmd.Env = append(os.Environ(), "LANG=C")
+			stdout.Reset()
+			stderr.Reset()
+			cmd.Stdout = &stdout
+			cmd.Stderr = &stderr
+			if err := cmd.Run(); err != nil {
+				t.Fatalf("diff command: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+			}
+			if out := stdout.String(); out != "" {
+				t.Fatalf("diff after pull = %q, want empty", out)
+			}
+		})
 	})
 	t.Run("Signal", func(t *testing.T) {
 		t.Run("error invalid pid", func(t *testing.T) {

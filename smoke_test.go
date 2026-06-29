@@ -36,7 +36,7 @@ func newSmokeClient(t *testing.T, rt string) *Client {
 	storageConf += "driver = \"overlay\"\n"
 	storageConf += "graphroot = \"" + filepath.ToSlash(tmpHome) + "/.local/share/containers/storage\"\n"
 	storageConf += "runroot = \"" + filepath.ToSlash(tmp) + "/runroot\"\n"
-	if err := os.WriteFile(filepath.Join(cfgDir, "storage.conf"), []byte(storageConf), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(cfgDir, "storage.conf"), []byte(storageConf), 0o600); err != nil {
 		t.Fatalf("write storage.conf: %v", err)
 	}
 
@@ -141,8 +141,8 @@ func launchSmokeContainer(t *testing.T, ctx context.Context, c *Client, baseImag
 	return ct
 }
 
-func launchSmokeRepoContainer(t *testing.T, ctx context.Context, c *Client, baseImage string, repo Repo) *Container {
-	ct, err := c.Container(repo)
+func launchSmokeRepoContainer(t *testing.T, ctx context.Context, c *Client, baseImage string, repo *Repo) *Container {
+	ct, err := c.Container(*repo)
 	if err != nil {
 		t.Fatalf("Container: %v", err)
 	}
@@ -188,7 +188,7 @@ func createSmokeGitRepoWithRemote(t *testing.T, remoteName, defaultBranch, workB
 	runSmokeGit(t, ctx, "", "init", "-q", "--initial-branch="+defaultBranch, repo)
 	runSmokeGit(t, ctx, repo, "config", "user.name", "Smoke Test")
 	runSmokeGit(t, ctx, repo, "config", "user.email", "smoke@example.invalid")
-	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("initial\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("initial\n"), 0o600); err != nil {
 		t.Fatalf("write README.md: %v", err)
 	}
 	runSmokeGit(t, ctx, repo, "add", ".")
@@ -199,14 +199,14 @@ func createSmokeGitRepoWithRemote(t *testing.T, remoteName, defaultBranch, workB
 	runSmokeGit(t, ctx, repo, "remote", "set-head", remoteName, "-a")
 	if workBranch != defaultBranch {
 		runSmokeGit(t, ctx, repo, "checkout", "-q", "-b", workBranch)
-		if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("remote "+workBranch+"\n"), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("remote "+workBranch+"\n"), 0o600); err != nil {
 			t.Fatalf("write work branch README.md: %v", err)
 		}
 		runSmokeGit(t, ctx, repo, "commit", "-q", "-am", "remote "+workBranch)
 		runSmokeGit(t, ctx, repo, "push", "-q", "-u", remoteName, workBranch)
 	}
 	if unpushedWorkCommit {
-		if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("local "+workBranch+"\n"), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("local "+workBranch+"\n"), 0o600); err != nil {
 			t.Fatalf("write unpushed README.md: %v", err)
 		}
 		runSmokeGit(t, ctx, repo, "commit", "-q", "-am", "local "+workBranch)
@@ -249,10 +249,19 @@ func assertSmokeContainerGitRefMissing(t *testing.T, ct *Container, repoPath, re
 	}
 }
 
+func assertSmokeContainerNoDiff(t *testing.T, ct *Container, repoPath string) {
+	gitArgs := []string{"git", "-C", repoPath, "diff", "--exit-code", "@{upstream}", "--", "."}
+	out, err := ct.runCmd(t.Context(), "", ct.SSHCommand(nil, shellQuoteArgs(gitArgs)))
+	if err != nil {
+		t.Fatalf("container diff against upstream is not empty: %v\n%s", err, out)
+	}
+}
+
 // TestSmoke verifies end-to-end: build images, start containers, confirm sudo
 // and nested podman where supported, pull from registries, and exercise the
 // container lifecycle. Runs under each available container runtime.
 func TestSmoke(t *testing.T) {
+	t.Parallel()
 	for _, rt := range []string{"docker", "podman"} {
 		t.Run(rt, func(t *testing.T) {
 			if _, err := exec.LookPath(rt); err != nil {
@@ -455,7 +464,7 @@ func TestSmoke(t *testing.T) {
 			t.Run("repo_workflow", func(t *testing.T) {
 				repo := createSmokeGitRepo(t, "main", "main", false)
 				mountedPath := "/home/user/src/smoke-" + rt + "-repo"
-				ct := launchSmokeRepoContainer(t, t.Context(), client, baseImage, Repo{
+				ct := launchSmokeRepoContainer(t, t.Context(), client, baseImage, &Repo{
 					GitRoot:     repo,
 					Branch:      "main",
 					MountedPath: mountedPath,
@@ -493,7 +502,7 @@ func TestSmoke(t *testing.T) {
 				})
 
 				t.Run("push_pull", func(t *testing.T) {
-					if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("local-push\n"), 0o644); err != nil {
+					if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("local-push\n"), 0o600); err != nil {
 						t.Fatalf("write local README.md: %v", err)
 					}
 					runSmokeGit(t, t.Context(), repo, "commit", "-q", "-am", "local push")
@@ -512,6 +521,7 @@ func TestSmoke(t *testing.T) {
 					if got := strings.TrimSpace(out); got != "local-push" {
 						t.Fatalf("container README.md = %q, want local-push", got)
 					}
+					assertSmokeContainerNoDiff(t, ct, mountedPath)
 
 					if _, err := ct.runCmd(t.Context(), "", ct.SSHCommand(nil, "printf 'container-pull\n' > "+shellQuote(mountedPath+"/README.md"))); err != nil {
 						t.Fatalf("write container README.md: %v", err)
@@ -519,7 +529,7 @@ func TestSmoke(t *testing.T) {
 					if err := ct.Pull(t.Context(), io.Discard, io.Discard, 0, nil); err != nil {
 						t.Fatalf("Pull: %v", err)
 					}
-					data, err := os.ReadFile(filepath.Join(repo, "README.md"))
+					data, err := os.ReadFile(filepath.Join(repo, "README.md")) //nolint:gosec // repo is a test temp dir.
 					if err != nil {
 						t.Fatalf("read local README.md: %v", err)
 					}
@@ -529,6 +539,7 @@ func TestSmoke(t *testing.T) {
 					if got := runSmokeGit(t, t.Context(), repo, "status", "--short"); got != "" {
 						t.Fatalf("local repo is dirty after Pull:\n%s", got)
 					}
+					assertSmokeContainerNoDiff(t, ct, mountedPath)
 				})
 
 				t.Run("fork", func(t *testing.T) {
@@ -541,10 +552,9 @@ func TestSmoke(t *testing.T) {
 						_, _ = client.runCmd(cleanupCtx, "", []string{client.Runtime, "rmi", "-f", "md-fork-" + ct.Name})
 					})
 
-					if _, err := ct.runCmd(t.Context(), "", ct.SSHCommand(nil, strings.Join([]string{
-						"printf snapshot > /tmp/fork-marker",
-						"printf 'fork-uncommitted\n' > " + shellQuote(mountedPath+"/README.md"),
-					}, " && "))); err != nil {
+					prepareForkCmd := "printf snapshot > /tmp/fork-marker" +
+						" && printf 'fork-uncommitted\n' > " + shellQuote(mountedPath+"/README.md")
+					if _, err := ct.runCmd(t.Context(), "", ct.SSHCommand(nil, prepareForkCmd)); err != nil {
 						t.Fatalf("prepare source for Fork: %v", err)
 					}
 
@@ -598,7 +608,7 @@ func TestSmoke(t *testing.T) {
 			t.Run("repo_remote_refs_non_default_base_branch", func(t *testing.T) {
 				repo := createSmokeGitRepoWithRemote(t, "upstream", "release", "feature", true)
 				mountedPath := "/home/user/src/smoke-" + rt + "-non-default-base"
-				ct := launchSmokeRepoContainer(t, t.Context(), client, baseImage, Repo{
+				ct := launchSmokeRepoContainer(t, t.Context(), client, baseImage, &Repo{
 					GitRoot:     repo,
 					Branch:      "feature",
 					MountedPath: mountedPath,
@@ -635,7 +645,7 @@ func TestSmoke(t *testing.T) {
 			t.Run("cache", func(t *testing.T) {
 				t.Parallel()
 				src := t.TempDir()
-				if err := os.WriteFile(filepath.Join(src, "hello.txt"), []byte("cache-works"), 0o644); err != nil {
+				if err := os.WriteFile(filepath.Join(src, "hello.txt"), []byte("cache-works"), 0o600); err != nil {
 					t.Fatal(err)
 				}
 				ct := launchSmokeContainer(t, t.Context(), client, baseImage, rt+"-cache", false, CacheMount{

@@ -7,15 +7,18 @@
 package md
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -23,13 +26,22 @@ const (
 	fakeRuntimeEnv          = "MD_TEST_FAKE_RUNTIME"
 	fakeRuntimeLocalBaseEnv = "MD_TEST_FAKE_RUNTIME_LOCAL_BASE"
 	fakeRuntimeLogEnv       = "MD_TEST_FAKE_RUNTIME_LOG"
+	fakeSSHEnv              = "MD_TEST_FAKE_SSH"
 )
 
 func TestMain(m *testing.M) {
+	if os.Getenv(fakeSSHEnv) == "1" && isFakeSSHExecutable(os.Args[0]) {
+		os.Exit(runFakeSSH(os.Args[1:]))
+	}
 	if os.Getenv(fakeRuntimeEnv) == "1" {
 		os.Exit(runFakeRuntime(os.Args[1:], os.Getenv(fakeRuntimeLogEnv), os.Getenv(fakeRuntimeLocalBaseEnv) == "1"))
 	}
 	os.Exit(m.Run())
+}
+
+func isFakeSSHExecutable(name string) bool {
+	base := filepath.Base(name)
+	return base == "ssh" || base == "ssh.exe"
 }
 
 func TestSanitizeDockerName(t *testing.T) {
@@ -422,6 +434,76 @@ func fakeRuntime(t *testing.T, logPath string, localBase bool) string {
 		t.Fatal(err)
 	}
 	return exe
+}
+
+func fakeSSH(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	name := "ssh"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	fakePath := filepath.Join(dir, name)
+	if err := linkOrCopyExecutable(exe, fakePath); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(fakeSSHEnv, "1")
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func linkOrCopyExecutable(src, dst string) error {
+	if err := os.Link(src, dst); err == nil {
+		return nil
+	}
+	in, err := os.Open(src) //nolint:gosec // test helper copies the current test binary.
+	if err != nil {
+		return err
+	}
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755) //nolint:gosec // fake executable in private temp dir must be executable.
+	if err != nil {
+		return errors.Join(err, in.Close())
+	}
+	_, copyErr := io.Copy(out, in)
+	return errors.Join(copyErr, out.Close(), in.Close())
+}
+
+func runFakeSSH(args []string) int {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	hostIndex := 0
+	for hostIndex < len(args) && strings.HasPrefix(args[hostIndex], "-") {
+		switch args[hostIndex] {
+		case "-F", "-i", "-o", "-p":
+			hostIndex += 2
+		default:
+			hostIndex++
+		}
+	}
+	if hostIndex >= len(args) {
+		_, _ = fmt.Fprintln(os.Stderr, "missing ssh host")
+		return 1
+	}
+	if hostIndex+1 >= len(args) {
+		return 0
+	}
+	cmd := exec.CommandContext(ctx, "bash", "-c", strings.Join(args[hostIndex+1:], " ")) //nolint:gosec // test fake executes trusted test commands.
+	cmd.Env = append(os.Environ(), "LANG=C")
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return exitErr.ExitCode()
+		}
+		_, _ = fmt.Fprintf(os.Stderr, "fake ssh: %v\n", err)
+		return 1
+	}
+	return 0
 }
 
 func runFakeRuntime(args []string, logPath string, localBase bool) int {

@@ -810,7 +810,17 @@ func (c *Container) Pull(ctx context.Context, stdout, stderr io.Writer, repoIdx 
 		return err
 	}
 	pushArgs := []string{"git", "push", "-q", "-f", c.Name, base.source + ":" + base.destination}
-	return c.runCmdOut(ctx, r.GitRoot, pushArgs, stdout, stderr)
+	if err := c.runCmdOut(ctx, r.GitRoot, pushArgs, stdout, stderr); err != nil {
+		return err
+	}
+	remoteURL, _ := c.runCmd(ctx, r.GitRoot, []string{"git", "remote", "get-url", r.DefaultRemote})
+	if err := c.configureContainerRemotes(ctx, repoIdx, convertGitURLToHTTPS(remoteURL), base.useHost); err != nil {
+		return err
+	}
+	mp := shellQuote(r.MountedPath)
+	branch := shellQuote(r.Branch)
+	baseRef := shellQuote(base.ref)
+	return c.runCmdOut(ctx, "", c.SSHCommand(nil, "cd "+mp+" && git switch -q -C "+branch+" "+baseRef+" && git branch -q --set-upstream-to="+baseRef), stdout, stderr)
 }
 
 // Diff writes the diff between the host branch and current for Repos[repoIdx] to stdout/stderr.
