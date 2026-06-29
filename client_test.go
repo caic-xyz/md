@@ -20,6 +20,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 const (
@@ -442,6 +443,12 @@ func fakeSSH(t *testing.T) {
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
+	t.Cleanup(func() {
+		// Windows can keep a just-executed fake ssh.exe locked briefly.
+		if err := removeAllWithRetry(dir); err != nil {
+			t.Errorf("removing fake SSH dir %q: %v", dir, err)
+		}
+	})
 	name := "ssh"
 	if runtime.GOOS == "windows" {
 		name += ".exe"
@@ -452,6 +459,19 @@ func fakeSSH(t *testing.T) {
 	}
 	t.Setenv(fakeSSHEnv, "1")
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func removeAllWithRetry(path string) error {
+	const attempts = 100
+	var err error
+	for range attempts {
+		err = os.RemoveAll(path)
+		if err == nil || runtime.GOOS != "windows" {
+			return err
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return err
 }
 
 func linkOrCopyExecutable(src, dst string) error {
