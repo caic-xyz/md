@@ -225,6 +225,48 @@ func runSmokeGit(t *testing.T, ctx context.Context, wd string, args ...string) s
 	return strings.TrimSpace(string(out))
 }
 
+func runSmokeMD(t *testing.T, c *Client, args ...string) string {
+	ctx := t.Context()
+	repoRoot, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("get working directory: %v", err)
+	}
+	goArgs := append([]string{"run", "./cmd/md", "--runtime", c.Runtime}, args...)
+	cmd := exec.CommandContext(ctx, "go", goArgs...) //nolint:gosec // args are test-controlled.
+	cmd.Dir = repoRoot
+	overrides := append([]string(nil), c.env...)
+	overrides = append(overrides, "LANG=C")
+	overrides = append(overrides, smokeGoEnv(t)...)
+	cmd.Env = envWithOverrides(os.Environ(), overrides)
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("md %s: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
+	}
+	return stdout.String()
+}
+
+func smokeGoEnv(t *testing.T) []string {
+	cmd := exec.CommandContext(t.Context(), "go", "env", "GOCACHE", "GOMODCACHE", "GOPATH")
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("go env: %v", err)
+	}
+	keys := []string{"GOCACHE", "GOMODCACHE", "GOPATH"}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	if len(lines) != len(keys) {
+		t.Fatalf("go env returned %d lines, want %d:\n%s", len(lines), len(keys), out)
+	}
+	env := make([]string, 0, len(keys))
+	for i, value := range lines {
+		if value != "" {
+			env = append(env, keys[i]+"="+value)
+		}
+	}
+	return env
+}
+
 func runSmokeContainerGit(t *testing.T, ct *Container, repoPath string, args ...string) string {
 	gitArgs := append([]string{"git", "-C", repoPath}, args...)
 	out, err := ct.runCmd(t.Context(), "", ct.SSHCommand(nil, shellQuoteArgs(gitArgs)))
@@ -581,6 +623,66 @@ func TestSmoke(t *testing.T) {
 						}
 					}
 				})
+			})
+
+			t.Run("run_apply_patch", func(t *testing.T) {
+				repo := createSmokeGitRepo(t, "main", "main", false)
+				runSmokeMD(t, client,
+					"run",
+					"-image", baseImage,
+					"-repo", repo,
+					"-branch", "main",
+					"-no-caches",
+					"-apply-patch",
+					"bash", "-c", "echo foo > bar.txt",
+				)
+				data, err := os.ReadFile(filepath.Join(repo, "bar.txt")) //nolint:gosec // repo is a test temp dir.
+				if err != nil {
+					t.Fatalf("read applied file: %v", err)
+				}
+				if got := strings.TrimSpace(string(data)); got != "foo" {
+					t.Fatalf("bar.txt = %q, want foo", got)
+				}
+				if got := runSmokeGit(t, t.Context(), repo, "status", "--short"); got != "" {
+					t.Fatalf("local repo is dirty after md run -apply-patch:\n%s", got)
+				}
+			})
+
+			t.Run("diff_rebase_in_progress", func(t *testing.T) {
+				repo := createSmokeGitRepo(t, "main", "main", false)
+				mountedPath := "/home/user/src/smoke-" + rt + "-rebase"
+				ct := launchSmokeRepoContainer(t, t.Context(), client, baseImage, &Repo{
+					GitRoot:     repo,
+					Branch:      "main",
+					MountedPath: mountedPath,
+				})
+
+				prepareRebaseCmd := strings.Join([]string{
+					"cd " + shellQuote(mountedPath),
+					"git config user.name 'Smoke Test'",
+					"git config user.email smoke@example.invalid",
+					"git checkout -q -b rebase-target",
+					"printf 'target\n' > README.md",
+					"git commit -q -am target",
+					"git checkout -q main",
+					"printf 'container\n' > README.md",
+					"git commit -q -am container",
+					"if git rebase rebase-target >/tmp/md-rebase.out 2>/tmp/md-rebase.err; then echo 'rebase unexpectedly succeeded' >&2; exit 1; fi",
+					"test -s .git/rebase-merge/head-name",
+				}, " && ")
+				if _, err := ct.runCmd(t.Context(), "", ct.SSHCommand(nil, prepareRebaseCmd)); err != nil {
+					t.Fatalf("prepare in-progress rebase: %v", err)
+				}
+
+				out := runSmokeMD(t, client,
+					"diff",
+					"-repo", repo,
+					"-branch", "main",
+					"--name-only",
+				)
+				if got := strings.TrimSpace(out); got != "README.md" {
+					t.Fatalf("md diff --name-only = %q, want README.md", got)
+				}
 			})
 
 			t.Run("repo_remote_refs_non_default_base_branch", func(t *testing.T) {

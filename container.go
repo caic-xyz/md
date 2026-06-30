@@ -43,7 +43,28 @@ const DefaultBaseImage = "ghcr.io/caic-xyz/md-user"
 const (
 	tailscaleDeviceIDPath  = "/var/lib/md/tailscale_device_id"
 	hostRemoteSetupCommand = "git config --replace-all remote.host.url . && (git config --unset-all remote.host.pushurl >/dev/null 2>&1 || true) && git config --replace-all remote.host.fetch '+refs/remotes/host/*:refs/remotes/host/*'"
-	gitBaseRefCommand      = `if ! base_ref=$(git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null); then base_ref=; fi; if [ -z "$base_ref" ] && git rev-parse --verify --quiet base >/dev/null; then base_ref=base; fi; if [ -z "$base_ref" ]; then echo 'no upstream branch configured' >&2; exit 128; fi`
+	// gitBaseRefCommand resolves the ref used as the base for container diffs.
+	// It prefers the current upstream, falls back to the upstream of the branch
+	// recorded by an in-progress rebase, then supports the legacy base branch.
+	gitBaseRefCommand = `if ! base_ref=$(git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null); then
+	base_ref=
+fi
+if [ -z "$base_ref" ]; then
+	for rebase_head in "$(git rev-parse --git-path rebase-merge/head-name)" "$(git rev-parse --git-path rebase-apply/head-name)"; do
+		if [ -s "$rebase_head" ]; then
+			head_ref=$(cat "$rebase_head")
+			base_ref=$(git for-each-ref --format='%(upstream:short)' "$head_ref")
+			break
+		fi
+	done
+fi
+if [ -z "$base_ref" ] && git rev-parse --verify --quiet base >/dev/null; then
+	base_ref=base
+fi
+if [ -z "$base_ref" ]; then
+	echo 'no upstream branch configured' >&2
+	exit 128
+fi`
 )
 
 // Repo describes a git repository to push into a container.
@@ -216,6 +237,7 @@ func (c *Container) SSHCommand(opts []string, cmd string) []string {
 func (c *Container) Processes(ctx context.Context) ([]ProcessInfo, error) {
 	cmd := "ps -eo pid,ppid,user,stat,%cpu,%mem,time,args --no-headers"
 	sshArgs := c.SSHCommand(nil, cmd)
+	slog.DebugContext(ctx, "md", "msg", "ssh", "container", c.Name, "cmd", sshArgs)
 	ec := exec.CommandContext(ctx, sshArgs[0], sshArgs[1:]...) //nolint:gosec // SSH target is an md container name; command is a constant literal.
 	ec.Env = c.commandEnv()
 	out, err := ec.CombinedOutput()
@@ -232,6 +254,7 @@ func (c *Container) Signal(ctx context.Context, pid int, sig string) error {
 	}
 	cmd := fmt.Sprintf("kill -s %s %d", shellQuote(sig), pid)
 	sshArgs := c.SSHCommand(nil, cmd)
+	slog.DebugContext(ctx, "md", "msg", "ssh", "container", c.Name, "cmd", sshArgs)
 	ec := exec.CommandContext(ctx, sshArgs[0], sshArgs[1:]...) //nolint:gosec // SSH target is an md container name; pid is an integer and sig is shell-quoted.
 	ec.Env = c.commandEnv()
 	out, err := ec.CombinedOutput()
@@ -778,6 +801,7 @@ func (c *Container) Diff(ctx context.Context, stdout, stderr io.Writer, repoIdx 
 	}
 	exitOnDiff := slices.Contains(extraArgs, "--exit-code") || slices.Contains(extraArgs, "--quiet")
 	sshArgs := c.SSHCommand(opts, gitDiffCommand(repo.MountedPath, extraArgs, exitOnDiff))
+	slog.DebugContext(ctx, "md", "msg", "ssh", "container", c.Name, "cmd", sshArgs)
 	cmd := exec.CommandContext(ctx, sshArgs[0]) //nolint:gosec // args are from trusted SSH config
 	cmd.Env = c.commandEnv()
 	if isTTY {
@@ -1042,6 +1066,7 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 		envContent = append(envContent, extraEnv...)
 	}
 	sshEnvArgs := fork.SSHCommand(nil, "cat > /home/user/.env")
+	slog.DebugContext(ctx, "md", "msg", "ssh", "container", fork.Name, "cmd", sshEnvArgs)
 	for {
 		cmd := exec.CommandContext(ctx, sshEnvArgs[0], sshEnvArgs[1:]...) //nolint:gosec // args are from trusted SSH config
 		cmd.Env = fork.commandEnv()
@@ -1455,8 +1480,9 @@ func (c *Container) readContainerFile(ctx context.Context, containerPath string)
 // TCP socket opens (sshd may need a few more milliseconds to accept auth).
 func (c *Container) waitForSSH(ctx context.Context, deadline time.Time) error {
 	var lastErr error
+	sshArgs := c.SSHCommand(nil, "true")
+	slog.DebugContext(ctx, "md", "msg", "ssh", "container", c.Name, "cmd", sshArgs)
 	for {
-		sshArgs := c.SSHCommand(nil, "true")
 		cmd := exec.CommandContext(ctx, sshArgs[0], sshArgs[1:]...) //nolint:gosec // args are from trusted SSH config
 		cmd.Env = c.commandEnv()
 		if out, err := cmd.CombinedOutput(); err == nil {
@@ -2163,6 +2189,7 @@ func (c *Container) sendEnv(ctx context.Context, stdout io.Writer, opts *StartOp
 		_, _ = fmt.Fprintln(stdout, "- sending .env into container ...")
 	}
 	sshEnvArgs := c.SSHCommand(nil, "cat > /home/user/.env")
+	slog.DebugContext(ctx, "md", "msg", "ssh", "container", c.Name, "cmd", sshEnvArgs)
 	cmd := exec.CommandContext(ctx, sshEnvArgs[0], sshEnvArgs[1:]...) //nolint:gosec // args are from trusted SSH config
 	cmd.Env = c.commandEnv()
 	cmd.Stdin = bytes.NewReader(envContent)

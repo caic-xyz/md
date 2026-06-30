@@ -183,6 +183,50 @@ func TestDiff(t *testing.T) {
 			t.Errorf("diff output missing tracked.txt:\n%s", out)
 		}
 	})
+	t.Run("valid_rebase_in_progress", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		dir := t.TempDir()
+		runTestGit(t, ctx, dir, "init", "-q", "--initial-branch=main")
+		runTestGit(t, ctx, dir, "config", "user.name", "Test")
+		runTestGit(t, ctx, dir, "config", "user.email", "test@test")
+		writeTestFile(t, filepath.Join(dir, "tracked.txt"), "base\n")
+		runTestGit(t, ctx, dir, "add", ".")
+		runTestGit(t, ctx, dir, "commit", "-q", "-m", "base")
+		runTestGit(t, ctx, dir, "update-ref", "refs/remotes/host/main", "HEAD")
+		runTestGit(t, ctx, dir, "config", "--replace-all", "remote.host.url", ".")
+		runTestGit(t, ctx, dir, "config", "--replace-all", "remote.host.fetch", "+refs/remotes/host/*:refs/remotes/host/*")
+		runTestGit(t, ctx, dir, "branch", "-q", "--set-upstream-to=host/main", "main")
+
+		runTestGit(t, ctx, dir, "checkout", "-q", "-b", "rebase-target")
+		writeTestFile(t, filepath.Join(dir, "tracked.txt"), "target\n")
+		runTestGit(t, ctx, dir, "commit", "-q", "-am", "target")
+		runTestGit(t, ctx, dir, "checkout", "-q", "main")
+		writeTestFile(t, filepath.Join(dir, "tracked.txt"), "local\n")
+		runTestGit(t, ctx, dir, "commit", "-q", "-am", "local")
+
+		rebase := exec.CommandContext(ctx, "git", "rebase", "rebase-target")
+		rebase.Dir = dir
+		rebase.Env = append(os.Environ(), "LANG=C")
+		if out, err := rebase.CombinedOutput(); err == nil {
+			t.Fatalf("git rebase unexpectedly succeeded:\n%s", out)
+		}
+		if _, err := os.Stat(filepath.Join(dir, ".git", "rebase-merge", "head-name")); err != nil {
+			t.Fatalf("rebase metadata missing: %v", err)
+		}
+
+		cmd := exec.CommandContext(ctx, "bash", "-c", gitDiffCommand(dir, []string{"--name-only"}, false)) //nolint:gosec // repo path is a test temp dir
+		cmd.Env = append(os.Environ(), "LANG=C")
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("diff command: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+		}
+		if got := strings.TrimSpace(stdout.String()); got != "tracked.txt" {
+			t.Errorf("diff --name-only = %q, want tracked.txt", got)
+		}
+	})
 }
 
 func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with t.Setenv.

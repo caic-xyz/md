@@ -13,6 +13,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -155,6 +156,8 @@ func cleanupControlSocket(ctx context.Context, containerName string) {
 	if _, err := os.Stat(sock); err != nil {
 		return
 	}
-	_ = exec.CommandContext(ctx, "ssh", "-O", "exit", "-S", sock, "x").Run() //nolint:gosec // sock is from trusted container name
+	args := []string{"ssh", "-O", "exit", "-S", sock, "x"}
+	slog.DebugContext(ctx, "md", "msg", "ssh", "container", containerName, "cmd", args)
+	_ = exec.CommandContext(ctx, args[0], args[1:]...).Run() //nolint:gosec // sock is from trusted container name
 	_ = os.Remove(sock)
 }

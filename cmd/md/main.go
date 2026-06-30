@@ -499,6 +499,7 @@ func cmdStart(ctx context.Context, args []string) error {
 	}
 	if !*noSSH {
 		sshArgs := ct.SSHCommand(nil, "")
+		slog.DebugContext(ctx, "md", "msg", "ssh", "container", ct.Name, "cmd", sshArgs)
 		cmd := exec.CommandContext(ctx, sshArgs[0], sshArgs[1:]...) //nolint:gosec // args are from trusted SSH config
 		cmd.Stdin = os.Stdin
 		cmd.Stdout = os.Stdout
@@ -692,6 +693,7 @@ func runTemporaryCommand(ctx context.Context, c *md.Container, stdout, stderr io
 		sshCommand = "cd " + shellQuote(c.Repos[0].MountedPath) + " && " + sshCommand
 	}
 	sshArgs := c.SSHCommand(nil, sshCommand)
+	slog.DebugContext(ctx, "md", "msg", "ssh", "container", c.Name, "cmd", sshArgs)
 	cmd := exec.CommandContext(ctx, sshArgs[0], sshArgs[1:]...) //nolint:gosec // SSH target is an md container name and command is shell-quoted.
 	cmd.Env = append(os.Environ(), "LANG=C")
 	cmd.Stdout = stdout
@@ -1222,6 +1224,7 @@ func cmdFork(ctx context.Context, args []string) error {
 	}
 	if !*noSSH {
 		sshArgs := fork.SSHCommand(nil, "")
+		slog.DebugContext(ctx, "md", "msg", "ssh", "container", fork.Name, "cmd", sshArgs)
 		cmd := exec.CommandContext(ctx, sshArgs[0], sshArgs[1:]...) //nolint:gosec // args are from trusted SSH config
 		cmd.Stdin = os.Stdin
 		cmd.Stdout = os.Stdout
