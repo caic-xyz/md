@@ -554,7 +554,13 @@ func cmdRun(ctx context.Context, args []string) error {
 	noCacheSpecs := &stringSlice{}
 	fs.Var(noCacheSpecs, "no-cache", "Exclude a default well-known cache by name; may be repeated")
 	noCaches := fs.Bool("no-caches", false, "Disable all default caches")
+	extraRepos := &stringSlice{}
+	fs.Var(extraRepos, "extra-repo", "Additional git repository path[:branch] to map; may be repeated")
+	fs.Var(extraRepos, "e", "Additional git repository path[:branch] to map; may be repeated")
 	github := fs.Bool("github", false, "Inject GitHub token into container")
+	envSpecs := &stringSlice{}
+	fs.Var(envSpecs, "env", "Set environment in container: NAME copies host, NAME=value sets, NAME= unsets; may be repeated")
+	applyPatch := fs.Bool("apply-patch", false, "Pull changes from the temporary container back to the host after the command")
 	cpus := fs.Int("cpus", md.DefaultMaxCPUs(), "Max CPU cores for the container (0=no limit)")
 	dockerFlags := &shellSplitSlice{}
 	fs.Var(dockerFlags, "docker-flag", "Extra flag passed verbatim to docker/podman run; may be repeated")
@@ -567,7 +573,7 @@ func cmdRun(ctx context.Context, args []string) error {
 	if len(extra) == 0 {
 		return errors.New("no command specified")
 	}
-	ct, err := newContainer(ctx, cf, nil)
+	ct, err := newContainer(ctx, cf, extraRepos.values)
 	if err != nil {
 		return err
 	}
@@ -596,7 +602,10 @@ func cmdRun(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	var extraEnv []string
+	extraEnv, err := resolveEnvSpecs(envSpecs.values, os.LookupEnv)
+	if err != nil {
+		return err
+	}
 	if githubToken != "" {
 		extraEnv = append(extraEnv, "GITHUB_TOKEN="+githubToken)
 	}
@@ -610,7 +619,7 @@ func cmdRun(ctx context.Context, args []string) error {
 		MaxCPUs:      *cpus,
 		ExtraRunArgs: dockerFlags.values,
 	}
-	exitCode, err := runTemporaryContainer(ctx, ct, os.Stdout, os.Stderr, extra, &opts)
+	exitCode, err := runTemporaryContainer(ctx, ct, os.Stdout, os.Stderr, extra, &opts, *applyPatch)
 	if err != nil {
 		return err
 	}
@@ -620,9 +629,12 @@ func cmdRun(ctx context.Context, args []string) error {
 	return nil
 }
 
-func runTemporaryContainer(ctx context.Context, c *md.Container, stdout, stderr io.Writer, command []string, opts *md.StartOpts) (int, error) {
+func runTemporaryContainer(ctx context.Context, c *md.Container, stdout, stderr io.Writer, command []string, opts *md.StartOpts, applyPatch bool) (int, error) {
 	if len(command) == 0 {
 		return 1, errors.New("no command specified")
+	}
+	if applyPatch && len(c.Repos) == 0 {
+		return 1, errors.New("--apply-patch requires a git repository")
 	}
 	tmp, err := newRunContainer(c)
 	if err != nil {
@@ -636,6 +648,16 @@ func runTemporaryContainer(ctx context.Context, c *md.Container, stdout, stderr 
 	}
 
 	exitCode, err := runTemporaryCommand(ctx, tmp, stdout, stderr, command)
+	if applyPatch {
+		for i := range tmp.Repos {
+			if pullErr := tmp.Pull(ctx, stdout, stderr, i, nil); pullErr != nil {
+				err = errors.Join(err, fmt.Errorf("applying patch for %s: %w", tmp.Repos[i].MountedPath, pullErr))
+				if exitCode == 0 {
+					exitCode = 1
+				}
+			}
+		}
+	}
 	if cleanupErr := purgeTemporaryContainer(ctx, tmp); cleanupErr != nil {
 		if exitCode != 0 {
 			_, _ = fmt.Fprintf(stderr, "md: %v\n", cleanupErr)
@@ -651,10 +673,9 @@ func newRunContainer(c *md.Container) (*md.Container, error) {
 	if _, err := rand.Read(suffix[:]); err != nil {
 		return nil, fmt.Errorf("generate temporary container suffix: %w", err)
 	}
-	var repos []md.Repo
+	repos := slices.Clone(c.Repos)
 	name := "md-run-" + hex.EncodeToString(suffix[:])
 	if len(c.Repos) > 0 {
-		repos = append(repos, c.Repos[0])
 		repoName := runContainerNameComponent(filepath.Base(c.Repos[0].MountedPath))
 		name = "md-" + repoName + "-run-" + hex.EncodeToString(suffix[:])
 	}
@@ -1551,6 +1572,39 @@ func resolveMounts(specs []string) ([]md.Mount, error) {
 		result = append(result, m)
 	}
 	return result, nil
+}
+
+func resolveEnvSpecs(specs []string, lookup func(string) (string, bool)) ([]string, error) {
+	result := make([]string, 0, len(specs))
+	for _, spec := range specs {
+		name, value, hasValue := strings.Cut(spec, "=")
+		if !validEnvName(name) {
+			return nil, fmt.Errorf("invalid --env %q: environment variable names must match [A-Za-z_][A-Za-z0-9_]*", spec)
+		}
+		if hasValue {
+			result = append(result, name+"="+value)
+			continue
+		}
+		value, ok := lookup(name)
+		if !ok {
+			return nil, fmt.Errorf("--env %s: host environment variable is not set", name)
+		}
+		result = append(result, name+"="+value)
+	}
+	return result, nil
+}
+
+func validEnvName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i, c := range name {
+		if c == '_' || c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || i > 0 && c >= '0' && c <= '9' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func customCacheName(hostPath string) string {

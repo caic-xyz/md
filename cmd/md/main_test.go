@@ -7,6 +7,8 @@
 package main
 
 import (
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/caic-xyz/md"
@@ -35,6 +37,35 @@ func TestContainerFlags(t *testing.T) {
 			t.Fatal("expected error for x64 alias")
 		}
 	})
+}
+
+func TestNewRunContainer(t *testing.T) {
+	t.Parallel()
+	client := &md.Client{}
+	source := &md.Container{
+		Client: client,
+		Repos: []md.Repo{
+			{GitRoot: "/src/one", Branch: "main", MountedPath: "/home/user/src/one"},
+			{GitRoot: "/src/two", Branch: "feature", MountedPath: "/home/user/src/two"},
+		},
+	}
+	got, err := newRunContainer(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Client != client {
+		t.Fatal("Client was not preserved")
+	}
+	if !strings.HasPrefix(got.Name, "md-one-run-") {
+		t.Fatalf("Name = %q, want md-one-run-*", got.Name)
+	}
+	if !slices.Equal(got.Repos, source.Repos) {
+		t.Fatalf("Repos = %+v, want %+v", got.Repos, source.Repos)
+	}
+	got.Repos[0].Branch = "changed"
+	if source.Repos[0].Branch == "changed" {
+		t.Fatal("Repos aliases source slice")
+	}
 }
 
 func TestResolveCaches(t *testing.T) {
@@ -270,6 +301,41 @@ func TestResolveMounts(t *testing.T) {
 		for _, spec := range []string{"notapath", "/host:/container:rw"} {
 			if _, err := resolveMounts([]string{spec}); err == nil {
 				t.Errorf("resolveMounts(%q): expected error", spec)
+			}
+		}
+	})
+}
+
+func TestResolveEnvSpecs(t *testing.T) {
+	t.Parallel()
+	lookup := func(name string) (string, bool) {
+		values := map[string]string{
+			"FROM_HOST":  "host value",
+			"HOST_EMPTY": "",
+			"HOST_MULTI": "host line 1\nhost line 2",
+			"QUOTE":      "a'b",
+		}
+		value, ok := values[name]
+		return value, ok
+	}
+
+	t.Run("valid", func(t *testing.T) {
+		t.Parallel()
+		got, err := resolveEnvSpecs([]string{"FROM_HOST", "HOST_EMPTY", "HOST_MULTI", "LITERAL=hello world", "MULTI=line 1\nline 2", "QUOTE", "UNSET="}, lookup)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []string{"FROM_HOST=host value", "HOST_EMPTY=", "HOST_MULTI=host line 1\nhost line 2", "LITERAL=hello world", "MULTI=line 1\nline 2", "QUOTE=a'b", "UNSET="}
+		if !slices.Equal(got, want) {
+			t.Errorf("resolveEnvSpecs() = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("error", func(t *testing.T) {
+		t.Parallel()
+		for _, spec := range []string{"", "1BAD=x", "BAD-NAME=x", "MISSING"} {
+			if _, err := resolveEnvSpecs([]string{spec}, lookup); err == nil {
+				t.Errorf("resolveEnvSpecs(%q): expected error", spec)
 			}
 		}
 	})

@@ -81,6 +81,26 @@ func TestShellQuoteArgs(t *testing.T) {
 	})
 }
 
+func TestRenderExtraEnv(t *testing.T) {
+	t.Parallel()
+	got, err := renderExtraEnv([]string{"MULTI=line 1\nline 2", "QUOTE=a'b", "GONE="})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "MULTI='line 1\nline 2'\nQUOTE='a'\\''b'\nunset GONE\n"
+	if string(got) != want {
+		t.Errorf("renderExtraEnv() = %q, want %q", got, want)
+	}
+	cmd := exec.CommandContext(t.Context(), "bash", "-c", string(got)+`printf '%s' "$MULTI"`) //nolint:gosec // script is generated from test literals.
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(out) != "line 1\nline 2" {
+		t.Errorf("sourced MULTI = %q", out)
+	}
+}
+
 func TestDiff(t *testing.T) {
 	t.Parallel()
 	t.Run("valid", func(t *testing.T) {
@@ -165,7 +185,7 @@ func TestDiff(t *testing.T) {
 	})
 }
 
-func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses t.Setenv for fake ssh.
+func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with t.Setenv.
 	t.Run("SyncDefaultBranch", func(t *testing.T) {
 		t.Parallel()
 		t.Run("local_only_default_branch", func(t *testing.T) {

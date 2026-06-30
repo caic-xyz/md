@@ -106,9 +106,9 @@ type StartOpts struct {
 	Labels []string
 	// Quiet suppresses informational output during startup.
 	Quiet bool
-	// ExtraEnv holds additional KEY=VALUE pairs to inject into the container's
-	// ~/.env at runtime. Each entry is appended verbatim, so values may
-	// contain spaces but must not contain newlines.
+	// ExtraEnv holds environment updates to inject into the container's ~/.env.
+	// Entries use KEY=VALUE to set a value or KEY= to remove one. Values are
+	// shell-quoted before writing, so they may contain spaces and newlines.
 	ExtraEnv []string
 	// MaxCPUs limits the number of CPU cores the container may use.
 	// Passed as --cpus to docker/podman. Zero means no limit.
@@ -849,8 +849,9 @@ type ForkOpts struct {
 	Labels []string
 	// Quiet suppresses informational output.
 	Quiet bool
-	// ExtraEnv holds additional KEY=VALUE pairs to inject into the container's
-	// ~/.env at runtime.
+	// ExtraEnv holds environment updates to inject into the container's ~/.env.
+	// Entries use KEY=VALUE to set a value or KEY= to remove one. Values are
+	// shell-quoted before writing, so they may contain spaces and newlines.
 	ExtraEnv []string
 	// Mounts lists host directories to bind-mount into the running container.
 	// Missing host directories are rejected before the runtime is invoked.
@@ -1031,12 +1032,14 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 		envContent = append(envContent, data...)
 	}
 	if len(startOpts.ExtraEnv) > 0 {
+		extraEnv, err := renderExtraEnv(startOpts.ExtraEnv)
+		if err != nil {
+			return nil, err
+		}
 		if len(envContent) > 0 && envContent[len(envContent)-1] != '\n' {
 			envContent = append(envContent, '\n')
 		}
-		for _, kv := range startOpts.ExtraEnv {
-			envContent = append(envContent, []byte(kv+"\n")...)
-		}
+		envContent = append(envContent, extraEnv...)
 	}
 	sshEnvArgs := fork.SSHCommand(nil, "cat > /home/user/.env")
 	for {
@@ -2080,7 +2083,7 @@ func (c *Container) provisionContainer(ctx context.Context, stdout, stderr io.Wr
 	}
 
 	// Phase 3: send .env into the container, combining per-repo .env files
-	// and extra environment variables from opts.
+	// and extra environment updates from opts.
 	if err := c.sendEnv(ctx, stdout, opts); err != nil {
 		return nil, err
 	}
@@ -2088,7 +2091,48 @@ func (c *Container) provisionContainer(ctx context.Context, stdout, stderr io.Wr
 	return result, nil
 }
 
-// sendEnv combines per-repo .env files and extra environment variables from
+func renderExtraEnv(entries []string) ([]byte, error) {
+	var result []byte
+	for _, entry := range entries {
+		line, err := renderExtraEnvEntry(entry)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, line...)
+		result = append(result, '\n')
+	}
+	return result, nil
+}
+
+func renderExtraEnvEntry(entry string) (string, error) {
+	name, value, ok := strings.Cut(entry, "=")
+	if !ok || !validExtraEnvName(name) {
+		return "", fmt.Errorf("invalid extra env %q: use NAME=value or NAME= to unset", entry)
+	}
+	if value == "" {
+		return "unset " + name, nil
+	}
+	return name + "=" + shellSingleQuote(value), nil
+}
+
+func validExtraEnvName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i, c := range name {
+		if c == '_' || c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || i > 0 && c >= '0' && c <= '9' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func shellSingleQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
+}
+
+// sendEnv combines per-repo .env files and extra environment updates from
 // opts, then copies them into the container at /home/user/.env.
 func (c *Container) sendEnv(ctx context.Context, stdout io.Writer, opts *StartOpts) error {
 	var envContent []byte
@@ -2103,12 +2147,14 @@ func (c *Container) sendEnv(ctx context.Context, stdout io.Writer, opts *StartOp
 		envContent = append(envContent, data...)
 	}
 	if len(opts.ExtraEnv) > 0 {
+		extraEnv, err := renderExtraEnv(opts.ExtraEnv)
+		if err != nil {
+			return err
+		}
 		if len(envContent) > 0 && envContent[len(envContent)-1] != '\n' {
 			envContent = append(envContent, '\n')
 		}
-		for _, kv := range opts.ExtraEnv {
-			envContent = append(envContent, []byte(kv+"\n")...)
-		}
+		envContent = append(envContent, extraEnv...)
 		if !opts.Quiet {
 			_, _ = fmt.Fprintln(stdout, "- injecting extra env vars into container ...")
 		}
