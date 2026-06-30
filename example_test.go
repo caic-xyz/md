@@ -7,7 +7,7 @@ package md_test
 import (
 	"context"
 	"errors"
-	"log"
+	"fmt"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -22,11 +22,13 @@ func ExampleContainer() {
 
 	client, err := md.New(os.Stdout)
 	if err != nil {
-		log.Fatal(err)
+		_, _ = fmt.Fprintln(os.Stderr, err)
+		return
 	}
 	base, err := client.Container(md.Repo{GitRoot: ".", Branch: "main"})
 	if err != nil {
-		log.Fatal(err)
+		_, _ = fmt.Fprintln(os.Stderr, err)
+		return
 	}
 
 	run := &md.Container{
@@ -36,7 +38,8 @@ func ExampleContainer() {
 	}
 	opts := &md.StartOpts{}
 	if err = run.Launch(ctx, os.Stdout, os.Stderr, opts); err != nil {
-		log.Fatal(err)
+		_, _ = fmt.Fprintln(os.Stderr, err)
+		return
 	}
 	if _, err = run.Connect(ctx, os.Stdout, os.Stderr, opts); err == nil {
 		sshArgs := run.SSHCommand(nil, "cd "+shellQuote(run.Repos[0].MountedPath)+" && go test ./...")
@@ -46,7 +49,8 @@ func ExampleContainer() {
 		err = cmd.Run()
 	}
 	if err = errors.Join(err, run.Purge(ctx, os.Stdout, os.Stderr)); err != nil {
-		log.Fatal(err)
+		_, _ = fmt.Fprintln(os.Stderr, err)
+		return
 	}
 }
 
