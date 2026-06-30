@@ -479,28 +479,6 @@ func TestSmoke(t *testing.T) {
 					assertSmokeContainerGitRefMissing(t, ct, mountedPath, "refs/remotes/host/HEAD")
 				})
 
-				t.Run("run", func(t *testing.T) {
-					var stdout, stderr strings.Builder
-					opts := &StartOpts{
-						BaseImage: baseImage,
-						Quiet:     true,
-						ExtraEnv:  []string{"SMOKE_RUN_VALUE=from-run"},
-						MaxCPUs:   DefaultMaxCPUs(),
-					}
-					exitCode, err := ct.Run(t.Context(), &stdout, &stderr, []string{
-						"bash", "-lc", "grep -qx 'SMOKE_RUN_VALUE=from-run' /home/user/.env && git rev-parse --abbrev-ref HEAD",
-					}, opts)
-					if err != nil {
-						t.Fatalf("Run: %v", err)
-					}
-					if exitCode != 0 {
-						t.Fatalf("Run exit code = %d\nstdout:\n%s\nstderr:\n%s", exitCode, stdout.String(), stderr.String())
-					}
-					if got := strings.TrimSpace(stdout.String()); got != "main" {
-						t.Fatalf("Run branch = %q, want main", got)
-					}
-				})
-
 				t.Run("push_pull", func(t *testing.T) {
 					if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("local-push\n"), 0o600); err != nil {
 						t.Fatalf("write local README.md: %v", err)

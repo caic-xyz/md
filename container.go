@@ -437,75 +437,6 @@ func (c *Container) Connect(ctx context.Context, stdout, stderr io.Writer, opts 
 	return result, nil
 }
 
-// Run starts a temporary container, runs a command, then cleans up.
-//
-// opts has the same semantics as Launch. When nil, defaults are used.
-func (c *Container) Run(ctx context.Context, stdout, stderr io.Writer, command []string, opts *StartOpts) (_ int, retErr error) {
-	runOpts := StartOpts{}
-	if opts != nil {
-		runOpts = *opts
-	}
-	var buf [4]byte
-	_, _ = rand.Read(buf[:])
-	var tmpRepos []Repo
-	var tmpName string
-	if len(c.Repos) > 0 {
-		tmpRepos = c.Repos[:1]
-		tmpName = fmt.Sprintf("md-%s-run-%x", sanitizeDockerName(filepath.Base(c.Repos[0].MountedPath)), buf)
-	} else {
-		tmpName = fmt.Sprintf("md-run-%x", buf)
-	}
-	tmp := &Container{
-		Client: c.Client,
-		Repos:  tmpRepos,
-		Name:   tmpName,
-	}
-
-	baseImage := runOpts.BaseImage
-	if baseImage == "" {
-		baseImage = DefaultBaseImage + ":latest"
-	}
-	imageName, err := c.ensureImage(ctx, stdout, stderr, baseImage, runOpts.Platform, runOpts.Caches, runOpts.Quiet)
-	if err != nil {
-		return 1, err
-	}
-	tmp.prepareTailscaleAuthKey(ctx, stdout, &runOpts)
-	tmp.Display = runOpts.Display
-	tmp.USB = runOpts.USB
-	tmp.Sudo = runOpts.Sudo
-	if err := tmp.launchContainer(ctx, stdout, stderr, &runOpts, imageName); err != nil {
-		tmp.cleanup(ctx)
-		return 1, err
-	}
-	if _, err := tmp.provisionContainer(ctx, stdout, stderr, &runOpts); err != nil {
-		tmp.cleanup(ctx)
-		return 1, err
-	}
-	if runOpts.Tailscale {
-		tmp.Tailscale = true
-	}
-
-	cmdStr := shellQuoteArgs(command)
-	var sshCmd string
-	if len(c.Repos) > 0 {
-		sshCmd = "cd " + shellQuote(c.Repos[0].MountedPath) + " && " + cmdStr
-	} else {
-		sshCmd = cmdStr
-	}
-	err = c.runCmdOut(ctx, "", tmp.SSHCommand(nil, sshCmd), stdout, stderr)
-	exitCode := 0
-	if err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			exitCode = exitErr.ExitCode()
-		} else {
-			exitCode = 1
-		}
-	}
-	tmp.cleanup(ctx)
-	return exitCode, nil
-}
-
 // Revive restarts a stopped (exited) container. It validates git remotes,
 // runs `docker start`, re-queries the SSH port (which changes on restart),
 // rewrites the SSH config, and waits for SSH to become ready. It does NOT
@@ -1626,17 +1557,6 @@ func (c *Container) ensureImage(ctx context.Context, stdout, stderr io.Writer, b
 	}
 	c.invalidateImageBuildCache()
 	return imageName, nil
-}
-
-func (c *Container) cleanup(ctx context.Context) {
-	removeSSHConfig(ctx, filepath.Join(c.Home, ".ssh", "config.d"), c.Name)
-	if len(c.Repos) > 0 {
-		_, _ = c.runCmd(ctx, c.Repos[0].GitRoot, []string{"git", "remote", "remove", c.Name})
-		for _, repo := range c.Repos[1:] {
-			_, _ = c.runCmd(ctx, repo.GitRoot, []string{"git", "remote", "remove", c.Name})
-		}
-	}
-	_, _ = c.runCmd(ctx, "", []string{c.Runtime, "rm", "-f", "-v", c.Name})
 }
 
 // pushSubmodules transfers submodule bare repos from hostGitRoot into the

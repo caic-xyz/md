@@ -7,10 +7,13 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"maps"
 	"os"
@@ -607,7 +610,7 @@ func cmdRun(ctx context.Context, args []string) error {
 		MaxCPUs:      *cpus,
 		ExtraRunArgs: dockerFlags.values,
 	}
-	exitCode, err := ct.Run(ctx, os.Stdout, os.Stderr, extra, &opts)
+	exitCode, err := runTemporaryContainer(ctx, ct, os.Stdout, os.Stderr, extra, &opts)
 	if err != nil {
 		return err
 	}
@@ -615,6 +618,127 @@ func cmdRun(ctx context.Context, args []string) error {
 		return &exitCodeError{code: exitCode}
 	}
 	return nil
+}
+
+func runTemporaryContainer(ctx context.Context, c *md.Container, stdout, stderr io.Writer, command []string, opts *md.StartOpts) (int, error) {
+	if len(command) == 0 {
+		return 1, errors.New("no command specified")
+	}
+	tmp, err := newRunContainer(c)
+	if err != nil {
+		return 1, err
+	}
+	if err := tmp.Launch(ctx, stdout, stderr, opts); err != nil {
+		return 1, errors.Join(err, purgeTemporaryContainer(ctx, tmp))
+	}
+	if _, err := tmp.Connect(ctx, stdout, stderr, opts); err != nil {
+		return 1, errors.Join(err, purgeTemporaryContainer(ctx, tmp))
+	}
+
+	exitCode, err := runTemporaryCommand(ctx, tmp, stdout, stderr, command)
+	if cleanupErr := purgeTemporaryContainer(ctx, tmp); cleanupErr != nil {
+		if exitCode != 0 {
+			_, _ = fmt.Fprintf(stderr, "md: %v\n", cleanupErr)
+			return exitCode, err
+		}
+		return 1, errors.Join(err, cleanupErr)
+	}
+	return exitCode, err
+}
+
+func newRunContainer(c *md.Container) (*md.Container, error) {
+	var suffix [4]byte
+	if _, err := rand.Read(suffix[:]); err != nil {
+		return nil, fmt.Errorf("generate temporary container suffix: %w", err)
+	}
+	var repos []md.Repo
+	name := "md-run-" + hex.EncodeToString(suffix[:])
+	if len(c.Repos) > 0 {
+		repos = append(repos, c.Repos[0])
+		repoName := runContainerNameComponent(filepath.Base(c.Repos[0].MountedPath))
+		name = "md-" + repoName + "-run-" + hex.EncodeToString(suffix[:])
+	}
+	return &md.Container{
+		Client: c.Client,
+		Repos:  repos,
+		Name:   name,
+	}, nil
+}
+
+func runTemporaryCommand(ctx context.Context, c *md.Container, stdout, stderr io.Writer, command []string) (int, error) {
+	sshCommand := shellQuoteArgs(command)
+	if len(c.Repos) > 0 {
+		sshCommand = "cd " + shellQuote(c.Repos[0].MountedPath) + " && " + sshCommand
+	}
+	sshArgs := c.SSHCommand(nil, sshCommand)
+	cmd := exec.CommandContext(ctx, sshArgs[0], sshArgs[1:]...) //nolint:gosec // SSH target is an md container name and command is shell-quoted.
+	cmd.Env = append(os.Environ(), "LANG=C")
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	if err := cmd.Run(); err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return exitErr.ExitCode(), nil
+		}
+		return 1, fmt.Errorf("run command in temporary container %s: %w", c.Name, err)
+	}
+	return 0, nil
+}
+
+func purgeTemporaryContainer(ctx context.Context, c *md.Container) error {
+	if err := c.Purge(ctx, io.Discard, io.Discard); err != nil && err.Error() != c.Name+" not found" {
+		return fmt.Errorf("cleanup temporary container %s: %w", c.Name, err)
+	}
+	return nil
+}
+
+func runContainerNameComponent(s string) string {
+	var b strings.Builder
+	lastSeparator := false
+	for _, r := range s {
+		if isASCIIAlnum(r) {
+			b.WriteRune(r)
+			lastSeparator = false
+			continue
+		}
+		if r == '-' || r == '_' || r == '.' || r == '/' || r == '@' || r == '#' || r == ':' || r == '~' {
+			if b.Len() != 0 && !lastSeparator {
+				b.WriteByte('-')
+				lastSeparator = true
+			}
+		}
+	}
+	name := strings.Trim(b.String(), "-_.")
+	if name == "" {
+		return "unnamed"
+	}
+	return name
+}
+
+func isASCIIAlnum(r rune) bool {
+	return r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9'
+}
+
+func shellQuote(s string) string {
+	if s == "" {
+		return "''"
+	}
+	for _, c := range s {
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') &&
+			c != '@' && c != '%' && c != '+' && c != '=' && c != ':' && c != ',' && c != '.' &&
+			c != '/' && c != '-' && c != '_' {
+			return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+		}
+	}
+	return s
+}
+
+func shellQuoteArgs(args []string) string {
+	quoted := make([]string, len(args))
+	for i, arg := range args {
+		quoted[i] = shellQuote(arg)
+	}
+	return strings.Join(quoted, " ")
 }
 
 // containerListEntry is the JSON representation of a container in `md list --json`.
