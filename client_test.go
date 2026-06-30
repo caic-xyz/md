@@ -475,8 +475,11 @@ func removeAllWithRetry(path string) error {
 }
 
 func linkOrCopyExecutable(src, dst string) error {
-	if err := os.Link(src, dst); err == nil {
-		return nil
+	// A Windows hardlink to the running test binary stays locked by this process.
+	if runtime.GOOS != "windows" {
+		if err := os.Link(src, dst); err == nil {
+			return nil
+		}
 	}
 	in, err := os.Open(src) //nolint:gosec // test helper copies the current test binary.
 	if err != nil {
