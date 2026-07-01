@@ -7,6 +7,7 @@
 package main
 
 import (
+	"log/slog"
 	"slices"
 	"strings"
 	"testing"
@@ -41,7 +42,7 @@ func TestContainerFlags(t *testing.T) {
 
 func TestNewRunContainer(t *testing.T) {
 	t.Parallel()
-	client := &md.Client{}
+	client := &md.Client{Logger: slog.Default()}
 	source := &md.Container{
 		Client: client,
 		Repos: []md.Repo{

@@ -143,21 +143,21 @@ func ensureSSHConfigInclude(w io.Writer, sshDir string) error {
 
 // removeSSHConfig removes SSH config and known_hosts files for a container.
 // It also closes any active ControlMaster connection and removes the socket.
-func removeSSHConfig(ctx context.Context, configDir, containerName string) {
-	cleanupControlSocket(ctx, containerName)
+func removeSSHConfig(ctx context.Context, client *Client, configDir, containerName string) {
+	cleanupControlSocket(ctx, client, containerName)
 	_ = os.Remove(filepath.Join(configDir, containerName+".conf"))
 	_ = os.Remove(filepath.Join(configDir, containerName+".known_hosts"))
 }
 
 // cleanupControlSocket closes an active ControlMaster connection and removes
 // the socket file. Safe to call even when ControlMaster is not in use.
-func cleanupControlSocket(ctx context.Context, containerName string) {
+func cleanupControlSocket(ctx context.Context, client *Client, containerName string) {
 	sock := controlSocketPath(containerName)
 	if _, err := os.Stat(sock); err != nil {
 		return
 	}
 	args := []string{"ssh", "-O", "exit", "-S", sock, "x"}
-	slog.DebugContext(ctx, "md", "msg", "ssh", "container", containerName, "cmd", args)
+	client.Logger.Log(ctx, slog.LevelDebug, "ssh", "container", containerName, "cmd", args)
 	_ = exec.CommandContext(ctx, args[0], args[1:]...).Run() //nolint:gosec // sock is from trusted container name
 	_ = os.Remove(sock)
 }

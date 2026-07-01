@@ -38,6 +38,11 @@ import (
 	"time"
 )
 
+// Logger receives structured log records.
+type Logger interface {
+	Log(ctx context.Context, level slog.Level, msg string, args ...any)
+}
+
 // Client holds global MD tool state (paths, image config, SSH keys).
 type Client struct {
 	// Paths.
@@ -52,6 +57,9 @@ type Client struct {
 
 	// Container runtime.
 	Runtime string // "docker" or "podman"; auto-detected by New().
+
+	// Logger receives md package logs. It must be non-nil.
+	Logger Logger
 
 	// ControlMaster enables SSH ControlMaster connection multiplexing.
 	// When true, SSH connections are shared via a persistent socket,
@@ -150,6 +158,7 @@ func newClient(home, rt string, stdout io.Writer) (*Client, error) {
 		HostKeyPath:    filepath.Join(xdgConfigHome, "md", "ssh_host_ed25519_key"),
 		UserKeyPath:    filepath.Join(home, ".ssh", "md"),
 		Runtime:        rt,
+		Logger:         slog.Default(),
 		DigestCacheTTL: 12 * time.Hour,
 		digestCache:    make(map[string]remoteDigestEntry),
 	}
@@ -216,7 +225,7 @@ func (c *Client) List(ctx context.Context) ([]*Container, error) {
 		if line == "" {
 			continue
 		}
-		ct, err := unmarshalContainer([]byte(line))
+		ct, err := unmarshalContainer(ctx, c, []byte(line))
 		if err != nil {
 			parseErrs = append(parseErrs, err)
 			continue
@@ -242,7 +251,7 @@ func (c *Client) Get(ctx context.Context, name string) (*Container, error) {
 		return nil, fmt.Errorf("inspecting container %s: %w", name, err)
 	}
 	ct := &Container{Client: c}
-	if err := fillFromInspect(ct, []byte(out)); err != nil {
+	if err := ct.fillFromInspect(ctx, []byte(out)); err != nil {
 		return nil, fmt.Errorf("parsing container %s: %w", name, err)
 	}
 	if ct.Name == "" {
@@ -506,7 +515,7 @@ func (c *Client) WatchStats(ctx context.Context, names []string) (iter.Seq2[Cont
 	args := make([]string, 0, 5+len(names))
 	args = append(args, c.Runtime, "stats", "--no-trunc", "--format", "{{json .}}")
 	args = append(args, names...)
-	slog.DebugContext(ctx, "md", "msg", "exec", "cmd", args)
+	c.Logger.Log(ctx, slog.LevelDebug, "exec", "cmd", args)
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...) //nolint:gosec // args are trusted container names.
 	cmd.Env = c.commandEnv("LANG=C")
 	stdout, err := cmd.StdoutPipe()
@@ -729,7 +738,7 @@ func (c *Client) getHostPort(ctx context.Context, container, containerPort strin
 // runCmd executes a command, captures its output, and returns (stdout, error).
 // If dir is non-empty, the command runs in that directory.
 func (c *Client) runCmd(ctx context.Context, dir string, args []string) (string, error) {
-	slog.DebugContext(ctx, "md", "msg", "exec", "cmd", args)
+	c.Logger.Log(ctx, slog.LevelDebug, "exec", "cmd", args)
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...) //nolint:gosec // args are from trusted callers
 	cmd.Dir = dir
 	cmd.Env = c.commandEnv("LANG=C")
@@ -740,7 +749,7 @@ func (c *Client) runCmd(ctx context.Context, dir string, args []string) (string,
 // runCmdOut executes a command, directing its stdout and stderr to the given writers.
 // If dir is non-empty, the command runs in that directory.
 func (c *Client) runCmdOut(ctx context.Context, dir string, args []string, stdout, stderr io.Writer) error {
-	slog.DebugContext(ctx, "md", "msg", "exec", "cmd", args)
+	c.Logger.Log(ctx, slog.LevelDebug, "exec", "cmd", args)
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...) //nolint:gosec // args are from trusted callers
 	cmd.Dir = dir
 	cmd.Env = c.commandEnv("LANG=C")
@@ -1007,7 +1016,7 @@ func parseImageArchitecture(out []byte) (string, error) {
 // "manifests[].{digest, platform}" JSON structure, so one parser covers both
 // runtimes and both formats.
 func (c *Client) getRemoteManifestDigest(ctx context.Context, image, arch string) (string, error) {
-	slog.DebugContext(ctx, "md", "msg", "fetching remote manifest digest", "image", image, "arch", arch)
+	c.Logger.Log(ctx, slog.LevelDebug, "fetching remote manifest digest", "image", image, "arch", arch)
 	out, err := c.runCmd(ctx, "", []string{c.Runtime, "manifest", "inspect", image})
 	if err != nil {
 		return "", err
@@ -1232,16 +1241,16 @@ func (c *Client) invalidateImageBuildCache() {
 
 // imageBuildNeededSlow performs the full check with docker inspect calls.
 func (c *Client) imageBuildNeededSlow(ctx context.Context, imageName, baseImage, platform, contextSHA, activeKey string) bool {
-	slog.DebugContext(ctx, "md", "msg", "checking if image build needed", "image", imageName, "base", baseImage)
+	c.Logger.Log(ctx, slog.LevelDebug, "checking if image build needed", "image", imageName, "base", baseImage)
 	// Quick check: does the specialized image have labels at all?
 	currentDigest, err := c.dockerInspectFormat(ctx, imageName, `{{index .Config.Labels "md.base_digest"}}`)
 	if err != nil || currentDigest == "" || currentDigest == "<no value>" {
-		slog.DebugContext(ctx, "md", "msg", "build needed: no base_digest label", "image", imageName)
+		c.Logger.Log(ctx, slog.LevelDebug, "build needed: no base_digest label", "image", imageName)
 		return true
 	}
 	currentContext, err := c.dockerInspectFormat(ctx, imageName, `{{index .Config.Labels "md.context_sha"}}`)
 	if err != nil || currentContext == "" || currentContext == "<no value>" {
-		slog.DebugContext(ctx, "md", "msg", "build needed: no context_sha label", "image", imageName)
+		c.Logger.Log(ctx, slog.LevelDebug, "build needed: no context_sha label", "image", imageName)
 		return true
 	}
 
@@ -1252,11 +1261,11 @@ func (c *Client) imageBuildNeededSlow(ctx context.Context, imageName, baseImage,
 	} else if id, err := c.dockerInspectFormat(ctx, baseImage, "{{.Id}}"); err == nil {
 		baseDigest = id
 	} else {
-		slog.DebugContext(ctx, "md", "msg", "build needed: cannot get base image digest", "base", baseImage)
+		c.Logger.Log(ctx, slog.LevelDebug, "build needed: cannot get base image digest", "base", baseImage)
 		return true
 	}
 	if currentDigest != baseDigest {
-		slog.DebugContext(ctx, "md", "msg", "build needed: base digest changed", "current", currentDigest, "base", baseDigest)
+		c.Logger.Log(ctx, slog.LevelDebug, "build needed: base digest changed", "current", currentDigest, "base", baseDigest)
 		return true
 	}
 
@@ -1267,7 +1276,7 @@ func (c *Client) imageBuildNeededSlow(ctx context.Context, imageName, baseImage,
 			return true
 		}
 		if currentArch != expectedArch {
-			slog.DebugContext(ctx, "md", "msg", "build needed: image architecture changed", "current", currentArch, "expected", expectedArch)
+			c.Logger.Log(ctx, slog.LevelDebug, "build needed: image architecture changed", "current", currentArch, "expected", expectedArch)
 			return true
 		}
 	}
@@ -1281,7 +1290,7 @@ func (c *Client) imageBuildNeededSlow(ctx context.Context, imageName, baseImage,
 	// the base digest label comparison above already catches locally-pulled updates.
 	isLocal := c.baseImageIsLocal(ctx, baseImage)
 	if !isLocal {
-		slog.DebugContext(ctx, "md", "msg", "checking remote manifest digest", "base", baseImage)
+		c.Logger.Log(ctx, slog.LevelDebug, "checking remote manifest digest", "base", baseImage)
 		storedManifest, err := c.dockerInspectFormat(ctx, imageName, `{{index .Config.Labels "md.base_manifest_digest"}}`)
 		if err == nil && storedManifest != "" && storedManifest != "<no value>" {
 			arch, err := Platform(platform).Architecture()
@@ -1290,14 +1299,14 @@ func (c *Client) imageBuildNeededSlow(ctx context.Context, imageName, baseImage,
 			}
 			remoteDigest, err := c.cachedRemoteManifestDigest(ctx, baseImage, arch)
 			if err == nil && remoteDigest != storedManifest {
-				slog.DebugContext(ctx, "md", "msg", "build needed: remote manifest changed", "stored", storedManifest, "remote", remoteDigest)
+				c.Logger.Log(ctx, slog.LevelDebug, "build needed: remote manifest changed", "stored", storedManifest, "remote", remoteDigest)
 				return true
 			}
 		}
 	}
 
 	if currentContext != contextSHA {
-		slog.DebugContext(ctx, "md", "msg", "build needed: context SHA changed", "current", currentContext, "expected", contextSHA)
+		c.Logger.Log(ctx, slog.LevelDebug, "build needed: context SHA changed", "current", currentContext, "expected", contextSHA)
 		return true
 	}
 
@@ -1306,11 +1315,11 @@ func (c *Client) imageBuildNeededSlow(ctx context.Context, imageName, baseImage,
 		currentKey = ""
 	}
 	if activeKey != currentKey {
-		slog.DebugContext(ctx, "md", "msg", "build needed: cache key changed", "current", currentKey, "expected", activeKey)
+		c.Logger.Log(ctx, slog.LevelDebug, "build needed: cache key changed", "current", currentKey, "expected", activeKey)
 		return true
 	}
 
-	slog.DebugContext(ctx, "md", "msg", "image is up to date", "image", imageName)
+	c.Logger.Log(ctx, slog.LevelDebug, "image is up to date", "image", imageName)
 	return false
 }
 
@@ -1493,7 +1502,7 @@ func readOnlyCachePaths(active []activeCM) []string {
 // cache HostPaths. mountPaths lists container-side -v mount targets to
 // pre-create with user ownership.
 func (c *Client) buildSpecializedImage(ctx context.Context, stdout, stderr io.Writer, imageName, baseImage, platform string, caches []CacheMount, mountPaths []string, quiet bool) error {
-	slog.DebugContext(ctx, "md", "msg", "building specialized image", "image", imageName, "base", baseImage)
+	c.Logger.Log(ctx, slog.LevelDebug, "building specialized image", "image", imageName, "base", baseImage)
 	p := Platform(platform).Resolve()
 	if err := p.Validate(); err != nil {
 		return err
@@ -1538,7 +1547,7 @@ func (c *Client) buildSpecializedImage(ctx context.Context, stdout, stderr io.Wr
 			if idBefore == "" {
 				return pullErr
 			}
-			slog.WarnContext(ctx, "md", "msg", "failed to pull base image; using local copy", "image", baseImage, "err", pullErr)
+			c.Logger.Log(ctx, slog.LevelWarn, "failed to pull base image; using local copy", "image", baseImage, "err", pullErr)
 			if !quiet {
 				_, _ = fmt.Fprintf(stdout, "- Warning: failed to pull base image %s; using local copy.\n", baseImage)
 			}
@@ -1555,7 +1564,7 @@ func (c *Client) buildSpecializedImage(ctx context.Context, stdout, stderr io.Wr
 		}
 	}
 
-	slog.DebugContext(ctx, "md", "msg", "base image ready, fetching base image digest")
+	c.Logger.Log(ctx, slog.LevelDebug, "base image ready, fetching base image digest")
 	// Get base image digest for label.
 	baseDigest, err := c.runCmd(ctx, "", []string{c.Runtime, "image", "inspect", "--format", "{{index .RepoDigests 0}}", baseImage})
 	if err != nil || baseDigest == "" {
@@ -1623,7 +1632,7 @@ func (c *Client) buildSpecializedImage(ctx context.Context, stdout, stderr io.Wr
 	}
 
 	df := generateDockerfile(baseImage, active, dirs, baseDigest, contextSHA, activeKey, manifestDigest)
-	slog.DebugContext(ctx, "md", "msg", "generated Dockerfile", "content", df)
+	c.Logger.Log(ctx, slog.LevelDebug, "generated Dockerfile", "content", df)
 
 	if err := os.WriteFile(filepath.Join(tmpDir, "Dockerfile"), []byte(df), 0o644); err != nil { //nolint:gosec // Dockerfile is ephemeral, world-readable is fine
 		return fmt.Errorf("writing Dockerfile: %w", err)

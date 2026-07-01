@@ -7,10 +7,12 @@
 package md
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -29,6 +31,10 @@ const (
 	fakeRuntimeLogEnv       = "MD_TEST_FAKE_RUNTIME_LOG"
 	fakeSSHEnv              = "MD_TEST_FAKE_SSH"
 )
+
+func testLogger() *slog.Logger {
+	return slog.New(slog.DiscardHandler)
+}
 
 func TestMain(m *testing.M) {
 	if os.Getenv(fakeSSHEnv) == "1" && isFakeSSHExecutable(os.Args[0]) {
@@ -165,6 +171,22 @@ func TestWellKnownCaches(t *testing.T) {
 
 func TestClient(t *testing.T) {
 	t.Parallel()
+	t.Run("Logger", func(t *testing.T) {
+		t.Parallel()
+		var buf bytes.Buffer
+		logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+		c := &Client{Logger: logger}
+		c.Logger.Log(t.Context(), slog.LevelDebug, "client")
+		ct := &Container{Client: c, Name: "md-test"}
+		ct.Logger.Log(t.Context(), slog.LevelDebug, "container")
+
+		got := buf.String()
+		for _, want := range []string{`msg=client`, `msg=container`} {
+			if !strings.Contains(got, want) {
+				t.Fatalf("log output = %q, want %q", got, want)
+			}
+		}
+	})
 	t.Run("WatchDieEvents", func(t *testing.T) {
 		t.Parallel()
 		t.Run("valid", func(t *testing.T) {
@@ -212,6 +234,7 @@ func TestClient(t *testing.T) {
 			t.Fatal(err)
 		}
 		c := &Client{
+			Logger:  testLogger(),
 			Runtime: rt,
 			env: []string{
 				fakeRuntimeEnv + "=1",
@@ -285,7 +308,7 @@ func TestClient(t *testing.T) {
 	})
 	t.Run("Container", func(t *testing.T) {
 		t.Parallel()
-		c := &Client{}
+		c := &Client{Logger: testLogger()}
 		tests := []struct {
 			name     string
 			gitRoot  string
@@ -327,7 +350,7 @@ func TestClient(t *testing.T) {
 		})
 		t.Run("explicit", func(t *testing.T) {
 			t.Parallel()
-			c := &Client{Runtime: "podman"}
+			c := &Client{Logger: testLogger(), Runtime: "podman"}
 			if c.Runtime != "podman" {
 				t.Errorf("Runtime = %q, want %q", c.Runtime, "podman")
 			}
@@ -414,6 +437,7 @@ func newTestClient(t *testing.T, home, runtimePath string) *Client {
 		HostKeyPath:   filepath.Join(home, ".config", "md", "ssh_host_ed25519_key"),
 		UserKeyPath:   filepath.Join(home, ".ssh", "md"),
 		Runtime:       runtimePath,
+		Logger:        testLogger(),
 	}
 	c.keysDir = filepath.Join(c.XDGConfigHome, "md")
 	if err := c.setupSSH(io.Discard); err != nil {
@@ -623,7 +647,7 @@ func TestBaseImageIsLocal(t *testing.T) {
 			"ubuntu:latest",
 			"myteam/image:latest",
 		} {
-			c := &Client{Runtime: "true"}
+			c := &Client{Logger: testLogger(), Runtime: "true"}
 			if !c.baseImageIsLocal(t.Context(), image) {
 				t.Errorf("baseImageIsLocal(%q) = false, want true", image)
 			}
@@ -631,13 +655,13 @@ func TestBaseImageIsLocal(t *testing.T) {
 	})
 	t.Run("error", func(t *testing.T) {
 		t.Parallel()
-		c := &Client{Runtime: "false"}
+		c := &Client{Logger: testLogger(), Runtime: "false"}
 		for _, image := range []string{"ubuntu:latest", "md-user-local:latest", "myteam/image:latest"} {
 			if c.baseImageIsLocal(t.Context(), image) {
 				t.Errorf("baseImageIsLocal(%q) = true, want false", image)
 			}
 		}
-		c = &Client{Runtime: "true"}
+		c = &Client{Logger: testLogger(), Runtime: "true"}
 		for _, image := range []string{"docker.io/library/ubuntu:latest", "ghcr.io/caic-xyz/md-user:latest", "localhost:5000/md-user:latest"} {
 			if c.baseImageIsLocal(t.Context(), image) {
 				t.Errorf("baseImageIsLocal(%q) = true, want false", image)

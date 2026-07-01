@@ -237,7 +237,7 @@ func (c *Container) SSHCommand(opts []string, cmd string) []string {
 func (c *Container) Processes(ctx context.Context) ([]ProcessInfo, error) {
 	cmd := "ps -eo pid,ppid,user,stat,%cpu,%mem,time,args --no-headers"
 	sshArgs := c.SSHCommand(nil, cmd)
-	slog.DebugContext(ctx, "md", "msg", "ssh", "container", c.Name, "cmd", sshArgs)
+	c.Logger.Log(ctx, slog.LevelDebug, "ssh", "container", c.Name, "cmd", sshArgs)
 	ec := exec.CommandContext(ctx, sshArgs[0], sshArgs[1:]...) //nolint:gosec // SSH target is an md container name; command is a constant literal.
 	ec.Env = c.commandEnv()
 	out, err := ec.CombinedOutput()
@@ -254,7 +254,7 @@ func (c *Container) Signal(ctx context.Context, pid int, sig string) error {
 	}
 	cmd := fmt.Sprintf("kill -s %s %d", shellQuote(sig), pid)
 	sshArgs := c.SSHCommand(nil, cmd)
-	slog.DebugContext(ctx, "md", "msg", "ssh", "container", c.Name, "cmd", sshArgs)
+	c.Logger.Log(ctx, slog.LevelDebug, "ssh", "container", c.Name, "cmd", sshArgs)
 	ec := exec.CommandContext(ctx, sshArgs[0], sshArgs[1:]...) //nolint:gosec // SSH target is an md container name; pid is an integer and sig is shell-quoted.
 	ec.Env = c.commandEnv()
 	out, err := ec.CombinedOutput()
@@ -503,7 +503,7 @@ func (c *Container) Revive(ctx context.Context, stdout, stderr io.Writer) error 
 	// Rewrite SSH config with the new port. The known_hosts file also
 	// needs rewriting because entries are keyed by [127.0.0.1]:port.
 	sshConfigDir := filepath.Join(c.Home, ".ssh", "config.d")
-	removeSSHConfig(ctx, sshConfigDir, c.Name)
+	removeSSHConfig(ctx, c.Client, sshConfigDir, c.Name)
 	c.sshConfigPath = filepath.Join(sshConfigDir, c.Name+".conf")
 	knownHostsPath := filepath.Join(sshConfigDir, c.Name+".known_hosts")
 	hostPubKey, err := os.ReadFile(c.HostKeyPath + ".pub")
@@ -541,7 +541,7 @@ func (c *Container) Stop(ctx context.Context) error {
 	}
 	// Clean up stale ControlMaster socket (if any). The SSH connection is
 	// dead now that the container is stopped.
-	cleanupControlSocket(ctx, c.Name)
+	cleanupControlSocket(ctx, c.Client, c.Name)
 	c.State = "exited"
 	return nil
 }
@@ -696,7 +696,7 @@ func (c *Container) Fetch(ctx context.Context, stdout, stderr io.Writer, repoIdx
 			metadata := c.gatherGitMetadata(ctx, r)
 			diff := c.gatherGitDiff(ctx, r)
 			if msg, err := gitutil.GenerateCommitMsg(ctx, p, metadata, diff, nil); err != nil {
-				slog.WarnContext(ctx, "md", "msg", "failed to generate commit message", "err", err)
+				c.Logger.Log(ctx, slog.LevelWarn, "failed to generate commit message", "err", err)
 			} else if msg != "" {
 				commitMsg = msg
 			}
@@ -801,7 +801,7 @@ func (c *Container) Diff(ctx context.Context, stdout, stderr io.Writer, repoIdx 
 	}
 	exitOnDiff := slices.Contains(extraArgs, "--exit-code") || slices.Contains(extraArgs, "--quiet")
 	sshArgs := c.SSHCommand(opts, gitDiffCommand(repo.MountedPath, extraArgs, exitOnDiff))
-	slog.DebugContext(ctx, "md", "msg", "ssh", "container", c.Name, "cmd", sshArgs)
+	c.Logger.Log(ctx, slog.LevelDebug, "ssh", "container", c.Name, "cmd", sshArgs)
 	cmd := exec.CommandContext(ctx, sshArgs[0]) //nolint:gosec // args are from trusted SSH config
 	cmd.Env = c.commandEnv()
 	if isTTY {
@@ -1066,7 +1066,7 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 		envContent = append(envContent, extraEnv...)
 	}
 	sshEnvArgs := fork.SSHCommand(nil, "cat > /home/user/.env")
-	slog.DebugContext(ctx, "md", "msg", "ssh", "container", fork.Name, "cmd", sshEnvArgs)
+	fork.Logger.Log(ctx, slog.LevelDebug, "ssh", "container", fork.Name, "cmd", sshEnvArgs)
 	for {
 		cmd := exec.CommandContext(ctx, sshEnvArgs[0], sshEnvArgs[1:]...) //nolint:gosec // args are from trusted SSH config
 		cmd.Env = fork.commandEnv()
@@ -1265,17 +1265,17 @@ func (c *Container) TailscaleFQDN(ctx context.Context) string {
 	}
 	statusJSON, err := c.runCmd(ctx, "", []string{c.Runtime, "exec", c.Name, "tailscale", "status", "--json"})
 	if err != nil {
-		slog.DebugContext(ctx, "md", "msg", "tailscale status failed", "container", c.Name, "err", err)
+		c.Logger.Log(ctx, slog.LevelDebug, "tailscale status failed", "container", c.Name, "err", err)
 		return ""
 	}
 	var status tailscaleStatus
 	if err := json.Unmarshal([]byte(statusJSON), &status); err != nil {
-		slog.DebugContext(ctx, "md", "msg", "tailscale status JSON parse failed", "container", c.Name, "err", err)
+		c.Logger.Log(ctx, slog.LevelDebug, "tailscale status JSON parse failed", "container", c.Name, "err", err)
 		return ""
 	}
 	fqdn := strings.TrimRight(status.Self.DNSName, ".")
 	if fqdn == "" {
-		slog.DebugContext(ctx, "md", "msg", "tailscale FQDN empty", "container", c.Name)
+		c.Logger.Log(ctx, slog.LevelDebug, "tailscale FQDN empty", "container", c.Name)
 	}
 	return fqdn
 }
@@ -1305,6 +1305,49 @@ func (c *Container) SyncDefaultBranch(ctx context.Context, repoIdx int) error {
 	}
 	if err := c.pushContainerRefs(ctx, r, refspecs); err != nil {
 		return fmt.Errorf("sync refs %q: %w", refspecs, err)
+	}
+	return nil
+}
+
+// fillFromInspect parses docker/podman inspect JSON output into c.
+//
+// Both Docker and Podman inspect return a JSON array, even for a single
+// container.
+func (c *Container) fillFromInspect(ctx context.Context, data []byte) error {
+	raw, err := inspectDocument(data)
+	if err != nil {
+		return err
+	}
+	c.Name = strings.TrimPrefix(raw.Name, "/")
+	c.State = raw.State.Status
+	c.Labels = maps.Clone(raw.Config.Labels)
+	c.SSHPort = hostPort(raw.NetworkSettings.Ports, "22/tcp")
+	c.VNCPort = hostPort(raw.NetworkSettings.Ports, "5901/tcp")
+	if t, err := parseCreatedAt(raw.Created); err == nil {
+		c.CreatedAt = t
+	}
+	for k, v := range raw.Config.Labels {
+		switch k {
+		case "md.repos":
+			if data, err := base64.StdEncoding.DecodeString(v); err == nil {
+				if err := json.Unmarshal(data, &c.Repos); err != nil {
+					c.Logger.Log(ctx, slog.LevelWarn, "failed to unmarshal repos label", "err", err)
+				}
+				for i := range c.Repos {
+					if err := c.Repos[i].Validate(); err != nil {
+						return fmt.Errorf("inspect repos[%d]: %w", i, err)
+					}
+				}
+			}
+		case "md.display":
+			c.Display = v == "1"
+		case "md.tailscale":
+			c.Tailscale = v == "1"
+		case "md.usb":
+			c.USB = v == "1"
+		case "md.sudo":
+			c.Sudo = v == "1"
+		}
 	}
 	return nil
 }
@@ -1481,7 +1524,7 @@ func (c *Container) readContainerFile(ctx context.Context, containerPath string)
 func (c *Container) waitForSSH(ctx context.Context, deadline time.Time) error {
 	var lastErr error
 	sshArgs := c.SSHCommand(nil, "true")
-	slog.DebugContext(ctx, "md", "msg", "ssh", "container", c.Name, "cmd", sshArgs)
+	c.Logger.Log(ctx, slog.LevelDebug, "ssh", "container", c.Name, "cmd", sshArgs)
 	for {
 		cmd := exec.CommandContext(ctx, sshArgs[0], sshArgs[1:]...) //nolint:gosec // args are from trusted SSH config
 		cmd.Env = c.commandEnv()
@@ -1557,7 +1600,7 @@ func (c *Container) refreshRuntimeFields(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	return fillFromInspect(c, []byte(out))
+	return c.fillFromInspect(ctx, []byte(out))
 }
 
 // ensureImage checks whether the user image needs rebuilding and, if so,
@@ -2189,7 +2232,7 @@ func (c *Container) sendEnv(ctx context.Context, stdout io.Writer, opts *StartOp
 		_, _ = fmt.Fprintln(stdout, "- sending .env into container ...")
 	}
 	sshEnvArgs := c.SSHCommand(nil, "cat > /home/user/.env")
-	slog.DebugContext(ctx, "md", "msg", "ssh", "container", c.Name, "cmd", sshEnvArgs)
+	c.Logger.Log(ctx, slog.LevelDebug, "ssh", "container", c.Name, "cmd", sshEnvArgs)
 	cmd := exec.CommandContext(ctx, sshEnvArgs[0], sshEnvArgs[1:]...) //nolint:gosec // args are from trusted SSH config
 	cmd.Env = c.commandEnv()
 	cmd.Stdin = bytes.NewReader(envContent)
@@ -2502,7 +2545,7 @@ func parseCreatedAt(s string) (time.Time, error) {
 // unmarshalContainer parses docker/podman ps JSON output, converting the
 // CreatedAt timestamp string into a time.Time and extracting md.* labels.
 // The returned Container has a nil Client; callers must set it.
-func unmarshalContainer(data []byte) (Container, error) {
+func unmarshalContainer(ctx context.Context, client *Client, data []byte) (Container, error) {
 	var raw containerJSON
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return Container{}, err
@@ -2524,7 +2567,7 @@ func unmarshalContainer(data []byte) (Container, error) {
 		case "md.repos":
 			if data, err := base64.StdEncoding.DecodeString(v); err == nil {
 				if err := json.Unmarshal(data, &ct.Repos); err != nil {
-					slog.Warn("md", "msg", "failed to unmarshal repos label", "err", err)
+					client.Logger.Log(ctx, slog.LevelWarn, "failed to unmarshal repos label", "err", err)
 				}
 				for i := range ct.Repos {
 					if err := ct.Repos[i].Validate(); err != nil {
@@ -2751,50 +2794,6 @@ func cacheSpecFromLabel(label string) []CacheMount {
 		caches[i] = CacheMount(m)
 	}
 	return caches
-}
-
-// fillFromInspect parses docker/podman inspect JSON output and fills a Container.
-//
-// Both Docker and Podman inspect return a JSON array, even for a single
-// container.
-// The Container must already have its Client set.
-func fillFromInspect(ct *Container, data []byte) error {
-	raw, err := inspectDocument(data)
-	if err != nil {
-		return err
-	}
-	ct.Name = strings.TrimPrefix(raw.Name, "/")
-	ct.State = raw.State.Status
-	ct.Labels = maps.Clone(raw.Config.Labels)
-	ct.SSHPort = hostPort(raw.NetworkSettings.Ports, "22/tcp")
-	ct.VNCPort = hostPort(raw.NetworkSettings.Ports, "5901/tcp")
-	if t, err := parseCreatedAt(raw.Created); err == nil {
-		ct.CreatedAt = t
-	}
-	for k, v := range raw.Config.Labels {
-		switch k {
-		case "md.repos":
-			if data, err := base64.StdEncoding.DecodeString(v); err == nil {
-				if err := json.Unmarshal(data, &ct.Repos); err != nil {
-					slog.Warn("md", "msg", "failed to unmarshal repos label", "err", err)
-				}
-				for i := range ct.Repos {
-					if err := ct.Repos[i].Validate(); err != nil {
-						return fmt.Errorf("inspect repos[%d]: %w", i, err)
-					}
-				}
-			}
-		case "md.display":
-			ct.Display = v == "1"
-		case "md.tailscale":
-			ct.Tailscale = v == "1"
-		case "md.usb":
-			ct.USB = v == "1"
-		case "md.sudo":
-			ct.Sudo = v == "1"
-		}
-	}
-	return nil
 }
 
 // tailscaleStatus is the subset of `tailscale status --json` we care about.

@@ -254,7 +254,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			runTestGit(t, ctx, dir, "commit", "-q", "-am", "task")
 
 			ct := &Container{
-				Client: &Client{},
+				Client: &Client{Logger: testLogger()},
 				Name:   remoteDir,
 				Repos: []Repo{{
 					GitRoot:       dir,
@@ -292,7 +292,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			runTestGit(t, ctx, dir, "commit", "-q", "-am", "local main")
 
 			ct := &Container{
-				Client: &Client{},
+				Client: &Client{Logger: testLogger()},
 				Name:   remoteDir,
 				Repos: []Repo{{
 					GitRoot:       dir,
@@ -335,7 +335,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			localFeatureCommit := runTestGit(t, ctx, dir, "rev-parse", "feature")
 
 			ct := &Container{
-				Client: &Client{},
+				Client: &Client{Logger: testLogger()},
 				Name:   remoteDir,
 				Repos: []Repo{{
 					GitRoot:       dir,
@@ -432,7 +432,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			runTestGit(t, ctx, hostDir, "remote", "add", "md-test", containerDir)
 
 			ct := &Container{
-				Client: &Client{Home: home, Runtime: "true"},
+				Client: &Client{Home: home, Logger: testLogger(), Runtime: "true"},
 				Name:   "md-test",
 				Repos: []Repo{{
 					GitRoot:       hostDir,
@@ -480,7 +480,7 @@ func TestUnmarshalContainer(t *testing.T) {
 	t.Run("valid", func(t *testing.T) {
 		t.Parallel()
 		raw := `{"Names":"md-repo-main","State":"running","CreatedAt":"2025-06-15 10:30:00 +0000 UTC"}`
-		ct, err := unmarshalContainer([]byte(raw))
+		ct, err := unmarshalContainer(t.Context(), &Client{Logger: testLogger()}, []byte(raw))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -503,7 +503,7 @@ func TestUnmarshalContainer(t *testing.T) {
 		reposData, _ := json.Marshal([]Repo{{GitRoot: "/home/user/repo", Branch: "main"}})
 		reposB64 := base64.StdEncoding.EncodeToString(reposData)
 		raw := `{"Names":"md-repo-main","State":"running","CreatedAt":"2025-06-15 10:30:00 +0000 UTC","Labels":"md.repos=` + reposB64 + `,other=ignored"}`
-		ct, err := unmarshalContainer([]byte(raw))
+		ct, err := unmarshalContainer(t.Context(), &Client{Logger: testLogger()}, []byte(raw))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -520,7 +520,7 @@ func TestUnmarshalContainer(t *testing.T) {
 	t.Run("no_labels", func(t *testing.T) {
 		t.Parallel()
 		raw := `{"Names":"md-repo-main","State":"running","CreatedAt":"2025-06-15 10:30:00 +0000 UTC","Labels":""}`
-		ct, err := unmarshalContainer([]byte(raw))
+		ct, err := unmarshalContainer(t.Context(), &Client{Logger: testLogger()}, []byte(raw))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -534,7 +534,7 @@ func TestUnmarshalContainer(t *testing.T) {
 		reposData, _ := json.Marshal([]Repo{})
 		reposB64 := base64.StdEncoding.EncodeToString(reposData)
 		raw := `{"Names":"md-agent","State":"running","CreatedAt":"2025-06-15 10:30:00 +0000 UTC","Labels":"md.repos=` + reposB64 + `"}`
-		ct, err := unmarshalContainer([]byte(raw))
+		ct, err := unmarshalContainer(t.Context(), &Client{Logger: testLogger()}, []byte(raw))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -545,7 +545,7 @@ func TestUnmarshalContainer(t *testing.T) {
 	t.Run("podman_rfc3339", func(t *testing.T) {
 		t.Parallel()
 		raw := `{"Names":"md-repo-main","State":"running","CreatedAt":"2025-06-15T10:30:00.123456789Z"}`
-		ct, err := unmarshalContainer([]byte(raw))
+		ct, err := unmarshalContainer(t.Context(), &Client{Logger: testLogger()}, []byte(raw))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -557,7 +557,7 @@ func TestUnmarshalContainer(t *testing.T) {
 	t.Run("podman_rfc3339_no_frac", func(t *testing.T) {
 		t.Parallel()
 		raw := `{"Names":"md-repo-main","State":"running","CreatedAt":"2025-06-15T10:30:00Z"}`
-		ct, err := unmarshalContainer([]byte(raw))
+		ct, err := unmarshalContainer(t.Context(), &Client{Logger: testLogger()}, []byte(raw))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -569,7 +569,7 @@ func TestUnmarshalContainer(t *testing.T) {
 	t.Run("podman_rfc3339_offset", func(t *testing.T) {
 		t.Parallel()
 		raw := `{"Names":"md-repo-main","State":"running","CreatedAt":"2025-06-15T10:30:00+02:00"}`
-		ct, err := unmarshalContainer([]byte(raw))
+		ct, err := unmarshalContainer(t.Context(), &Client{Logger: testLogger()}, []byte(raw))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -581,21 +581,21 @@ func TestUnmarshalContainer(t *testing.T) {
 	t.Run("bad_created_at", func(t *testing.T) {
 		t.Parallel()
 		raw := `{"Names":"x","State":"running","CreatedAt":"not-a-date"}`
-		_, err := unmarshalContainer([]byte(raw))
+		_, err := unmarshalContainer(t.Context(), &Client{Logger: testLogger()}, []byte(raw))
 		if err == nil {
 			t.Fatal("expected error for bad CreatedAt")
 		}
 	})
 	t.Run("empty_input", func(t *testing.T) {
 		t.Parallel()
-		_, err := unmarshalContainer([]byte(""))
+		_, err := unmarshalContainer(t.Context(), &Client{Logger: testLogger()}, []byte(""))
 		if err == nil {
 			t.Fatal("expected error for empty input")
 		}
 	})
 	t.Run("bad_json", func(t *testing.T) {
 		t.Parallel()
-		_, err := unmarshalContainer([]byte("{not json}"))
+		_, err := unmarshalContainer(t.Context(), &Client{Logger: testLogger()}, []byte("{not json}"))
 		if err == nil {
 			t.Fatal("expected error for bad JSON")
 		}
@@ -998,6 +998,7 @@ func TestContainerInspect(t *testing.T) {
 			t.Fatal(err)
 		}
 		c := &Client{
+			Logger:  testLogger(),
 			Runtime: runtimePath,
 			env: []string{
 				fakeRuntimeEnv + "=1",
@@ -1038,8 +1039,8 @@ func TestFillFromInspect(t *testing.T) {
   }
 }]`
 
-	ct := &Container{}
-	if err := fillFromInspect(ct, []byte(inspect)); err != nil {
+	ct := &Container{Client: &Client{Logger: testLogger()}}
+	if err := ct.fillFromInspect(t.Context(), []byte(inspect)); err != nil {
 		t.Fatalf("fillFromInspect: %v", err)
 	}
 	if ct.Name != "md-caic-caic-3" {
@@ -1060,8 +1061,8 @@ func TestFillFromInspect(t *testing.T) {
 
 	// Name without leading slash (Docker sometimes omits it).
 	noSlash := `[{"Name":"plain","State":{"Status":"running"},"Created":"2025-06-15T10:30:00Z","Config":{"Labels":{}}}]`
-	ct2 := &Container{}
-	if err := fillFromInspect(ct2, []byte(noSlash)); err != nil {
+	ct2 := &Container{Client: &Client{Logger: testLogger()}}
+	if err := ct2.fillFromInspect(t.Context(), []byte(noSlash)); err != nil {
 		t.Fatalf("no-slash name: %v", err)
 	}
 	if ct2.Name != "plain" {
@@ -1069,15 +1070,15 @@ func TestFillFromInspect(t *testing.T) {
 	}
 
 	// Empty array.
-	if err := fillFromInspect(&Container{}, []byte(`[]`)); err == nil {
+	if err := (&Container{Client: &Client{Logger: testLogger()}}).fillFromInspect(t.Context(), []byte(`[]`)); err == nil {
 		t.Error("expected error for empty array")
 	}
 	// Multiple results.
-	if err := fillFromInspect(&Container{}, []byte(`[{},{}]`)); err == nil {
+	if err := (&Container{Client: &Client{Logger: testLogger()}}).fillFromInspect(t.Context(), []byte(`[{},{}]`)); err == nil {
 		t.Error("expected error for multiple results")
 	}
 	// Bad JSON.
-	if err := fillFromInspect(&Container{}, []byte(`{bad}`)); err == nil {
+	if err := (&Container{Client: &Client{Logger: testLogger()}}).fillFromInspect(t.Context(), []byte(`{bad}`)); err == nil {
 		t.Error("expected error for bad JSON")
 	}
 }
