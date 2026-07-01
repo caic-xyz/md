@@ -43,9 +43,10 @@ const DefaultBaseImage = "ghcr.io/caic-xyz/md-user"
 const (
 	tailscaleDeviceIDPath  = "/var/lib/md/tailscale_device_id"
 	hostRemoteSetupCommand = "git config --replace-all remote.host.url . && (git config --unset-all remote.host.pushurl >/dev/null 2>&1 || true) && git config --replace-all remote.host.fetch '+refs/remotes/host/*:refs/remotes/host/*'"
-	// gitBaseRefCommand resolves the ref used as the base for container diffs.
-	// It prefers the current upstream, falls back to the upstream of the branch
-	// recorded by an in-progress rebase, then supports the legacy base branch.
+	// gitBaseRefCommand resolves base_ref and diff_base_ref for container diffs.
+	// It resolves the current upstream, falls back to the upstream of the branch
+	// recorded by an in-progress rebase, supports the legacy base branch, then
+	// uses the merge-base with HEAD for diff_base_ref when possible.
 	gitBaseRefCommand = `if ! base_ref=$(git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null); then
 	base_ref=
 fi
@@ -64,6 +65,10 @@ fi
 if [ -z "$base_ref" ]; then
 	echo 'no upstream branch configured' >&2
 	exit 128
+fi
+diff_base_ref=$base_ref
+if merge_base=$(git merge-base HEAD "$base_ref" 2>/dev/null) && [ -n "$merge_base" ]; then
+	diff_base_ref=$merge_base
 fi`
 )
 
@@ -844,7 +849,7 @@ func gitDiffCommand(repo string, extraArgs []string, exitOnDiff bool) string {
 		`git ls-files -z --others --exclude-standard -- . > "$untracked_paths" || exit $?`,
 		`while IFS= read -r -d '' path; do GIT_INDEX_FILE="$tmp_index" git add -N -- "$path" || exit $?; done < "$untracked_paths"`,
 		"diff_status=0",
-		`GIT_INDEX_FILE="$tmp_index" git diff "$base_ref"` + diffArgs + ` -- . || diff_status=$?`,
+		`GIT_INDEX_FILE="$tmp_index" git diff "$diff_base_ref"` + diffArgs + ` -- . || diff_status=$?`,
 		`if [ "$diff_status" -gt 1 ]; then exit "$diff_status"; fi`,
 		"if [ " + exitOnDiffFlag + ` -eq 1 ]; then exit "$diff_status"; fi`,
 	}
@@ -1548,7 +1553,7 @@ func (c *Container) waitForSSH(ctx context.Context, deadline time.Time) error {
 // the container. This data is always small.
 func (c *Container) gatherGitMetadata(ctx context.Context, r *Repo) string {
 	repo := shellQuote(r.MountedPath)
-	cmd := "cd " + repo + " && " + gitBaseRefCommand + " && echo '=== Branch ===' && git rev-parse --abbrev-ref HEAD && echo && echo '=== Files Changed ===' && git diff --stat --cached \"$base_ref\" -- . && echo && echo '=== Recent Commits ===' && git log -5 \"$base_ref\" -- ."
+	cmd := "cd " + repo + " && " + gitBaseRefCommand + " && echo '=== Branch ===' && git rev-parse --abbrev-ref HEAD && echo && echo '=== Files Changed ===' && git diff --stat --cached \"$diff_base_ref\" -- . && echo && echo '=== Recent Commits ===' && git log -5 \"$base_ref\" -- ."
 	out, _ := c.runCmd(ctx, "", c.SSHCommand(nil, cmd))
 	return out
 }
@@ -1556,7 +1561,7 @@ func (c *Container) gatherGitMetadata(ctx context.Context, r *Repo) string {
 // gatherGitDiff runs SSH to get the full patience diff from the container.
 func (c *Container) gatherGitDiff(ctx context.Context, r *Repo) string {
 	repo := shellQuote(r.MountedPath)
-	cmd := "cd " + repo + " && " + gitBaseRefCommand + " && git diff --patience -U10 --cached \"$base_ref\" -- ."
+	cmd := "cd " + repo + " && " + gitBaseRefCommand + " && git diff --patience -U10 --cached \"$diff_base_ref\" -- ."
 	out, _ := c.runCmd(ctx, "", c.SSHCommand(nil, cmd))
 	return out
 }

@@ -156,6 +156,49 @@ func TestDiff(t *testing.T) {
 			}
 		}
 	})
+	t.Run("valid_uses_merge_base_when_upstream_moves", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		dir := t.TempDir()
+		runTestGit(t, ctx, dir, "init", "-q", "--initial-branch=main")
+		runTestGit(t, ctx, dir, "config", "user.name", "Test")
+		runTestGit(t, ctx, dir, "config", "user.email", "test@test")
+		writeTestFile(t, filepath.Join(dir, "base.txt"), "base\n")
+		runTestGit(t, ctx, dir, "add", ".")
+		runTestGit(t, ctx, dir, "commit", "-q", "-m", "base")
+		baseCommit := runTestGit(t, ctx, dir, "rev-parse", "HEAD")
+		runTestGit(t, ctx, dir, "update-ref", "refs/remotes/host/main", "HEAD")
+		runTestGit(t, ctx, dir, "config", "--replace-all", "remote.host.url", ".")
+		runTestGit(t, ctx, dir, "config", "--replace-all", "remote.host.fetch", "+refs/remotes/host/*:refs/remotes/host/*")
+		runTestGit(t, ctx, dir, "branch", "-q", "--set-upstream-to=host/main", "main")
+
+		writeTestFile(t, filepath.Join(dir, "local.txt"), "local\n")
+		runTestGit(t, ctx, dir, "add", ".")
+		runTestGit(t, ctx, dir, "commit", "-q", "-m", "local")
+		runTestGit(t, ctx, dir, "checkout", "-q", "-b", "upstream-update", baseCommit)
+		writeTestFile(t, filepath.Join(dir, "upstream.txt"), "upstream\n")
+		runTestGit(t, ctx, dir, "add", ".")
+		runTestGit(t, ctx, dir, "commit", "-q", "-m", "upstream")
+		upstreamCommit := runTestGit(t, ctx, dir, "rev-parse", "HEAD")
+		runTestGit(t, ctx, dir, "update-ref", "refs/remotes/host/main", upstreamCommit)
+		runTestGit(t, ctx, dir, "checkout", "-q", "main")
+
+		cmd := exec.CommandContext(ctx, "bash", "-c", gitDiffCommand(dir, []string{"--name-only"}, false)) //nolint:gosec // repo path is a test temp dir
+		cmd.Env = append(os.Environ(), "LANG=C")
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("diff command: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+		}
+		out := stdout.String()
+		if !strings.Contains(out, "local.txt") {
+			t.Errorf("diff output missing local.txt:\n%s", out)
+		}
+		if strings.Contains(out, "upstream.txt") {
+			t.Errorf("diff output includes updated upstream file:\n%s", out)
+		}
+	})
 	t.Run("valid_legacy_base_upstream", func(t *testing.T) {
 		t.Parallel()
 		ctx := t.Context()
