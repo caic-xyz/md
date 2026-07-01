@@ -838,7 +838,8 @@ func gitDiffCommand(repo string, extraArgs []string, exitOnDiff bool) string {
 		`index_path=$(git rev-parse --git-path index) || exit $?`,
 		`tmp_index=$(mktemp) || exit $?`,
 		`untracked_paths=$(mktemp) || exit $?`,
-		`cp "$index_path" "$tmp_index" || exit $?`,
+		// Preserve the index timestamp so Git keeps its racy-clean checks valid.
+		`cp -p "$index_path" "$tmp_index" || exit $?`,
 		`trap 'rm -f "$tmp_index" "$untracked_paths"' EXIT`,
 		`git ls-files -z --others --exclude-standard -- . > "$untracked_paths" || exit $?`,
 		`while IFS= read -r -d '' path; do GIT_INDEX_FILE="$tmp_index" git add -N -- "$path" || exit $?; done < "$untracked_paths"`,
