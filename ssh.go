@@ -96,7 +96,13 @@ func writeSSHConfig(configDir, containerName string, port int32, identityFile, k
 			"  AddressFamily inet\n"+
 			"  GSSAPIAuthentication no\n"+
 			"  ConnectTimeout 5\n"+
-			"  PreferredAuthentications publickey\n",
+			"  PreferredAuthentications publickey\n"+
+			"  HostKeyAlgorithms ssh-ed25519\n"+
+			"  PubkeyAcceptedAlgorithms ssh-ed25519\n"+
+			"  KexAlgorithms curve25519-sha256,curve25519-sha256@libssh.org\n"+
+			"  Ciphers aes128-gcm@openssh.com,chacha20-poly1305@openssh.com\n"+
+			"  Compression no\n"+
+			"  RekeyLimit 16G\n",
 		containerName, port, filepath.ToSlash(identityFile), filepath.ToSlash(knownHostsFile))
 	if controlMaster {
 		content += fmt.Sprintf(

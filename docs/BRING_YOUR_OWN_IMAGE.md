@@ -394,7 +394,3 @@ These are not introduced by this work but bear on it; fix independently.
   in B3, the B2 probe) depends on UID 1000. If a future root setup script ever creates an account
   first, the UID drifts silently and cache ownership breaks. Pin it: `useradd -u 1000 -ms
   /bin/bash user`. Doing this now de-risks every Layer-B path.
-- **`HostbasedAuthentication yes` in `sshd_config.d/md.conf`** appears unused — md authenticates
-  by pubkey (`PubkeyAuthentication yes`, `User user` in `ssh.go`), and nothing observed consumes
-  hostbased auth. It trusts client-host identity, a footgun worth removing unless a consumer is
-  found. Orthogonal to BYO-image but in the same sshd surface a foreign base must satisfy.
