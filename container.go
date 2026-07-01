@@ -746,8 +746,16 @@ func (c *Container) Pull(ctx context.Context, stdout, stderr io.Writer, repoIdx 
 	}
 	r := &c.Repos[repoIdx]
 	remoteRef := c.Name + "/" + r.Branch
+	branchExists, err := gitRefExists(ctx, r.GitRoot, "refs/heads/"+r.Branch)
+	if err != nil {
+		return err
+	}
 	currentBranch, _ := gitutil.RunGit(ctx, r.GitRoot, "branch", "--show-current")
-	if currentBranch == r.Branch {
+	if !branchExists {
+		if err := c.runCmdOut(ctx, r.GitRoot, []string{"git", "update-ref", "refs/heads/" + r.Branch, remoteRef}, stdout, stderr); err != nil {
+			return err
+		}
+	} else if currentBranch == r.Branch {
 		// Already on the branch, rebase locally.
 		if err := c.runCmdOut(ctx, r.GitRoot, []string{"git", "rebase", "-q", remoteRef}, stdout, stderr); err != nil {
 			return err
@@ -1320,11 +1328,16 @@ func (r *Repo) containerSyncRefspecs(ctx context.Context) ([]string, error) {
 	if err := r.resolveDefaults(ctx); err != nil {
 		return nil, fmt.Errorf("sync default branch: %w", err)
 	}
-	src, err := defaultBranchPushSource(ctx, r)
+	refspecs := []string{}
+	src, ok, err := defaultBranchPushSource(ctx, r)
 	if err != nil {
 		return nil, fmt.Errorf("sync default branch %q: %w", r.DefaultBranch, err)
 	}
-	refspecs := []string{src + ":" + remoteTrackingRef(r.DefaultRemote, r.DefaultBranch)}
+	if ok {
+		refspecs = append(refspecs, src+":"+remoteTrackingRef(r.DefaultRemote, r.DefaultBranch))
+	}
+	// Containers can outlive the branch recorded at launch. If that branch was
+	// deleted locally and remotely, leave the existing container refs in place.
 	branch, src, ok, err := r.trackedBranchPushSource(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("sync tracked branch for %q: %w", r.Branch, err)
@@ -1469,16 +1482,40 @@ func (r *Repo) resolveContainerBranchBase(ctx context.Context) (containerBranchB
 	return containerBranchBase{source: localRef, ref: "host/" + r.Branch, useHost: true, destination: "refs/remotes/host/" + r.Branch}, nil
 }
 
-func defaultBranchPushSource(ctx context.Context, r *Repo) (string, error) {
+func defaultBranchPushSource(ctx context.Context, r *Repo) (src string, ok bool, err error) {
 	remoteRef := remoteTrackingRef(r.DefaultRemote, r.DefaultBranch)
-	if _, err := gitutil.RevParse(ctx, r.GitRoot, remoteRef); err == nil {
-		return remoteRef, nil
+	ok, err = gitRefExists(ctx, r.GitRoot, remoteRef)
+	if err != nil {
+		return "", false, err
+	}
+	if ok {
+		return remoteRef, true, nil
 	}
 	localRef := "refs/heads/" + r.DefaultBranch
-	if _, err := gitutil.RevParse(ctx, r.GitRoot, localRef); err == nil {
-		return localRef, nil
+	ok, err = gitRefExists(ctx, r.GitRoot, localRef)
+	if err != nil {
+		return "", false, err
 	}
-	return "", fmt.Errorf("neither %s nor %s exists", remoteRef, localRef)
+	if ok {
+		return localRef, true, nil
+	}
+	return "", false, nil
+}
+
+func gitRefExists(ctx context.Context, dir, ref string) (bool, error) {
+	cmd := exec.CommandContext(ctx, "git", "show-ref", "--verify", "--quiet", ref) //nolint:gosec // ref is passed as one argument.
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "LANG=C")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+			return false, nil
+		}
+		return false, fmt.Errorf("git show-ref --verify --quiet %s: %w: %s", ref, err, stderr.String())
+	}
+	return true, nil
 }
 
 func (r *Repo) trackedBranchPushSource(ctx context.Context) (branch, src string, ok bool, err error) {

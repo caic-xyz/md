@@ -39,6 +39,16 @@ func writeTestFile(t *testing.T, name, content string) {
 	}
 }
 
+func writeTestSSHConfig(t *testing.T, home, name string) {
+	sshConfigDir := filepath.Join(home, ".ssh", "config.d")
+	if err := os.MkdirAll(sshConfigDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sshConfigDir, name+".conf"), []byte("Host "+name+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestShellQuote(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -398,6 +408,39 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 				t.Errorf("pushed origin/feature = local unpushed commit %q", gotFeatureCommit)
 			}
 		})
+		t.Run("missing_recorded_default_branch", func(t *testing.T) {
+			t.Parallel()
+			ctx := t.Context()
+			dir := t.TempDir()
+			remoteDir := filepath.Join(t.TempDir(), "container.git")
+
+			runTestGit(t, ctx, "", "init", "-q", "--bare", remoteDir)
+			runTestGit(t, ctx, dir, "init", "-q", "--initial-branch=main")
+			runTestGit(t, ctx, dir, "config", "user.name", "Test")
+			runTestGit(t, ctx, dir, "config", "user.email", "test@test")
+			writeTestFile(t, filepath.Join(dir, "README.md"), "main\n")
+			runTestGit(t, ctx, dir, "add", ".")
+			runTestGit(t, ctx, dir, "commit", "-q", "-m", "main")
+			runTestGit(t, ctx, dir, "checkout", "-q", "-b", "multiple_branches")
+			writeTestFile(t, filepath.Join(dir, "README.md"), "deleted branch\n")
+			runTestGit(t, ctx, dir, "commit", "-q", "-am", "deleted branch")
+			runTestGit(t, ctx, dir, "checkout", "-q", "main")
+			runTestGit(t, ctx, dir, "branch", "-D", "multiple_branches")
+
+			ct := &Container{
+				Client: &Client{Logger: testLogger(t)},
+				Name:   remoteDir,
+				Repos: []Repo{{
+					GitRoot:       dir,
+					Branch:        "multiple_branches",
+					DefaultRemote: "origin",
+					DefaultBranch: "multiple_branches",
+				}},
+			}
+			if err := ct.SyncDefaultBranch(ctx, 0); err != nil {
+				t.Fatalf("SyncDefaultBranch with deleted recorded default branch: %v", err)
+			}
+		})
 	})
 	t.Run("resolveContainerBranchBase", func(t *testing.T) {
 		t.Parallel()
@@ -444,13 +487,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			sshLogPath := filepath.Join(t.TempDir(), "ssh.log")
 			t.Setenv(fakeSSHLogEnv, sshLogPath)
 			home := t.TempDir()
-			sshConfigDir := filepath.Join(home, ".ssh", "config.d")
-			if err := os.MkdirAll(sshConfigDir, 0o700); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(filepath.Join(sshConfigDir, "md-test.conf"), []byte("Host md-test\n"), 0o600); err != nil {
-				t.Fatal(err)
-			}
+			writeTestSSHConfig(t, home, "md-test")
 
 			originDir := filepath.Join(t.TempDir(), "origin.git")
 			hostDir := t.TempDir()
@@ -532,13 +569,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			sshLogPath := filepath.Join(t.TempDir(), "ssh.log")
 			t.Setenv(fakeSSHLogEnv, sshLogPath)
 			home := t.TempDir()
-			sshConfigDir := filepath.Join(home, ".ssh", "config.d")
-			if err := os.MkdirAll(sshConfigDir, 0o700); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(filepath.Join(sshConfigDir, "md-test.conf"), []byte("Host md-test\n"), 0o600); err != nil {
-				t.Fatal(err)
-			}
+			writeTestSSHConfig(t, home, "md-test")
 
 			originDir := filepath.Join(t.TempDir(), "origin.git")
 			hostDir := t.TempDir()
@@ -586,6 +617,73 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			}
 			if !strings.Contains(string(sshLog), "git commit -a -q") {
 				t.Fatalf("missing commit in ssh command:\n%s", sshLog)
+			}
+		})
+		t.Run("deleted_source_branch", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
+			ctx := t.Context()
+			fakeSSH(t)
+			home := t.TempDir()
+			writeTestSSHConfig(t, home, "md-test")
+
+			originDir := filepath.Join(t.TempDir(), "origin.git")
+			hostDir := t.TempDir()
+			containerDir := t.TempDir()
+			branch := "multiple_branches"
+			runTestGit(t, ctx, "", "init", "-q", "--bare", "--initial-branch=main", originDir)
+			runTestGit(t, ctx, hostDir, "init", "-q", "--initial-branch=main")
+			runTestGit(t, ctx, hostDir, "config", "user.name", "Test")
+			runTestGit(t, ctx, hostDir, "config", "user.email", "test@test")
+			writeTestFile(t, filepath.Join(hostDir, "README.md"), "base\n")
+			runTestGit(t, ctx, hostDir, "add", ".")
+			runTestGit(t, ctx, hostDir, "commit", "-q", "-m", "base")
+			runTestGit(t, ctx, hostDir, "remote", "add", "origin", originDir)
+			runTestGit(t, ctx, hostDir, "push", "-q", "-u", "origin", "main")
+			runTestGit(t, ctx, hostDir, "checkout", "-q", "-b", branch)
+			writeTestFile(t, filepath.Join(hostDir, "feature.txt"), "feature\n")
+			runTestGit(t, ctx, hostDir, "add", ".")
+			runTestGit(t, ctx, hostDir, "commit", "-q", "-m", "feature")
+			runTestGit(t, ctx, hostDir, "push", "-q", "-u", "origin", branch)
+			runTestGit(t, ctx, "", "clone", "-q", originDir, containerDir)
+			runTestGit(t, ctx, containerDir, "checkout", "-q", branch)
+			runTestGit(t, ctx, containerDir, "config", "user.name", "Test")
+			runTestGit(t, ctx, containerDir, "config", "user.email", "test@test")
+			writeTestFile(t, filepath.Join(containerDir, "container.txt"), "container\n")
+
+			runTestGit(t, ctx, hostDir, "checkout", "-q", "main")
+			runTestGit(t, ctx, hostDir, "push", "-q", "origin", "--delete", branch)
+			runTestGit(t, ctx, hostDir, "branch", "-D", branch)
+			runTestGit(t, ctx, hostDir, "update-ref", "-d", "refs/remotes/origin/"+branch)
+			runTestGit(t, ctx, hostDir, "remote", "add", "md-test", containerDir)
+
+			ct := &Container{
+				Client: &Client{Home: home, Logger: testLogger(t), Runtime: "true"},
+				Name:   "md-test",
+				Repos: []Repo{{
+					GitRoot:       hostDir,
+					Branch:        branch,
+					MountedPath:   filepath.ToSlash(containerDir),
+					DefaultRemote: "origin",
+					DefaultBranch: branch,
+				}},
+			}
+			var stdout, stderr bytes.Buffer
+			if err := ct.Diff(ctx, &stdout, &stderr, 0, []string{"--name-only"}); err != nil {
+				t.Fatalf("Diff: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+			}
+			if got := strings.TrimSpace(stdout.String()); got != "container.txt" {
+				t.Fatalf("diff --name-only = %q, want container.txt", got)
+			}
+
+			stdout.Reset()
+			stderr.Reset()
+			if err := ct.Pull(ctx, &stdout, &stderr, 0, nil); err != nil {
+				t.Fatalf("Pull: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+			}
+			if got := runTestGit(t, ctx, hostDir, "show", branch+":container.txt"); got != "container" {
+				t.Fatalf("pulled container.txt = %q, want container", got)
+			}
+			if got := runTestGit(t, ctx, hostDir, "branch", "--show-current"); got != "main" {
+				t.Fatalf("current branch = %q, want main", got)
 			}
 		})
 	})
