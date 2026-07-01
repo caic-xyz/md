@@ -117,6 +117,14 @@ type ContainerStatsSample struct {
 	Stats *ContainerStats
 }
 
+const redactedLogValue = "<redacted>"
+
+var (
+	sensitiveLogAssignmentPattern = regexp.MustCompile(`(?i)^(.*api_key[^=]*=).+$`)
+	sensitiveLogNameMarkers       = [...]string{"password", "passwd", "secret", "token", "authkey", "apikey"}
+	sensitiveLogNameReplacer      = strings.NewReplacer("_", "", "-", "", ".", "")
+)
+
 // New creates a Client with global MD tool config and initialises SSH
 // infrastructure (keys, authorized_keys, config.d include).
 func New(stdout io.Writer) (*Client, error) {
@@ -738,7 +746,9 @@ func (c *Client) getHostPort(ctx context.Context, container, containerPort strin
 // runCmd executes a command, captures its output, and returns (stdout, error).
 // If dir is non-empty, the command runs in that directory.
 func (c *Client) runCmd(ctx context.Context, dir string, args []string) (string, error) {
-	c.Logger.Log(ctx, slog.LevelDebug, "exec", "cmd", args)
+	// Command arguments are redacted before logging.
+	// codeql[go/clear-text-logging]
+	c.Logger.Log(ctx, slog.LevelDebug, "exec", "cmd", redactCommandArgsForLog(args))
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...) //nolint:gosec // args are from trusted callers
 	cmd.Dir = dir
 	cmd.Env = c.commandEnv("LANG=C")
@@ -749,13 +759,96 @@ func (c *Client) runCmd(ctx context.Context, dir string, args []string) (string,
 // runCmdOut executes a command, directing its stdout and stderr to the given writers.
 // If dir is non-empty, the command runs in that directory.
 func (c *Client) runCmdOut(ctx context.Context, dir string, args []string, stdout, stderr io.Writer) error {
-	c.Logger.Log(ctx, slog.LevelDebug, "exec", "cmd", args)
+	// Command arguments are redacted before logging.
+	// codeql[go/clear-text-logging]
+	c.Logger.Log(ctx, slog.LevelDebug, "exec", "cmd", redactCommandArgsForLog(args))
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...) //nolint:gosec // args are from trusted callers
 	cmd.Dir = dir
 	cmd.Env = c.commandEnv("LANG=C")
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	return cmd.Run()
+}
+
+func redactCommandArgsForLog(args []string) []string {
+	redacted := make([]string, len(args))
+	redactNext := false
+	redactAssignmentNext := false
+	for i, arg := range args {
+		if redactNext {
+			redacted[i] = redactedLogValue
+			redactNext = false
+			continue
+		}
+		if redactAssignmentNext {
+			redacted[i] = redactAssignmentForLog(arg)
+			redactAssignmentNext = false
+			continue
+		}
+		if optionTakesAssignment(arg) {
+			redacted[i] = arg
+			redactAssignmentNext = true
+			continue
+		}
+		if flag, value, ok := strings.Cut(arg, "="); ok {
+			switch {
+			case optionTakesAssignment(flag):
+				redacted[i] = flag + "=" + redactAssignmentForLog(value)
+			case sensitiveOptionName(flag):
+				redacted[i] = flag + "=" + redactedLogValue
+			default:
+				redacted[i] = redactAssignmentForLog(arg)
+			}
+			continue
+		}
+		if sensitiveOptionName(arg) {
+			redacted[i] = arg
+			redactNext = true
+			continue
+		}
+		redacted[i] = redactAssignmentForLog(arg)
+	}
+	return redacted
+}
+
+func optionTakesAssignment(arg string) bool {
+	switch arg {
+	case "-e", "--env", "--label", "--build-arg":
+		return true
+	default:
+		return false
+	}
+}
+
+func redactAssignmentForLog(arg string) string {
+	name, _, ok := strings.Cut(arg, "=")
+	if !ok {
+		return arg
+	}
+	if sensitiveName(name) {
+		return name + "=" + redactedLogValue
+	}
+	if match := sensitiveLogAssignmentPattern.FindStringSubmatch(arg); match != nil {
+		return match[1] + redactedLogValue
+	}
+	return arg
+}
+
+func sensitiveOptionName(arg string) bool {
+	if !strings.HasPrefix(arg, "-") {
+		return false
+	}
+	return sensitiveName(strings.TrimLeft(arg, "-"))
+}
+
+func sensitiveName(name string) bool {
+	compact := sensitiveLogNameReplacer.Replace(strings.ToLower(name))
+	for _, marker := range sensitiveLogNameMarkers {
+		if strings.Contains(compact, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Client) commandEnv(extra ...string) []string {

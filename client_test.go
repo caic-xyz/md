@@ -196,6 +196,53 @@ func TestClient(t *testing.T) {
 			}
 		}
 	})
+	t.Run("CommandLogsRedactSensitiveValues", func(t *testing.T) {
+		t.Parallel()
+		rt, err := os.Executable()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var log bytes.Buffer
+		logger := slog.New(slog.NewTextHandler(io.MultiWriter(&log, testLogWriter{t: t}), &slog.HandlerOptions{Level: slog.LevelDebug}))
+		c := &Client{
+			Logger:  logger,
+			Runtime: rt,
+			env: []string{
+				fakeRuntimeEnv + "=1",
+				fakeRuntimeLogEnv + "=" + filepath.Join(t.TempDir(), "runtime.log"),
+			},
+		}
+		args := []string{
+			rt, "build",
+			"-e", "TAILSCALE_AUTHKEY=tskey-secret",
+			"--env=MD_SUDO_PASSWORD=sudo-secret",
+			"--env", "OPENAI_API_KEY=api-key-secret",
+			"--build-arg", "API_KEY_FILE=api-key-file-secret",
+			"--other=API_KEY_CONFIG=api-key-config-secret",
+			"--label", "md.sudo-password=label-secret",
+			"TailscaleAPIKey=camel-api-secret",
+			"--password", "flag-secret",
+			"--label", "md.display=1",
+		}
+		if _, err := c.runCmd(t.Context(), "", args); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.runCmdOut(t.Context(), "", args, io.Discard, io.Discard); err != nil {
+			t.Fatal(err)
+		}
+
+		got := log.String()
+		for _, secret := range []string{"tskey-secret", "sudo-secret", "api-key-secret", "api-key-file-secret", "api-key-config-secret", "label-secret", "camel-api-secret", "flag-secret"} {
+			if strings.Contains(got, secret) {
+				t.Fatalf("log output leaked %q:\n%s", secret, got)
+			}
+		}
+		for _, want := range []string{"TAILSCALE_AUTHKEY=<redacted>", "MD_SUDO_PASSWORD=<redacted>", "OPENAI_API_KEY=<redacted>", "API_KEY_FILE=<redacted>", "--other=API_KEY_CONFIG=<redacted>", "md.sudo-password=<redacted>", "TailscaleAPIKey=<redacted>", "--password", "<redacted>", "md.display=1"} {
+			if !strings.Contains(got, want) {
+				t.Fatalf("log output = %q, want %q", got, want)
+			}
+		}
+	})
 	t.Run("WatchDieEvents", func(t *testing.T) {
 		t.Parallel()
 		t.Run("valid", func(t *testing.T) {
