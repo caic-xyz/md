@@ -30,6 +30,7 @@ const (
 	fakeRuntimeLocalBaseEnv = "MD_TEST_FAKE_RUNTIME_LOCAL_BASE"
 	fakeRuntimeLogEnv       = "MD_TEST_FAKE_RUNTIME_LOG"
 	fakeSSHEnv              = "MD_TEST_FAKE_SSH"
+	fakeSSHLogEnv           = "MD_TEST_FAKE_SSH_LOG"
 )
 
 func testLogger(t testing.TB) *slog.Logger {
@@ -576,6 +577,13 @@ func linkOrCopyExecutable(src, dst string) error {
 }
 
 func runFakeSSH(args []string) int {
+	if logPath := os.Getenv(fakeSSHLogEnv); logPath != "" {
+		if err := appendFakeCommandLog(logPath, args); err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "writing fake ssh log: %v\n", err)
+			return 1
+		}
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -612,7 +620,7 @@ func runFakeSSH(args []string) int {
 }
 
 func runFakeRuntime(args []string, logPath string, localBase bool) int {
-	if err := appendFakeRuntimeLog(logPath, args); err != nil {
+	if err := appendFakeCommandLog(logPath, args); err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "writing fake runtime log: %v\n", err)
 		return 1
 	}
@@ -657,7 +665,7 @@ func fakeRuntimeContainerInspect(args []string) int {
 	return 1
 }
 
-func appendFakeRuntimeLog(logPath string, args []string) error {
+func appendFakeCommandLog(logPath string, args []string) error {
 	if logPath == "" {
 		return errors.New("missing fake runtime log path")
 	}

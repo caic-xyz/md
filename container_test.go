@@ -437,10 +437,12 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			t.Fatalf("local base = %+v, want host/main", base)
 		}
 	})
-	t.Run("Pull", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
-		t.Run("updates_container_diff_base", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
+	t.Run("Pull", func(t *testing.T) {
+		t.Run("updates_container_diff_base", func(t *testing.T) {
 			ctx := t.Context()
 			fakeSSH(t)
+			sshLogPath := filepath.Join(t.TempDir(), "ssh.log")
+			t.Setenv(fakeSSHLogEnv, sshLogPath)
 			home := t.TempDir()
 			sshConfigDir := filepath.Join(home, ".ssh", "config.d")
 			if err := os.MkdirAll(sshConfigDir, 0o700); err != nil {
@@ -489,6 +491,24 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			if err := ct.Pull(ctx, &stdout, &stderr, 0, nil); err != nil {
 				t.Fatalf("Pull: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 			}
+			sshLog, err := os.ReadFile(sshLogPath) //nolint:gosec // test log is under t.TempDir.
+			if err != nil {
+				t.Fatal(err)
+			}
+			sshCommands := strings.FieldsFunc(string(sshLog), func(r rune) bool { return r == '\n' })
+			if len(sshCommands) > 2 {
+				t.Fatalf("ssh invocations = %d, want at most 2\n%s", len(sshCommands), sshLog)
+			}
+			hasCombinedUpdate := false
+			for _, cmd := range sshCommands {
+				if strings.Contains(cmd, "git config --replace-all remote.origin.url") && strings.Contains(cmd, "git switch -q -C main") {
+					hasCombinedUpdate = true
+					break
+				}
+			}
+			if !hasCombinedUpdate {
+				t.Fatalf("missing combined remote config and branch update ssh command:\n%s", sshLog)
+			}
 			if got := runTestGit(t, ctx, containerDir, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"); got != "host/main" {
 				t.Fatalf("container upstream = %q, want host/main", got)
 			}
@@ -504,6 +524,68 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			}
 			if out := stdout.String(); out != "" {
 				t.Fatalf("diff after pull = %q, want empty", out)
+			}
+		})
+		t.Run("commits_uncommitted_changes", func(t *testing.T) {
+			ctx := t.Context()
+			fakeSSH(t)
+			sshLogPath := filepath.Join(t.TempDir(), "ssh.log")
+			t.Setenv(fakeSSHLogEnv, sshLogPath)
+			home := t.TempDir()
+			sshConfigDir := filepath.Join(home, ".ssh", "config.d")
+			if err := os.MkdirAll(sshConfigDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(sshConfigDir, "md-test.conf"), []byte("Host md-test\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			originDir := filepath.Join(t.TempDir(), "origin.git")
+			hostDir := t.TempDir()
+			containerDir := t.TempDir()
+			runTestGit(t, ctx, "", "init", "-q", "--bare", "--initial-branch=main", originDir)
+			runTestGit(t, ctx, hostDir, "init", "-q", "--initial-branch=main")
+			runTestGit(t, ctx, hostDir, "config", "user.name", "Test")
+			runTestGit(t, ctx, hostDir, "config", "user.email", "test@test")
+			writeTestFile(t, filepath.Join(hostDir, "README.md"), "base\n")
+			runTestGit(t, ctx, hostDir, "add", ".")
+			runTestGit(t, ctx, hostDir, "commit", "-q", "-m", "base")
+			runTestGit(t, ctx, hostDir, "remote", "add", "origin", originDir)
+			runTestGit(t, ctx, hostDir, "push", "-q", "-u", "origin", "main")
+			runTestGit(t, ctx, "", "clone", "-q", originDir, containerDir)
+			runTestGit(t, ctx, containerDir, "config", "user.name", "Test")
+			runTestGit(t, ctx, containerDir, "config", "user.email", "test@test")
+			writeTestFile(t, filepath.Join(containerDir, "container.txt"), "container\n")
+			runTestGit(t, ctx, hostDir, "remote", "add", "md-test", containerDir)
+
+			ct := &Container{
+				Client: &Client{Home: home, Logger: testLogger(t), Runtime: "true"},
+				Name:   "md-test",
+				Repos: []Repo{{
+					GitRoot:       hostDir,
+					Branch:        "main",
+					MountedPath:   filepath.ToSlash(containerDir),
+					DefaultRemote: "origin",
+					DefaultBranch: "main",
+				}},
+			}
+			var stdout, stderr bytes.Buffer
+			if err := ct.Fetch(ctx, &stdout, &stderr, 0, nil); err != nil {
+				t.Fatalf("Fetch: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+			}
+			if got := runTestGit(t, ctx, hostDir, "show", "md-test/main:container.txt"); got != "container" {
+				t.Fatalf("fetched container.txt = %q, want container", got)
+			}
+			sshLog, err := os.ReadFile(sshLogPath) //nolint:gosec // test log is under t.TempDir.
+			if err != nil {
+				t.Fatal(err)
+			}
+			sshCommands := strings.FieldsFunc(string(sshLog), func(r rune) bool { return r == '\n' })
+			if len(sshCommands) > 1 {
+				t.Fatalf("ssh invocations = %d, want at most 1\n%s", len(sshCommands), sshLog)
+			}
+			if !strings.Contains(string(sshLog), "git commit -a -q") {
+				t.Fatalf("missing commit in ssh command:\n%s", sshLog)
 			}
 		})
 	})
