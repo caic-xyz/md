@@ -15,6 +15,19 @@ import (
 	"github.com/caic-xyz/md"
 )
 
+func testLogger(t testing.TB) *slog.Logger {
+	return slog.New(slog.NewTextHandler(testLogWriter{t: t}, &slog.HandlerOptions{Level: slog.LevelDebug}))
+}
+
+type testLogWriter struct {
+	t testing.TB
+}
+
+func (w testLogWriter) Write(p []byte) (int, error) {
+	w.t.Log(strings.TrimSuffix(string(p), "\n"))
+	return len(p), nil
+}
+
 func TestContainerFlags(t *testing.T) {
 	t.Parallel()
 	t.Run("valid", func(t *testing.T) {
@@ -42,7 +55,7 @@ func TestContainerFlags(t *testing.T) {
 
 func TestNewRunContainer(t *testing.T) {
 	t.Parallel()
-	client := &md.Client{Logger: slog.Default()}
+	client := &md.Client{Logger: testLogger(t)}
 	source := &md.Container{
 		Client: client,
 		Repos: []md.Repo{

@@ -32,8 +32,17 @@ const (
 	fakeSSHEnv              = "MD_TEST_FAKE_SSH"
 )
 
-func testLogger() *slog.Logger {
-	return slog.New(slog.DiscardHandler)
+func testLogger(t testing.TB) *slog.Logger {
+	return slog.New(slog.NewTextHandler(testLogWriter{t: t}, &slog.HandlerOptions{Level: slog.LevelDebug}))
+}
+
+type testLogWriter struct {
+	t testing.TB
+}
+
+func (w testLogWriter) Write(p []byte) (int, error) {
+	w.t.Log(strings.TrimSuffix(string(p), "\n"))
+	return len(p), nil
 }
 
 func TestMain(m *testing.M) {
@@ -174,7 +183,7 @@ func TestClient(t *testing.T) {
 	t.Run("Logger", func(t *testing.T) {
 		t.Parallel()
 		var buf bytes.Buffer
-		logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+		logger := slog.New(slog.NewTextHandler(io.MultiWriter(&buf, testLogWriter{t: t}), &slog.HandlerOptions{Level: slog.LevelDebug}))
 		c := &Client{Logger: logger}
 		c.Logger.Log(t.Context(), slog.LevelDebug, "client")
 		ct := &Container{Client: c, Name: "md-test"}
@@ -234,7 +243,7 @@ func TestClient(t *testing.T) {
 			t.Fatal(err)
 		}
 		c := &Client{
-			Logger:  testLogger(),
+			Logger:  testLogger(t),
 			Runtime: rt,
 			env: []string{
 				fakeRuntimeEnv + "=1",
@@ -270,6 +279,7 @@ func TestClient(t *testing.T) {
 		if err != nil {
 			t.Fatalf("newClient: %v", err)
 		}
+		c.Logger = testLogger(t)
 		mounts, err := c.AgentMounts(HarnessMounts[HarnessClaude])
 		if err != nil {
 			t.Fatalf("AgentMounts: %v", err)
@@ -308,7 +318,7 @@ func TestClient(t *testing.T) {
 	})
 	t.Run("Container", func(t *testing.T) {
 		t.Parallel()
-		c := &Client{Logger: testLogger()}
+		c := &Client{Logger: testLogger(t)}
 		tests := []struct {
 			name     string
 			gitRoot  string
@@ -344,13 +354,14 @@ func TestClient(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			c.Logger = testLogger(t)
 			if c.Runtime == "" {
 				t.Error("New() should set Runtime")
 			}
 		})
 		t.Run("explicit", func(t *testing.T) {
 			t.Parallel()
-			c := &Client{Logger: testLogger(), Runtime: "podman"}
+			c := &Client{Logger: testLogger(t), Runtime: "podman"}
 			if c.Runtime != "podman" {
 				t.Errorf("Runtime = %q, want %q", c.Runtime, "podman")
 			}
@@ -437,7 +448,7 @@ func newTestClient(t *testing.T, home, runtimePath string) *Client {
 		HostKeyPath:   filepath.Join(home, ".config", "md", "ssh_host_ed25519_key"),
 		UserKeyPath:   filepath.Join(home, ".ssh", "md"),
 		Runtime:       runtimePath,
-		Logger:        testLogger(),
+		Logger:        testLogger(t),
 	}
 	c.keysDir = filepath.Join(c.XDGConfigHome, "md")
 	if err := c.setupSSH(io.Discard); err != nil {
@@ -647,7 +658,7 @@ func TestBaseImageIsLocal(t *testing.T) {
 			"ubuntu:latest",
 			"myteam/image:latest",
 		} {
-			c := &Client{Logger: testLogger(), Runtime: "true"}
+			c := &Client{Logger: testLogger(t), Runtime: "true"}
 			if !c.baseImageIsLocal(t.Context(), image) {
 				t.Errorf("baseImageIsLocal(%q) = false, want true", image)
 			}
@@ -655,13 +666,13 @@ func TestBaseImageIsLocal(t *testing.T) {
 	})
 	t.Run("error", func(t *testing.T) {
 		t.Parallel()
-		c := &Client{Logger: testLogger(), Runtime: "false"}
+		c := &Client{Logger: testLogger(t), Runtime: "false"}
 		for _, image := range []string{"ubuntu:latest", "md-user-local:latest", "myteam/image:latest"} {
 			if c.baseImageIsLocal(t.Context(), image) {
 				t.Errorf("baseImageIsLocal(%q) = true, want false", image)
 			}
 		}
-		c = &Client{Logger: testLogger(), Runtime: "true"}
+		c = &Client{Logger: testLogger(t), Runtime: "true"}
 		for _, image := range []string{"docker.io/library/ubuntu:latest", "ghcr.io/caic-xyz/md-user:latest", "localhost:5000/md-user:latest"} {
 			if c.baseImageIsLocal(t.Context(), image) {
 				t.Errorf("baseImageIsLocal(%q) = true, want false", image)

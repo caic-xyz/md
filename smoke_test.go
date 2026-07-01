@@ -44,6 +44,7 @@ func newSmokeClient(t *testing.T, rt string) *Client {
 	if err != nil {
 		t.Fatalf("newClient: %v", err)
 	}
+	client.Logger = testLogger(t)
 	client.env = []string{
 		"HOME=" + tmpHome,
 		"GIT_SSH_COMMAND=ssh -F " + filepath.Join(tmpHome, ".ssh", "config"),
