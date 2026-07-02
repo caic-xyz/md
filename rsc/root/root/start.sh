@@ -163,7 +163,11 @@ if [ -n "${MD_SUDO_PASSWORD:-}" ]; then
 	echo "[start.sh] Unmasked Docker /proc paths for rootless Podman"
 else
 	if id -nG user | tr ' ' '\n' | grep -qx sudo; then
-		deluser user sudo >/dev/null
+		deluser user sudo >/dev/null 2>&1 || true
+	fi
+	if id -nG user | tr ' ' '\n' | grep -qx sudo; then
+		echo "[start.sh] ERROR: user remains in sudo group"
+		exit 1
 	fi
 	passwd -l user >/dev/null
 fi
@@ -175,9 +179,6 @@ install -d -m 0755 /run/sshd
 chown user:user /home/user /home/user/.ssh /home/user/.ssh/authorized_keys
 chmod 0700 /home/user /home/user/.ssh
 chmod 0400 /home/user/.ssh/authorized_keys
-if [ -d /home/user/src ]; then
-	chown -R user:user /home/user/src
-fi
 find /etc/ssh -maxdepth 1 -type f -name 'ssh_host_*_key' -exec chown root:root {} + -exec chmod 0600 {} +
 find /etc/ssh -maxdepth 1 -type f -name 'ssh_host_*_key.pub' -exec chown root:root {} + -exec chmod 0644 {} +
 if ! service ssh start; then

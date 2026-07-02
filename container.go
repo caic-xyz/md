@@ -41,7 +41,22 @@ import (
 const DefaultBaseImage = "ghcr.io/caic-xyz/md-user"
 
 const (
-	tailscaleDeviceIDPath  = "/var/lib/md/tailscale_device_id"
+	tailscaleDeviceIDPath = "/var/lib/md/tailscale_device_id"
+
+	// Runtime images can contain large repos/caches under /home/user/src;
+	// start.sh may need to repair ownership before SSH is ready.
+	containerSSHReadyTimeout        = 2 * time.Minute
+	containerSSHCommandRetryTimeout = 30 * time.Second
+
+	revokeSudoCommand = `if id -nG user | tr ' ' '\n' | grep -qx sudo; then
+	deluser user sudo >/dev/null 2>&1 || true
+fi
+if id -nG user | tr ' ' '\n' | grep -qx sudo; then
+	echo "user remains in sudo group"
+	exit 1
+fi
+passwd -l user >/dev/null`
+
 	hostRemoteSetupCommand = "git config --replace-all remote.host.url . && (git config --unset-all remote.host.pushurl >/dev/null 2>&1 || true) && git config --replace-all remote.host.fetch '+refs/remotes/host/*:refs/remotes/host/*'"
 	// gitBaseRefCommand resolves base_ref and diff_base_ref for container diffs.
 	// It resolves the current upstream, falls back to the upstream of the branch
@@ -535,11 +550,10 @@ func (c *Container) Revive(ctx context.Context, stdout, stderr io.Writer) error 
 
 	// Wait for TCP, then confirm SSH is fully ready.
 	addr := fmt.Sprintf("localhost:%d", port)
-	deadline := time.Now().Add(30 * time.Second)
-	if err := waitForTCP(ctx, addr, deadline); err != nil {
+	if err := waitForTCP(ctx, addr, time.Now().Add(containerSSHReadyTimeout)); err != nil {
 		return fmt.Errorf("waiting for SSH port on %s: %w", c.Name, err)
 	}
-	if err := c.waitForSSH(ctx, deadline); err != nil {
+	if err := c.waitForSSH(ctx, time.Now().Add(containerSSHReadyTimeout)); err != nil {
 		return fmt.Errorf("SSH handshake on %s: %w", c.Name, err)
 	}
 
@@ -1100,13 +1114,13 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 
 	// Wait for SSH and set up repos.
 	addr := fmt.Sprintf("localhost:%d", fork.SSHPort)
-	deadline := time.Now().Add(30 * time.Second)
-	if err := waitForTCP(ctx, addr, deadline); err != nil {
+	if err := waitForTCP(ctx, addr, time.Now().Add(containerSSHReadyTimeout)); err != nil {
 		return nil, fmt.Errorf("waiting for SSH on forked container: %w", err)
 	}
-	if err := fork.waitForSSH(ctx, deadline); err != nil {
+	if err := fork.waitForSSH(ctx, time.Now().Add(containerSSHReadyTimeout)); err != nil {
 		return nil, fmt.Errorf("SSH handshake on forked container: %w", err)
 	}
+	sshCommandDeadline := time.Now().Add(containerSSHCommandRetryTimeout)
 
 	// Send .env into the forked container.
 	var envContent []byte
@@ -1141,7 +1155,7 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 			break
 		}
 		var exitErr *exec.ExitError
-		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 255 || time.Now().After(deadline) {
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 255 || time.Now().After(sshCommandDeadline) {
 			return nil, fmt.Errorf("copying .env to forked container: %w\n%s", err, out)
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -1411,8 +1425,7 @@ func (r *Repo) containerSyncRefspecs(ctx context.Context) ([]string, error) {
 // user's password hash. Revocation makes an explicit non-sudo fork match its
 // requested capabilities before the SSH readiness probe runs.
 func (c *Container) revokeSudo(ctx context.Context) error {
-	cmd := "if id -nG user | tr ' ' '\\n' | grep -qx sudo; then deluser user sudo; fi && passwd -l user >/dev/null"
-	out, err := c.runCmd(ctx, "", []string{c.Runtime, "exec", "--user", "0:0", c.Name, "bash", "-lc", cmd})
+	out, err := c.runCmd(ctx, "", []string{c.Runtime, "exec", "--user", "0:0", c.Name, "bash", "-lc", revokeSudoCommand})
 	if err != nil {
 		return fmt.Errorf("revoking sudo in %s: %w: %s", c.Name, err, out)
 	}
@@ -2253,11 +2266,10 @@ func (c *Container) provisionContainer(ctx context.Context, stdout, stderr io.Wr
 
 	// Phase 1: wait for SSH to accept connections.
 	addr := fmt.Sprintf("localhost:%d", c.SSHPort)
-	deadline := time.Now().Add(30 * time.Second)
-	if err := waitForTCP(ctx, addr, deadline); err != nil {
+	if err := waitForTCP(ctx, addr, time.Now().Add(containerSSHReadyTimeout)); err != nil {
 		return nil, err
 	}
-	if err := c.waitForSSH(ctx, deadline); err != nil {
+	if err := c.waitForSSH(ctx, time.Now().Add(containerSSHReadyTimeout)); err != nil {
 		return nil, err
 	}
 
