@@ -24,6 +24,7 @@ import (
 	"runtime/debug"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1140,10 +1141,14 @@ func cmdFork(ctx context.Context, args []string) error {
 	cf := addContainerFlags(fs, false)
 	source := fs.String("source", "", "Name of the source container (default: auto-detect from repo)")
 	fs.StringVar(source, "s", "", "Name of the source container (default: auto-detect from repo)")
-	display := fs.Bool("display", false, "Enable X11/VNC display")
-	tailscale := fs.Bool("tailscale", false, "Enable Tailscale networking")
-	usb := fs.Bool("usb", false, "Pass through USB devices (/dev/bus/usb)")
-	sudoFlag := fs.Bool("sudo", false, "Enable root access via sudo (random per-container password)")
+	var display tristateBool
+	fs.Var(&display, "display", "Set X11/VNC display on fork (default: inherit; use -display=false to disable)")
+	var tailscale tristateBool
+	fs.Var(&tailscale, "tailscale", "Set Tailscale networking on fork (default: inherit; use -tailscale=false to disable)")
+	var usb tristateBool
+	fs.Var(&usb, "usb", "Set USB passthrough on fork (default: inherit; use -usb=false to disable)")
+	var sudoFlag tristateBool
+	fs.Var(&sudoFlag, "sudo", "Set sudo access on fork (default: inherit; use -sudo=false to disable)")
 	quiet := fs.Bool("q", false, "Suppress informational messages")
 	noSSH := fs.Bool("no-ssh", false, "Don't SSH into the forked container after starting")
 	github := fs.Bool("github", false, "Inject GitHub token into container")
@@ -1202,10 +1207,10 @@ func cmdFork(ctx context.Context, args []string) error {
 	}
 	opts := md.ForkOpts{
 		ExtraRepos:   resolved,
-		Display:      *display,
-		Tailscale:    *tailscale,
-		USB:          *usb,
-		Sudo:         *sudoFlag,
+		Display:      display.resolveForkCapability(sourceCt.Display),
+		Tailscale:    tailscale.resolveForkCapability(sourceCt.Tailscale),
+		USB:          usb.resolveForkCapability(sourceCt.USB),
+		Sudo:         sudoFlag.resolveForkCapability(sourceCt.Sudo),
 		Labels:       labels.values,
 		Quiet:        *quiet,
 		ExtraEnv:     extraEnv,
@@ -1634,6 +1639,40 @@ func customCacheName(hostPath string) string {
 		return "cache"
 	}
 	return name
+}
+
+// tristateBool implements an optional bool flag.
+//
+// The zero value is unset. `-flag` sets true, `-flag=false` sets false.
+type tristateBool struct {
+	set   bool
+	value bool
+}
+
+func (b *tristateBool) String() string {
+	if b == nil || !b.set {
+		return "unset"
+	}
+	return strconv.FormatBool(b.value)
+}
+
+func (b *tristateBool) Set(v string) error {
+	value, err := strconv.ParseBool(v)
+	if err != nil {
+		return err
+	}
+	b.set = true
+	b.value = value
+	return nil
+}
+
+func (*tristateBool) IsBoolFlag() bool { return true }
+
+func (b *tristateBool) resolveForkCapability(source bool) bool {
+	if b != nil && b.set {
+		return b.value
+	}
+	return source
 }
 
 // stringSlice implements flag.Value for repeatable string flags.

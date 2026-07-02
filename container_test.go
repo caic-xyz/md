@@ -698,6 +698,48 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 	})
 }
 
+func TestFork(t *testing.T) {
+	t.Parallel()
+
+	t.Run("valid_options_do_not_inherit_privileges", func(t *testing.T) {
+		t.Parallel()
+		got := (&ForkOpts{}).startOptions()
+		if got.Display || got.Tailscale || got.USB || got.Sudo {
+			t.Fatalf("fork options inherited disabled features: display=%v tailscale=%v usb=%v sudo=%v", got.Display, got.Tailscale, got.USB, got.Sudo)
+		}
+		for _, want := range []string{"MD_DISPLAY=", "MD_TAILSCALE=", "TAILSCALE_AUTHKEY=", "MD_SUDO_PASSWORD="} {
+			if !slices.Contains(got.ExtraRunArgs, want) {
+				t.Fatalf("fork run args missing %q in %v", want, got.ExtraRunArgs)
+			}
+		}
+
+		got = (&ForkOpts{Display: true, Tailscale: true, USB: true, Sudo: true}).startOptions()
+		if !got.Display || !got.Tailscale || !got.USB || !got.Sudo {
+			t.Fatalf("fork options did not enable requested features: display=%v tailscale=%v usb=%v sudo=%v", got.Display, got.Tailscale, got.USB, got.Sudo)
+		}
+		if len(got.ExtraRunArgs) != 0 {
+			t.Fatalf("enabled fork has env-clearing run args: %v", got.ExtraRunArgs)
+		}
+	})
+
+	t.Run("valid_snapshot_clears_runtime_state", func(t *testing.T) {
+		t.Parallel()
+		changes := forkSnapshotConfigChanges("md.sudo md.sudo-password custom.label")
+		for _, want := range []string{
+			"LABEL md.sudo=",
+			"LABEL md.sudo-password=",
+			"LABEL custom.label=",
+			"ENV MD_SUDO_PASSWORD=",
+			"ENV MD_TAILSCALE=",
+			"ENV TAILSCALE_AUTHKEY=",
+		} {
+			if !slices.Contains(changes, want) {
+				t.Fatalf("fork snapshot changes missing %q in %v", want, changes)
+			}
+		}
+	})
+}
+
 func TestUnmarshalContainer(t *testing.T) {
 	t.Parallel()
 	t.Run("valid", func(t *testing.T) {

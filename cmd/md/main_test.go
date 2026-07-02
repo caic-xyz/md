@@ -82,6 +82,66 @@ func TestNewRunContainer(t *testing.T) {
 	}
 }
 
+func TestTristateBool(t *testing.T) {
+	t.Parallel()
+
+	t.Run("valid", func(t *testing.T) {
+		t.Parallel()
+		var b tristateBool
+		if b.String() != "unset" {
+			t.Fatalf("zero String = %q, want unset", b.String())
+		}
+		if err := b.Set("false"); err != nil {
+			t.Fatal(err)
+		}
+		if !b.set || b.value {
+			t.Fatalf("Set(false): set=%v value=%v, want set true value false", b.set, b.value)
+		}
+		if got := b.String(); got != "false" {
+			t.Fatalf("String = %q, want false", got)
+		}
+		if err := b.Set("true"); err != nil {
+			t.Fatal(err)
+		}
+		if !b.set || !b.value {
+			t.Fatalf("Set(true): set=%v value=%v, want set true value true", b.set, b.value)
+		}
+	})
+
+	t.Run("error", func(t *testing.T) {
+		t.Parallel()
+		var b tristateBool
+		if err := b.Set("maybe"); err == nil {
+			t.Fatal("expected invalid bool error")
+		}
+	})
+}
+
+func TestResolveForkCapability(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		source   bool
+		override tristateBool
+		want     bool
+	}{
+		{name: "inherit_disabled", want: false},
+		{name: "inherit_enabled", source: true, want: true},
+		{name: "enable", override: tristateBool{set: true, value: true}, want: true},
+		{name: "disable_source", source: true, override: tristateBool{set: true, value: false}, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := tt.override.resolveForkCapability(tt.source)
+			if got != tt.want {
+				t.Fatalf("resolveForkCapability = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestResolveCaches(t *testing.T) {
 	t.Parallel()
 	allNames := func(caches []md.CacheMount) []string {

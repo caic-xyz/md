@@ -161,6 +161,11 @@ if [ -n "${MD_SUDO_PASSWORD:-}" ]; then
 		umount "$p" 2>/dev/null || true
 	done
 	echo "[start.sh] Unmasked Docker /proc paths for rootless Podman"
+else
+	if id -nG user | tr ' ' '\n' | grep -qx sudo; then
+		deluser user sudo >/dev/null
+	fi
+	passwd -l user >/dev/null
 fi
 
 # Start SSH server (after VNC so DISPLAY is available)

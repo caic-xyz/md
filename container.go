@@ -72,6 +72,17 @@ if merge_base=$(git merge-base HEAD "$base_ref" 2>/dev/null) && [ -n "$merge_bas
 fi`
 )
 
+var forkSnapshotEnvKeys = [...]string{
+	"MD_DISPLAY",
+	"MD_SUDO_PASSWORD",
+	"MD_TAILSCALE",
+	"MD_TAILSCALE_EPHEMERAL",
+	"MD_TAILSCALE_RESET",
+	// TODO: Rename TAILSCALE_AUTHKEY with an MD_ prefix so fork snapshots
+	// can clear all MD_* runtime control env values generically.
+	"TAILSCALE_AUTHKEY",
+}
+
 // Repo describes a git repository to push into a container.
 type Repo struct {
 	// GitRoot is the absolute path to the git repository root on the host.
@@ -882,16 +893,12 @@ type ForkOpts struct {
 	// Fork generates a unique destination branch, same as for source repos.
 	ExtraRepos []Repo
 	// Display enables X11/VNC virtual display on the forked container.
-	// When false, inherits the source container's setting.
 	Display bool
 	// Tailscale enables Tailscale networking on the forked container.
-	// When false, inherits the source container's setting.
 	Tailscale bool
 	// USB enables USB device passthrough on the forked container.
-	// When false, inherits the source container's setting.
 	USB bool
 	// Sudo enables root access via sudo on the forked container.
-	// When false, inherits the source container's setting.
 	Sudo bool
 	// Labels are additional Docker labels (key=value) applied to the forked container.
 	Labels []string
@@ -911,6 +918,47 @@ type ForkOpts struct {
 	// ExtraRunArgs are additional arguments passed verbatim to the
 	// container runtime's "run" command. Not portable across runtimes.
 	ExtraRunArgs []string
+}
+
+// startOptions converts fork options into startup options for the forked container.
+func (opts *ForkOpts) startOptions() *StartOpts {
+	startOpts := &StartOpts{
+		Quiet:        opts.Quiet,
+		Labels:       opts.Labels,
+		ExtraEnv:     opts.ExtraEnv,
+		Mounts:       opts.Mounts,
+		Display:      opts.Display,
+		Tailscale:    opts.Tailscale,
+		USB:          opts.USB,
+		Sudo:         opts.Sudo,
+		MaxCPUs:      opts.MaxCPUs,
+		ExtraRunArgs: append(opts.runtimeEnvOverrides(), opts.ExtraRunArgs...),
+	}
+	startOpts.resetTailscale = startOpts.Tailscale
+	return startOpts
+}
+
+// runtimeEnvOverrides returns run arguments that clear inherited startup env.
+//
+// Fork snapshots can contain ENV values from the source container image. Empty
+// assignments force disabled fork capabilities to stay disabled at startup.
+func (opts *ForkOpts) runtimeEnvOverrides() []string {
+	var args []string
+	if !opts.Display {
+		args = append(args, "-e", "MD_DISPLAY=")
+	}
+	if !opts.Tailscale {
+		args = append(args,
+			"-e", "MD_TAILSCALE=",
+			"-e", "MD_TAILSCALE_EPHEMERAL=",
+			"-e", "MD_TAILSCALE_RESET=",
+			"-e", "TAILSCALE_AUTHKEY=",
+		)
+	}
+	if !opts.Sudo {
+		args = append(args, "-e", "MD_SUDO_PASSWORD=")
+	}
+	return args
 }
 
 // Fork snapshots a running container and creates a new one where each mapped
@@ -988,8 +1036,8 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 		return nil, fmt.Errorf("inspecting labels: %w", err)
 	}
 	commitArgs := []string{c.Runtime, "commit"}
-	for key := range strings.FieldsSeq(labelCSV) {
-		commitArgs = append(commitArgs, "--change", "LABEL "+key+"=")
+	for _, change := range forkSnapshotConfigChanges(labelCSV) {
+		commitArgs = append(commitArgs, "--change", change)
 	}
 	commitArgs = append(commitArgs, c.Name, snapshotImage)
 	if _, err := c.runCmd(ctx, "", commitArgs); err != nil {
@@ -1029,22 +1077,15 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 	if !opts.Quiet {
 		_, _ = fmt.Fprintf(stdout, "- Starting forked container %s ...\n", fork.Name)
 	}
-	startOpts := &StartOpts{
-		Quiet:        opts.Quiet,
-		Labels:       opts.Labels,
-		ExtraEnv:     opts.ExtraEnv,
-		Mounts:       opts.Mounts,
-		Display:      c.Display || opts.Display,
-		Tailscale:    c.Tailscale || opts.Tailscale,
-		USB:          c.USB || opts.USB,
-		Sudo:         c.Sudo || opts.Sudo,
-		MaxCPUs:      opts.MaxCPUs,
-		ExtraRunArgs: opts.ExtraRunArgs,
-	}
-	startOpts.resetTailscale = startOpts.Tailscale
+	startOpts := opts.startOptions()
 	fork.prepareTailscaleAuthKey(ctx, stdout, startOpts)
 	if err := fork.launchContainer(ctx, stdout, stderr, startOpts, snapshotImage); err != nil {
 		return nil, err
+	}
+	if !startOpts.Sudo {
+		if err := fork.revokeSudo(ctx); err != nil {
+			return nil, err
+		}
 	}
 	fork.Display = startOpts.Display
 	fork.Tailscale = startOpts.Tailscale
@@ -1166,6 +1207,22 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 
 	fork.State = "running"
 	return fork, nil
+}
+
+// forkSnapshotConfigChanges returns docker commit --change entries for a fork snapshot.
+//
+// It clears labels and runtime ENV inherited from the source container image so
+// launchContainer can apply the fork's requested metadata and capabilities.
+func forkSnapshotConfigChanges(labelCSV string) []string {
+	labels := strings.Fields(labelCSV)
+	changes := make([]string, 0, len(labels)+len(forkSnapshotEnvKeys))
+	for _, key := range labels {
+		changes = append(changes, "LABEL "+key+"=")
+	}
+	for _, key := range forkSnapshotEnvKeys {
+		changes = append(changes, "ENV "+key+"=")
+	}
+	return changes
 }
 
 // ContainerStats holds runtime resource usage for a container.
@@ -1346,6 +1403,20 @@ func (r *Repo) containerSyncRefspecs(ctx context.Context) ([]string, error) {
 		refspecs = append(refspecs, src+":"+remoteTrackingRef(r.DefaultRemote, branch))
 	}
 	return refspecs, nil
+}
+
+// revokeSudo removes sudo access from a forked container.
+//
+// A fork created from a sudo-enabled snapshot can inherit /etc/group and the
+// user's password hash. Revocation makes an explicit non-sudo fork match its
+// requested capabilities before the SSH readiness probe runs.
+func (c *Container) revokeSudo(ctx context.Context) error {
+	cmd := "if id -nG user | tr ' ' '\\n' | grep -qx sudo; then deluser user sudo; fi && passwd -l user >/dev/null"
+	out, err := c.runCmd(ctx, "", []string{c.Runtime, "exec", "--user", "0:0", c.Name, "bash", "-lc", cmd})
+	if err != nil {
+		return fmt.Errorf("revoking sudo in %s: %w: %s", c.Name, err, out)
+	}
+	return nil
 }
 
 // fillFromInspect parses docker/podman inspect JSON output into c.

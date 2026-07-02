@@ -348,6 +348,43 @@ func TestSmoke(t *testing.T) {
 							t.Fatalf("sudo whoami expected 'root', got %q", got)
 						}
 						t.Log("sudo works inside the container")
+
+						t.Run("fork_removes_sudo", func(t *testing.T) {
+							cleanupImage := "md-fork-" + ct.Name
+							t.Cleanup(func() {
+								cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 30*time.Second)
+								defer cancel()
+								_, _ = client.runCmd(cleanupCtx, "", []string{client.Runtime, "rmi", "-f", cleanupImage})
+							})
+
+							var forkStdout, forkStderr strings.Builder
+							fork, err := ct.Fork(t.Context(), &forkStdout, &forkStderr, &ForkOpts{
+								Quiet:   true,
+								Sudo:    false,
+								MaxCPUs: DefaultMaxCPUs(),
+							})
+							if err != nil {
+								t.Fatalf("Fork without sudo: %v\nstdout:\n%s\nstderr:\n%s", err, forkStdout.String(), forkStderr.String())
+							}
+							t.Cleanup(func() {
+								cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 30*time.Second)
+								defer cancel()
+								if err := fork.Purge(cleanupCtx, io.Discard, io.Discard); err != nil {
+									t.Logf("cleanup %s: %v", fork.Name, err)
+								}
+							})
+
+							if fork.Sudo {
+								t.Fatal("fork reports sudo enabled, want disabled")
+							}
+							verifyCmd := "if id -nG | tr ' ' '\\n' | grep -qx sudo; then echo user-still-in-sudo-group; exit 1; fi" +
+								"; if sudo -n true >/tmp/md-sudo-check 2>&1; then echo sudo-still-works; exit 1; fi" +
+								"; cat /tmp/md-sudo-check"
+							out, err = fork.runCmd(t.Context(), "", fork.SSHCommand(nil, verifyCmd))
+							if err != nil {
+								t.Fatalf("verify sudo removed: %v\n%s", err, out)
+							}
+						})
 					})
 
 					t.Run("file_io", func(t *testing.T) {
