@@ -160,6 +160,13 @@ func usage() {
 		"  vnc           Open VNC connection to the container\n")
 }
 
+func (a *app) Close() error {
+	if a.client == nil {
+		return nil
+	}
+	return a.client.Close()
+}
+
 func (a *app) newClient() (*md.Client, error) {
 	if a.runtimeOverride != "" && a.runtimeOverride != "docker" && a.runtimeOverride != "podman" {
 		return nil, fmt.Errorf("--runtime must be \"docker\" or \"podman\", got %q", a.runtimeOverride)
@@ -179,13 +186,6 @@ func (a *app) newClient() (*md.Client, error) {
 	c.TailscaleAPIKey = os.Getenv("TAILSCALE_API_KEY")
 	a.client = c
 	return c, nil
-}
-
-func (a *app) Close() error {
-	if a.client == nil {
-		return nil
-	}
-	return a.client.Close()
 }
 
 // containerFlags holds the common flags for commands that target a container.

@@ -632,7 +632,7 @@ func (c *Container) Purge(ctx context.Context, stdout, stderr io.Writer) error {
 	}
 
 	if err2 := os.Remove(sshConf); err2 != nil && !os.IsNotExist(err2) {
-		retErr = errors.Join(retErr, err2)
+		retErr = err2
 	}
 	if err2 := os.Remove(sshKnown); err2 != nil && !os.IsNotExist(err2) {
 		retErr = errors.Join(retErr, err2)
