@@ -37,11 +37,11 @@ import (
 	"github.com/caic-xyz/md/gitutil"
 )
 
-// runtimeOverride is set by --runtime and applied in newClient/cmdList.
-var runtimeOverride string
-
-// controlMasterEnabled is set by --control-master and applied in newClient.
-var controlMasterEnabled bool
+type app struct {
+	runtimeOverride      string
+	controlMasterEnabled bool
+	client               *md.Client
+}
 
 func main() {
 	if err := mainImpl(); err != nil {
@@ -70,7 +70,11 @@ func initLogging(verbose bool) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
 }
 
-func mainImpl() error {
+func mainImpl() (retErr error) {
+	a := &app{}
+	defer func() {
+		retErr = errors.Join(retErr, a.Close())
+	}()
 	// Pre-parse to support flags before the subcommand (e.g. "md -v start").
 	pre := flag.NewFlagSet("md", flag.ContinueOnError)
 	preVerbose := addVerboseFlag(pre)
@@ -79,8 +83,8 @@ func mainImpl() error {
 	// Ignore errors: unknown flags here are subcommand flags, parsed later.
 	_ = pre.Parse(os.Args[1:])
 	initLogging(*preVerbose)
-	runtimeOverride = *preRuntime
-	controlMasterEnabled = *preControlMaster && runtime.GOOS != "windows"
+	a.runtimeOverride = *preRuntime
+	a.controlMasterEnabled = *preControlMaster && runtime.GOOS != "windows"
 	remaining := pre.Args()
 
 	if len(remaining) == 0 {
@@ -93,35 +97,35 @@ func mainImpl() error {
 	args := remaining[1:]
 	switch cmd {
 	case "build-image":
-		return cmdBuildImage(ctx, args)
+		return a.cmdBuildImage(ctx, args)
 	case "diff":
-		return cmdDiff(ctx, args)
+		return a.cmdDiff(ctx, args)
 	case "fork":
-		return cmdFork(ctx, args)
+		return a.cmdFork(ctx, args)
 	case "list":
-		return cmdList(ctx, args)
+		return a.cmdList(ctx, args)
 	case "prune":
-		return cmdPrune(ctx, args)
+		return a.cmdPrune(ctx, args)
 	case "pull":
-		return cmdPull(ctx, args)
+		return a.cmdPull(ctx, args)
 	case "purge", "kill":
-		return cmdPurge(ctx, args)
+		return a.cmdPurge(ctx, args)
 	case "push":
-		return cmdPush(ctx, args)
+		return a.cmdPush(ctx, args)
 	case "run":
-		return cmdRun(ctx, args)
+		return a.cmdRun(ctx, args)
 	case "ssh":
 		return cmdSSH(args)
 	case "start":
-		return cmdStart(ctx, args)
+		return a.cmdStart(ctx, args)
 	case "stop":
-		return cmdStop(ctx, args)
+		return a.cmdStop(ctx, args)
 	case "sudo-password":
-		return cmdSudoPassword(ctx, args)
+		return a.cmdSudoPassword(ctx, args)
 	case "version":
 		return cmdVersion(args)
 	case "vnc":
-		return cmdVNC(ctx, args)
+		return a.cmdVNC(ctx, args)
 	case "help", "-h", "-help", "--help":
 		usage()
 		return nil
@@ -143,7 +147,7 @@ func usage() {
 		"  diff          Show differences between host branch and current changes\n"+
 		"  fork          Snapshot container and create a new one on forked branches\n"+
 		"  list          List running md containers\n"+
-		"  prune         Remove unused md-specialized-* and md-fork-* images\n"+
+		"  prune         Remove unused md images and build cache\n"+
 		"  pull          Pull changes from container back to local branch\n"+
 		"  purge         Stop and remove the container permanently\n"+
 		"  push          Force-push current repo state into the running container\n"+
@@ -156,21 +160,32 @@ func usage() {
 		"  vnc           Open VNC connection to the container\n")
 }
 
-func newClient() (*md.Client, error) {
-	if runtimeOverride != "" && runtimeOverride != "docker" && runtimeOverride != "podman" {
-		return nil, fmt.Errorf("--runtime must be \"docker\" or \"podman\", got %q", runtimeOverride)
+func (a *app) newClient() (*md.Client, error) {
+	if a.runtimeOverride != "" && a.runtimeOverride != "docker" && a.runtimeOverride != "podman" {
+		return nil, fmt.Errorf("--runtime must be \"docker\" or \"podman\", got %q", a.runtimeOverride)
+	}
+	if a.client != nil {
+		return a.client, nil
 	}
 	c, err := md.New(os.Stdout)
 	if err != nil {
 		return nil, err
 	}
-	if runtimeOverride != "" {
-		c.Runtime = runtimeOverride
+	if a.runtimeOverride != "" {
+		c.Runtime = a.runtimeOverride
 	}
-	c.ControlMaster = controlMasterEnabled
+	c.ControlMaster = a.controlMasterEnabled
 	c.GithubToken = os.Getenv("GITHUB_TOKEN")
 	c.TailscaleAPIKey = os.Getenv("TAILSCALE_API_KEY")
+	a.client = c
 	return c, nil
+}
+
+func (a *app) Close() error {
+	if a.client == nil {
+		return nil
+	}
+	return a.client.Close()
 }
 
 // containerFlags holds the common flags for commands that target a container.
@@ -231,8 +246,8 @@ func (cf *containerFlags) baseImage() (string, error) {
 // repo identified by cf (defaults to cwd). Returns the container and the
 // index of the matched repo within it. If cf.branch is set, it is used to
 // disambiguate when multiple containers share the same git root.
-func findContainerAndRepo(ctx context.Context, cf *containerFlags) (*md.Container, int, error) {
-	c, err := newClient()
+func (a *app) findContainerAndRepo(ctx context.Context, cf *containerFlags) (*md.Container, int, error) {
+	c, err := a.newClient()
 	if err != nil {
 		return nil, 0, err
 	}
@@ -290,8 +305,8 @@ func findContainerAndRepo(ctx context.Context, cf *containerFlags) (*md.Containe
 
 // newContainer resolves a Container from flags. extraRepoSpecs holds
 // additional "path[:branch]" strings (e.g. from -extra-repo in cmdStart).
-func newContainer(ctx context.Context, cf *containerFlags, extraRepoSpecs []string) (*md.Container, error) {
-	c, err := newClient()
+func (a *app) newContainer(ctx context.Context, cf *containerFlags, extraRepoSpecs []string) (*md.Container, error) {
+	c, err := a.newClient()
 	if err != nil {
 		return nil, err
 	}
@@ -382,7 +397,7 @@ func resolveGithubToken(ctx context.Context, c *md.Client, github bool) (string,
 	return c.GithubToken, nil
 }
 
-func cmdStart(ctx context.Context, args []string) error {
+func (a *app) cmdStart(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("start", flag.ExitOnError)
 	verbose := addVerboseFlag(fs)
 	display := fs.Bool("display", false, "Enable X11/VNC display")
@@ -419,7 +434,7 @@ func cmdStart(ctx context.Context, args []string) error {
 		return err
 	}
 
-	ct, err := newContainer(ctx, cf, extraRepos.values)
+	ct, err := a.newContainer(ctx, cf, extraRepos.values)
 	if err != nil {
 		return err
 	}
@@ -545,7 +560,7 @@ func printContainerSummary(ctx context.Context, ct *md.Container, r *md.StartRes
 	return nil
 }
 
-func cmdRun(ctx context.Context, args []string) error {
+func (a *app) cmdRun(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	verbose := addVerboseFlag(fs)
 	cf := addContainerFlags(fs, true)
@@ -575,7 +590,7 @@ func cmdRun(ctx context.Context, args []string) error {
 	if len(extra) == 0 {
 		return errors.New("no command specified")
 	}
-	ct, err := newContainer(ctx, cf, extraRepos.values)
+	ct, err := a.newContainer(ctx, cf, extraRepos.values)
 	if err != nil {
 		return err
 	}
@@ -781,10 +796,7 @@ type containerListEntry struct {
 	Stats     *md.ContainerStats `json:"stats,omitempty"`
 }
 
-func cmdList(ctx context.Context, args []string) error {
-	if runtimeOverride != "" && runtimeOverride != "docker" && runtimeOverride != "podman" {
-		return fmt.Errorf("--runtime must be \"docker\" or \"podman\", got %q", runtimeOverride)
-	}
+func (a *app) cmdList(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("list", flag.ExitOnError)
 	verbose := addVerboseFlag(fs)
 	jsonOut := fs.Bool("json", false, "Output in JSON format")
@@ -796,12 +808,9 @@ func cmdList(ctx context.Context, args []string) error {
 	if err := checkArgs(fs, 0); err != nil {
 		return err
 	}
-	c, err := md.New(os.Stdout)
+	c, err := a.newClient()
 	if err != nil {
 		return err
-	}
-	if runtimeOverride != "" {
-		c.Runtime = runtimeOverride
 	}
 	containers, err := c.List(ctx)
 	if err != nil {
@@ -937,7 +946,7 @@ func cmdSSH(args []string) error {
 	return errors.New("use 'ssh md-<repo>-<branch>' directly")
 }
 
-func cmdStop(ctx context.Context, args []string) error {
+func (a *app) cmdStop(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("stop", flag.ExitOnError)
 	verbose := addVerboseFlag(fs)
 	cf := addContainerFlags(fs, false)
@@ -949,7 +958,7 @@ func cmdStop(ctx context.Context, args []string) error {
 		return err
 	}
 	if name := fs.Arg(0); name != "" {
-		c, err := newClient()
+		c, err := a.newClient()
 		if err != nil {
 			return err
 		}
@@ -959,14 +968,14 @@ func cmdStop(ctx context.Context, args []string) error {
 		}
 		return ct.Stop(ctx)
 	}
-	ct, _, err := findContainerAndRepo(ctx, cf)
+	ct, _, err := a.findContainerAndRepo(ctx, cf)
 	if err != nil {
 		return err
 	}
 	return ct.Stop(ctx)
 }
 
-func cmdPurge(ctx context.Context, args []string) error {
+func (a *app) cmdPurge(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("purge", flag.ExitOnError)
 	verbose := addVerboseFlag(fs)
 	cf := addContainerFlags(fs, false)
@@ -980,7 +989,7 @@ func cmdPurge(ctx context.Context, args []string) error {
 	// A bare container name may be passed as a positional argument for
 	// repo-less containers, which have no git root to search by.
 	if name := fs.Arg(0); name != "" {
-		c, err := newClient()
+		c, err := a.newClient()
 		if err != nil {
 			return err
 		}
@@ -990,14 +999,14 @@ func cmdPurge(ctx context.Context, args []string) error {
 		}
 		return ct.Purge(ctx, os.Stdout, os.Stderr)
 	}
-	ct, _, err := findContainerAndRepo(ctx, cf)
+	ct, _, err := a.findContainerAndRepo(ctx, cf)
 	if err != nil {
 		return err
 	}
 	return ct.Purge(ctx, os.Stdout, os.Stderr)
 }
 
-func cmdPush(ctx context.Context, args []string) error {
+func (a *app) cmdPush(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("push", flag.ExitOnError)
 	verbose := addVerboseFlag(fs)
 	cf := addContainerFlags(fs, false)
@@ -1009,7 +1018,7 @@ func cmdPush(ctx context.Context, args []string) error {
 	if err := checkArgs(fs, 0); err != nil {
 		return err
 	}
-	ct, repoIdx, err := findContainerAndRepo(ctx, cf)
+	ct, repoIdx, err := a.findContainerAndRepo(ctx, cf)
 	if err != nil {
 		return err
 	}
@@ -1044,7 +1053,7 @@ func cmdPush(ctx context.Context, args []string) error {
 	return eg.Wait()
 }
 
-func cmdPull(ctx context.Context, args []string) error {
+func (a *app) cmdPull(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("pull", flag.ExitOnError)
 	verbose := addVerboseFlag(fs)
 	cf := addContainerFlags(fs, false)
@@ -1056,7 +1065,7 @@ func cmdPull(ctx context.Context, args []string) error {
 	if err := checkArgs(fs, 0); err != nil {
 		return err
 	}
-	ct, repoIdx, err := findContainerAndRepo(ctx, cf)
+	ct, repoIdx, err := a.findContainerAndRepo(ctx, cf)
 	if err != nil {
 		return err
 	}
@@ -1076,7 +1085,7 @@ func cmdPull(ctx context.Context, args []string) error {
 	return eg.Wait()
 }
 
-func cmdDiff(ctx context.Context, args []string) error {
+func (a *app) cmdDiff(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("diff", flag.ExitOnError)
 	verbose := addVerboseFlag(fs)
 	cf := addContainerFlags(fs, false)
@@ -1113,7 +1122,7 @@ func cmdDiff(ctx context.Context, args []string) error {
 		return err
 	}
 	initLogging(*verbose)
-	ct, repoIdx, err := findContainerAndRepo(ctx, cf)
+	ct, repoIdx, err := a.findContainerAndRepo(ctx, cf)
 	if err != nil {
 		return err
 	}
@@ -1135,7 +1144,7 @@ func cmdDiff(ctx context.Context, args []string) error {
 	return nil
 }
 
-func cmdFork(ctx context.Context, args []string) error {
+func (a *app) cmdFork(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("fork", flag.ExitOnError)
 	verbose := addVerboseFlag(fs)
 	cf := addContainerFlags(fs, false)
@@ -1174,7 +1183,7 @@ func cmdFork(ctx context.Context, args []string) error {
 	// auto-detect from the repo like push does.
 	var sourceCt *md.Container
 	if *source != "" {
-		c, err := newClient()
+		c, err := a.newClient()
 		if err != nil {
 			return err
 		}
@@ -1184,7 +1193,7 @@ func cmdFork(ctx context.Context, args []string) error {
 		}
 	} else {
 		var err error
-		sourceCt, _, err = findContainerAndRepo(ctx, cf)
+		sourceCt, _, err = a.findContainerAndRepo(ctx, cf)
 		if err != nil {
 			return err
 		}
@@ -1239,7 +1248,7 @@ func cmdFork(ctx context.Context, args []string) error {
 	return nil
 }
 
-func cmdVNC(ctx context.Context, args []string) error {
+func (a *app) cmdVNC(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("vnc", flag.ExitOnError)
 	verbose := addVerboseFlag(fs)
 	cf := addContainerFlags(fs, false)
@@ -1252,14 +1261,14 @@ func cmdVNC(ctx context.Context, args []string) error {
 	}
 	var ct *md.Container
 	if name := fs.Arg(0); name != "" {
-		c, err := newClient()
+		c, err := a.newClient()
 		if err != nil {
 			return err
 		}
 		ct = &md.Container{Client: c, Name: name}
 	} else {
 		var err error
-		ct, _, err = findContainerAndRepo(ctx, cf)
+		ct, _, err = a.findContainerAndRepo(ctx, cf)
 		if err != nil {
 			return err
 		}
@@ -1308,7 +1317,7 @@ func cmdVNC(ctx context.Context, args []string) error {
 	}
 }
 
-func cmdSudoPassword(ctx context.Context, args []string) error {
+func (a *app) cmdSudoPassword(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("sudo-password", flag.ExitOnError)
 	verbose := addVerboseFlag(fs)
 	cf := addContainerFlags(fs, false)
@@ -1322,14 +1331,14 @@ func cmdSudoPassword(ctx context.Context, args []string) error {
 	// Accept a container name as positional arg, otherwise auto-detect.
 	var ct *md.Container
 	if name := fs.Arg(0); name != "" {
-		c, err := newClient()
+		c, err := a.newClient()
 		if err != nil {
 			return err
 		}
 		ct = &md.Container{Client: c, Name: name}
 	} else {
 		var err error
-		ct, _, err = findContainerAndRepo(ctx, cf)
+		ct, _, err = a.findContainerAndRepo(ctx, cf)
 		if err != nil {
 			return err
 		}
@@ -1345,7 +1354,7 @@ func cmdSudoPassword(ctx context.Context, args []string) error {
 	return nil
 }
 
-func cmdBuildImage(ctx context.Context, args []string) error {
+func (a *app) cmdBuildImage(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("build-image", flag.ExitOnError)
 	verbose := addVerboseFlag(fs)
 	platformFlag := fs.String("platform", "", "Image platform: linux/amd64 or linux/arm64 (default: "+md.DefaultPlatform().String()+")")
@@ -1356,7 +1365,7 @@ func cmdBuildImage(ctx context.Context, args []string) error {
 	if err := checkArgs(fs, 0); err != nil {
 		return err
 	}
-	c, err := newClient()
+	c, err := a.newClient()
 	if err != nil {
 		return err
 	}
@@ -1364,7 +1373,7 @@ func cmdBuildImage(ctx context.Context, args []string) error {
 	return c.BuildImage(ctx, os.Stdout, os.Stderr, md.Platform(*platformFlag))
 }
 
-func cmdPrune(ctx context.Context, args []string) error {
+func (a *app) cmdPrune(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("prune", flag.ExitOnError)
 	verbose := addVerboseFlag(fs)
 	if err := fs.Parse(args); err != nil {
@@ -1374,7 +1383,7 @@ func cmdPrune(ctx context.Context, args []string) error {
 	if err := checkArgs(fs, 0); err != nil {
 		return err
 	}
-	c, err := newClient()
+	c, err := a.newClient()
 	if err != nil {
 		return err
 	}

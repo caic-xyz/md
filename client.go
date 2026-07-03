@@ -177,6 +177,11 @@ func newClient(home, rt string, stdout io.Writer) (*Client, error) {
 	return c, nil
 }
 
+// Close implements io.Closer.
+func (c *Client) Close() error {
+	return nil
+}
+
 // detectRuntime returns the container runtime to use.
 // Checks for docker, then podman using the provided lookup function.
 func detectRuntime(lookPath func(string) (string, error)) string {
