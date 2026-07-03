@@ -11,6 +11,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -149,21 +150,35 @@ func ensureSSHConfigInclude(w io.Writer, sshDir string) error {
 
 // removeSSHConfig removes SSH config and known_hosts files for a container.
 // It also closes any active ControlMaster connection and removes the socket.
-func removeSSHConfig(ctx context.Context, client *Client, configDir, containerName string) {
-	cleanupControlSocket(ctx, client, containerName)
-	_ = os.Remove(filepath.Join(configDir, containerName+".conf"))
-	_ = os.Remove(filepath.Join(configDir, containerName+".known_hosts"))
+func removeSSHConfig(ctx context.Context, client *Client, configDir, containerName string) error {
+	if err := cleanupControlSocket(ctx, client, containerName); err != nil {
+		return err
+	}
+	var err error
+	if err2 := os.Remove(filepath.Join(configDir, containerName+".conf")); err2 != nil && !os.IsNotExist(err2) {
+		err = errors.Join(err, err2)
+	}
+	if err2 := os.Remove(filepath.Join(configDir, containerName+".known_hosts")); err2 != nil && !os.IsNotExist(err2) {
+		err = errors.Join(err, err2)
+	}
+	return err
 }
 
 // cleanupControlSocket closes an active ControlMaster connection and removes
 // the socket file. Safe to call even when ControlMaster is not in use.
-func cleanupControlSocket(ctx context.Context, client *Client, containerName string) {
+func cleanupControlSocket(ctx context.Context, client *Client, containerName string) error {
 	sock := controlSocketPath(containerName)
 	if _, err := os.Stat(sock); err != nil {
-		return
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
 	}
 	args := []string{"ssh", "-O", "exit", "-S", sock, "x"}
 	client.Logger.Log(ctx, slog.LevelDebug, "ssh", "container", containerName, "cmd", args)
 	_ = exec.CommandContext(ctx, args[0], args[1:]...).Run() //nolint:gosec // sock is from trusted container name
-	_ = os.Remove(sock)
+	if err := os.Remove(sock); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }

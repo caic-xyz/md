@@ -534,7 +534,9 @@ func (c *Container) Revive(ctx context.Context, stdout, stderr io.Writer) error 
 	// Rewrite SSH config with the new port. The known_hosts file also
 	// needs rewriting because entries are keyed by [127.0.0.1]:port.
 	sshConfigDir := filepath.Join(c.Home, ".ssh", "config.d")
-	removeSSHConfig(ctx, c.Client, sshConfigDir, c.Name)
+	if err := removeSSHConfig(ctx, c.Client, sshConfigDir, c.Name); err != nil {
+		return err
+	}
 	c.sshConfigPath = filepath.Join(sshConfigDir, c.Name+".conf")
 	knownHostsPath := filepath.Join(sshConfigDir, c.Name+".known_hosts")
 	hostPubKey, err := os.ReadFile(c.HostKeyPath + ".pub")
@@ -571,7 +573,9 @@ func (c *Container) Stop(ctx context.Context) error {
 	}
 	// Clean up stale ControlMaster socket (if any). The SSH connection is
 	// dead now that the container is stopped.
-	cleanupControlSocket(ctx, c.Client, c.Name)
+	if err := cleanupControlSocket(ctx, c.Client, c.Name); err != nil {
+		return err
+	}
 	c.State = "exited"
 	return nil
 }
@@ -627,8 +631,12 @@ func (c *Container) Purge(ctx context.Context, stdout, stderr io.Writer) error {
 		return retErr
 	}
 
-	_ = os.Remove(sshConf)
-	_ = os.Remove(sshKnown)
+	if err2 := os.Remove(sshConf); err2 != nil && !os.IsNotExist(err2) {
+		retErr = errors.Join(retErr, err2)
+	}
+	if err2 := os.Remove(sshKnown); err2 != nil && !os.IsNotExist(err2) {
+		retErr = errors.Join(retErr, err2)
+	}
 
 	for _, repo := range c.Repos {
 		if _, err := c.runCmd(ctx, repo.GitRoot, []string{"git", "remote", "get-url", c.Name}); err == nil {
@@ -1682,20 +1690,24 @@ func tailscaleDeviceIDFromStatus(statusJSON string) (string, error) {
 	return strings.TrimSpace(status.Self.ID), nil
 }
 
-func (c *Container) readContainerFile(ctx context.Context, containerPath string) (string, error) {
-	tmpDir, err := os.MkdirTemp("", "md-container-file-*")
-	if err != nil {
-		return "", err
+func (c *Container) readContainerFile(ctx context.Context, containerPath string) (content string, err error) {
+	tmpDir, err2 := os.MkdirTemp("", "md-container-file-*")
+	if err2 != nil {
+		return "", err2
 	}
-	defer func() { _ = os.RemoveAll(tmpDir) }()
+	defer func() {
+		if err2 := os.RemoveAll(tmpDir); err2 != nil && !os.IsNotExist(err2) {
+			err = errors.Join(err, err2)
+		}
+	}()
 
 	dst := filepath.Join(tmpDir, "file")
-	if _, err := c.runCmd(ctx, "", []string{c.Runtime, "cp", c.Name + ":" + containerPath, dst}); err != nil {
+	if _, err = c.runCmd(ctx, "", []string{c.Runtime, "cp", c.Name + ":" + containerPath, dst}); err != nil {
 		return "", err
 	}
-	data, err := os.ReadFile(dst) // #nosec G304 -- dst is a private temp file populated by docker cp.
-	if err != nil {
-		return "", err
+	data, err2 := os.ReadFile(dst) // #nosec G304 -- dst is a private temp file populated by docker cp.
+	if err2 != nil {
+		return "", err2
 	}
 	return string(data), nil
 }

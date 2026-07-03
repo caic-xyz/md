@@ -372,7 +372,11 @@ func (c *Client) BuildImage(ctx context.Context, stdout, stderr io.Writer, platf
 	if err != nil {
 		return err
 	}
-	defer func() { retErr = errors.Join(retErr, os.RemoveAll(rootCtx)) }()
+	defer func() {
+		if err := errors.Join(retErr, os.RemoveAll(rootCtx)); err != nil && !os.IsNotExist(err) {
+			retErr = errors.Join(retErr, err)
+		}
+	}()
 	rootCmd := []string{
 		c.Runtime, "build",
 		"--platform", platformString,
@@ -394,7 +398,11 @@ func (c *Client) BuildImage(ctx context.Context, stdout, stderr io.Writer, platf
 	if err != nil {
 		return err
 	}
-	defer func() { retErr = errors.Join(retErr, os.RemoveAll(userCtx)) }()
+	defer func() {
+		if err := errors.Join(retErr, os.RemoveAll(userCtx)); err != nil && !os.IsNotExist(err) {
+			retErr = errors.Join(retErr, err)
+		}
+	}()
 	userCmd := []string{
 		c.Runtime, "build",
 		"--platform", platformString,
