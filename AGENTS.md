@@ -15,6 +15,7 @@ A file to [guide coding agents](https://agents.md/).
 - **Cross-platform fake executables in Go tests**: Prefer re-entering the current test binary with `os.Executable()` plus `TestMain`/environment switches. Do not create POSIX shell-script fake executables for tests that must run on Windows CI; Windows cannot execute a temp `docker` shell script without a native `.exe`/`.cmd` wrapper.
 - **Cross-platform paths**: When passing host paths to Docker CLI or SSH config files, always use `filepath.ToSlash()`.
   Docker Desktop on Windows expects forward slashes; SSH config uses POSIX convention.
+- **Docker knowledge is outdated by default**: when a change depends on Docker behavior, run `git clone https://github.com/docker/docs` and read the relevant site documentation as the source of truth.
 - For Python code changes, ensure code passes `pylint .` and `ruff check --no-cache` as defined in `.github/workflows/test.yml`
 - When adding new tools to the system, they must also be added to `rsc/user/home/user/setup/generate_version_report.sh` to ensure they appear in version reports. The script generates `/home/user/src/tool_versions.md` which is used in release notes and build reports
 
