@@ -185,12 +185,19 @@ jobs:
 
   # Runs the smoke test (end-to-end container lifecycle) with code coverage.
   smoke:
-    name: "smoke: ubuntu-latest"
+    name: "smoke: ${{matrix.runtime}} on ubuntu-latest"
     runs-on: ubuntu-latest
     continue-on-error: true
     defaults:
       run:
         shell: bash
+    strategy:
+      fail-fast: false
+      # Run Docker and Podman on separate runners. They use separate image
+      # stores and unpack large base images; sharing one runner can exhaust
+      # /mnt even though both stores are relocated there.
+      matrix:
+        runtime: [docker, podman]
     env:
       PYTHONDONTWRITEBYTECODE: x
     steps:
@@ -215,12 +222,12 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TMPDIR: /mnt/go-test-tmp
-        run: go test -tags=smoke -run TestSmoke -short -v -timeout 30m -covermode=count -coverprofile coverage_smoke.txt
+        run: go test -tags=smoke -run 'TestSmoke/${{matrix.runtime}}$' -short -v -timeout 30m -covermode=count -coverprofile coverage_smoke.txt
       - uses: codecov/codecov-action@v6
         with:
           token: ${{secrets.CODECOV_TOKEN}}
           files: coverage_smoke.txt
-          flags: smoke
+          flags: smoke,smoke-${{matrix.runtime}}
 
   codeql:
     name: "codeql: ${{matrix.os}}"
