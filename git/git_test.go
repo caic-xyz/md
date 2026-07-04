@@ -4,9 +4,10 @@
 
 // Tests for git repository utilities.
 
-package gitutil
+package git
 
 import (
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +15,19 @@ import (
 	"strings"
 	"testing"
 )
+
+func testLogger(t testing.TB) *slog.Logger {
+	return slog.New(slog.NewTextHandler(testLogWriter{t: t}, &slog.HandlerOptions{Level: slog.LevelDebug}))
+}
+
+type testLogWriter struct {
+	t testing.TB
+}
+
+func (w testLogWriter) Write(p []byte) (int, error) {
+	w.t.Log(strings.TrimSuffix(string(p), "\n"))
+	return len(p), nil
+}
 
 func TestListSubmodules(t *testing.T) {
 	t.Parallel()
@@ -50,7 +64,7 @@ func TestListSubmodules(t *testing.T) {
 	run(main, "-c", "protocol.file.allow=always", "submodule", "add", subBare, "lib/sub")
 	run(main, "commit", "-m", "add submodule")
 
-	subs, err := ListSubmodules(ctx, main)
+	subs, err := (&Checkout{Root: main, Logger: testLogger(t)}).ListSubmodules(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +81,7 @@ func TestListSubmodules(t *testing.T) {
 	// Repo with no submodules returns nil.
 	empty := filepath.Join(dir, "empty")
 	run("", "init", "--initial-branch=main", empty)
-	subs, err = ListSubmodules(ctx, empty)
+	subs, err = (&Checkout{Root: empty, Logger: testLogger(t)}).ListSubmodules(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,6 +92,7 @@ func TestListSubmodules(t *testing.T) {
 
 func TestFindModuleDirs(t *testing.T) {
 	t.Parallel()
+	ctx := t.Context()
 	dir := t.TempDir()
 
 	// mkBare creates a minimal bare repo layout under .git/modules/<parts...>.
@@ -106,7 +121,7 @@ func TestFindModuleDirs(t *testing.T) {
 	// Another direct submodule under a path prefix.
 	mkBare("lib", "subC")
 
-	paths, err := FindModuleDirs(dir)
+	paths, err := (&Checkout{Root: dir, Logger: testLogger(t)}).FindModuleDirs(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +136,7 @@ func TestFindModuleDirs(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(empty, ".git"), 0o750); err != nil {
 		t.Fatal(err)
 	}
-	paths, err = FindModuleDirs(empty)
+	paths, err = (&Checkout{Root: empty, Logger: testLogger(t)}).FindModuleDirs(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +170,7 @@ func TestDiscoverRepos(t *testing.T) {
 	// Nested repo inside a repo — recursion should stop at repoA.
 	mkGit("repoA", "sub", ".git")
 
-	repos, err := DiscoverRepos(root, 3)
+	repos, err := DiscoverCheckouts(root, 3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +198,7 @@ func TestDiscoverReposDepthZero(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	repos, err := DiscoverRepos(root, 0)
+	repos, err := DiscoverCheckouts(root, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,7 +210,7 @@ func TestDiscoverReposDepthZero(t *testing.T) {
 func TestDiscoverReposEmpty(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	repos, err := DiscoverRepos(root, 3)
+	repos, err := DiscoverCheckouts(root, 3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -235,7 +250,7 @@ func TestDiscoverReposBare(t *testing.T) {
 	// Bare repo too deep (depth 4) — excluded at maxDepth=3.
 	mkBare("deep", "nested", "too", "deep.git")
 
-	repos, err := DiscoverRepos(root, 3)
+	repos, err := DiscoverCheckouts(root, 3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -280,8 +295,10 @@ func TestDefaultBranch(t *testing.T) {
 		}
 	}
 
+	g := &Checkout{Root: clone, Logger: testLogger(t)}
+
 	// DefaultBranch should return "main" via the symbolic ref.
-	got, err := DefaultBranch(ctx, clone, "origin")
+	got, err := g.DefaultBranch(ctx, "origin")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -295,7 +312,7 @@ func TestDefaultBranch(t *testing.T) {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git checkout -b feature: %v\n%s", err, out)
 	}
-	got, err = DefaultBranch(ctx, clone, "origin")
+	got, err = g.DefaultBranch(ctx, "origin")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -309,7 +326,7 @@ func TestDefaultBranch(t *testing.T) {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git remote set-head origin --delete: %v\n%s", err, out)
 	}
-	got, err = DefaultBranch(ctx, clone, "origin")
+	got, err = g.DefaultBranch(ctx, "origin")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -362,7 +379,7 @@ func TestPushRef(t *testing.T) {
 	}
 
 	// Push the local branch ref to origin as caic-0.
-	if err := PushRef(ctx, clone, "caic-0", "caic-0", false); err != nil {
+	if err := (&Checkout{Root: clone, Logger: testLogger(t)}).PushRef(ctx, "caic-0", "caic-0", false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -465,7 +482,7 @@ func TestSquashOnto(t *testing.T) {
 		run(t, clone, "commit", "-m", "add b")
 
 		// Squash onto main.
-		if err := SquashOnto(ctx, clone, "feature", "main", "squash: add a + b"); err != nil {
+		if err := (&Checkout{Root: clone, Logger: testLogger(t)}).SquashOnto(ctx, "feature", "main", "squash: add a + b"); err != nil {
 			t.Fatal(err)
 		}
 
@@ -514,7 +531,7 @@ func TestSquashOnto(t *testing.T) {
 		// SquashOnto will fetch (getting latest main), create a squash commit
 		// parented on the fetched main, and push. This should succeed because
 		// origin/main was refreshed by the Fetch inside SquashOnto.
-		if err := SquashOnto(ctx, clone, "feature2", "main", "squash f"); err != nil {
+		if err := (&Checkout{Root: clone, Logger: testLogger(t)}).SquashOnto(ctx, "feature2", "main", "squash f"); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -566,8 +583,10 @@ func TestIsReachable(t *testing.T) { //nolint:tparallel // subtests share git re
 	// The initial commit is on origin/main — reachable.
 	initCommit := run(t, clone, "rev-parse", "origin/main")
 
+	g := &Checkout{Root: clone, Logger: testLogger(t)}
+
 	t.Run("Reachable", func(t *testing.T) { //nolint:paralleltest // subtests share git repo
-		ok, err := IsReachable(ctx, clone, initCommit)
+		ok, err := g.IsReachable(ctx, initCommit)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -577,7 +596,7 @@ func TestIsReachable(t *testing.T) { //nolint:tparallel // subtests share git re
 	})
 
 	t.Run("Unreachable", func(t *testing.T) { //nolint:paralleltest // subtests share git repo
-		ok, err := IsReachable(ctx, clone, containerCommit)
+		ok, err := g.IsReachable(ctx, containerCommit)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -592,7 +611,7 @@ func TestIsReachable(t *testing.T) { //nolint:tparallel // subtests share git re
 		defer func() {
 			run(t, clone, "branch", "-D", "local-backup")
 		}()
-		ok, err := IsReachable(ctx, clone, containerCommit)
+		ok, err := g.IsReachable(ctx, containerCommit)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -624,8 +643,10 @@ func TestCreateBranch(t *testing.T) { //nolint:tparallel // subtests share git r
 	run(t, dir, "commit", "--allow-empty", "-m", "init")
 	startCommit := run(t, dir, "rev-parse", "HEAD")
 
+	g := &Checkout{Root: dir, Logger: testLogger(t)}
+
 	t.Run("DoesNotChangeWorkingTree", func(t *testing.T) { //nolint:paralleltest // subtests share git repo
-		if err := CreateBranch(ctx, dir, "caic-1", "main"); err != nil {
+		if err := g.CreateBranch(ctx, "caic-1", "main"); err != nil {
 			t.Fatal(err)
 		}
 		// Branch points at the same commit as main.
@@ -641,7 +662,7 @@ func TestCreateBranch(t *testing.T) { //nolint:tparallel // subtests share git r
 	})
 
 	t.Run("AlreadyExists", func(t *testing.T) { //nolint:paralleltest // subtests share git repo
-		if err := CreateBranch(ctx, dir, "caic-1", "main"); err == nil {
+		if err := g.CreateBranch(ctx, "caic-1", "main"); err == nil {
 			t.Error("expected error for duplicate branch")
 		}
 	})

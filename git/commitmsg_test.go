@@ -4,7 +4,7 @@
 
 // Tests for commit message generation.
 
-package gitutil
+package git
 
 import (
 	"strings"

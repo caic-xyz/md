@@ -4,7 +4,7 @@
 
 // Commit message generation and formatting.
 
-package gitutil
+package git
 
 import (
 	"cmp"

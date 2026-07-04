@@ -34,7 +34,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/caic-xyz/md"
-	"github.com/caic-xyz/md/gitutil"
+	"github.com/caic-xyz/md/git"
 )
 
 type app struct {
@@ -260,7 +260,7 @@ func (a *app) findContainerAndRepo(ctx context.Context, cf *containerFlags) (*md
 			return nil, 0, err
 		}
 	}
-	gitRoot, err := gitutil.RootDir(ctx, searchPath)
+	g, err := git.RootDir(ctx, searchPath, c.Logger)
 	if err != nil {
 		return nil, 0, fmt.Errorf("not in a git repository: %w", err)
 	}
@@ -272,7 +272,7 @@ func (a *app) findContainerAndRepo(ctx context.Context, cf *containerFlags) (*md
 	// disambiguator so that two containers on different branches of the same
 	// repo are resolved automatically.
 	if branch == "" {
-		branch, _ = gitutil.RunGit(ctx, gitRoot, "branch", "--show-current")
+		branch, _ = g.RunGit(ctx, "branch", "--show-current")
 	}
 	containers, err := c.List(ctx)
 	if err != nil {
@@ -282,7 +282,7 @@ func (a *app) findContainerAndRepo(ctx context.Context, cf *containerFlags) (*md
 	var matchedIdx []int
 	for _, ct := range containers {
 		for i, repo := range ct.Repos {
-			if repo.GitRoot == gitRoot && (branch == "" || repo.Branch == branch) {
+			if repo.GitRoot == g.Root && (branch == "" || repo.Branch == branch) {
 				matched = append(matched, ct)
 				matchedIdx = append(matchedIdx, i)
 				break
@@ -291,7 +291,7 @@ func (a *app) findContainerAndRepo(ctx context.Context, cf *containerFlags) (*md
 	}
 	switch len(matched) {
 	case 0:
-		return nil, 0, fmt.Errorf("no container found for %s", gitRoot)
+		return nil, 0, fmt.Errorf("no container found for %s", g.Root)
 	case 1:
 		return matched[0], matchedIdx[0], nil
 	default:
@@ -299,7 +299,7 @@ func (a *app) findContainerAndRepo(ctx context.Context, cf *containerFlags) (*md
 		for i, ct := range matched {
 			names[i] = ct.Name
 		}
-		return nil, 0, fmt.Errorf("multiple containers match %s: %s; use -branch to disambiguate", gitRoot, strings.Join(names, ", "))
+		return nil, 0, fmt.Errorf("multiple containers match %s: %s; use -branch to disambiguate", g.Root, strings.Join(names, ", "))
 	}
 }
 
@@ -321,30 +321,30 @@ func (a *app) newContainer(ctx context.Context, cf *containerFlags, extraRepoSpe
 			return nil, err
 		}
 	}
-	gitRoot, gitErr := gitutil.RootDir(ctx, primaryPath)
+	g, gitErr := git.RootDir(ctx, primaryPath, c.Logger)
 	if gitErr == nil {
 		// Chdir so that relative paths in subsequent flag resolution (e.g.
 		// -extra-repo) resolve from the git root. Safe because the CLI is serial.
-		if err := os.Chdir(gitRoot); err != nil {
+		if err := os.Chdir(g.Root); err != nil {
 			return nil, err
 		}
 		var branch string
 		if cf.branch != nil && *cf.branch != "" {
 			branch = *cf.branch
 		} else {
-			branch, err = gitutil.CurrentBranch(ctx, gitRoot)
+			branch, err = g.CurrentBranch(ctx)
 			if err != nil {
-				return nil, fmt.Errorf("detached HEAD in %s: check out a named branch or use -b to specify one", gitRoot)
+				return nil, fmt.Errorf("detached HEAD in %s: check out a named branch or use -b to specify one", g.Root)
 			}
 		}
-		repos = append(repos, md.Repo{GitRoot: gitRoot, Branch: branch})
+		repos = append(repos, md.Repo{GitRoot: g.Root, Branch: branch})
 	} else if cf.repo != nil && *cf.repo != "" {
 		// Explicit -repo that isn't a git root is an error.
 		return nil, fmt.Errorf("repo %s: %w", primaryPath, gitErr)
 	}
 	// Not in a git repo and no explicit -repo: create a no-repo container.
 	// Resolve extra repos.
-	extra, err := resolveRepoSpecs(ctx, extraRepoSpecs)
+	extra, err := resolveRepoSpecs(ctx, c.Logger, extraRepoSpecs)
 	if err != nil {
 		return nil, err
 	}
@@ -353,21 +353,21 @@ func (a *app) newContainer(ctx context.Context, cf *containerFlags, extraRepoSpe
 }
 
 // resolveRepoSpecs resolves "path[:branch]" specs into Repos.
-func resolveRepoSpecs(ctx context.Context, specs []string) ([]md.Repo, error) {
+func resolveRepoSpecs(ctx context.Context, logger md.Logger, specs []string) ([]md.Repo, error) {
 	repos := make([]md.Repo, 0, len(specs))
 	for _, spec := range specs {
 		path, branch, _ := strings.Cut(spec, ":")
-		gitRoot, err := gitutil.RootDir(ctx, path)
+		g, err := git.RootDir(ctx, path, logger)
 		if err != nil {
 			return nil, fmt.Errorf("extra repo %s: %w", path, err)
 		}
 		if branch == "" {
-			branch, err = gitutil.CurrentBranch(ctx, gitRoot)
+			branch, err = g.CurrentBranch(ctx)
 			if err != nil {
 				return nil, fmt.Errorf("extra repo %s: %w", path, err)
 			}
 		}
-		repos = append(repos, md.Repo{GitRoot: gitRoot, Branch: branch})
+		repos = append(repos, md.Repo{GitRoot: g.Root, Branch: branch})
 	}
 	return repos, nil
 }
@@ -1210,7 +1210,7 @@ func (a *app) cmdFork(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	resolved, err := resolveRepoSpecs(ctx, extraRepos.values)
+	resolved, err := resolveRepoSpecs(ctx, sourceCt.Logger, extraRepos.values)
 	if err != nil {
 		return err
 	}

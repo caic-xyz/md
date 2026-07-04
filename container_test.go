@@ -460,10 +460,11 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 		runTestGit(t, ctx, dir, "push", "-q", "-u", "upstream", "main")
 
 		repo := Repo{GitRoot: dir, Branch: "main"}
-		if err := repo.resolveDefaults(ctx); err != nil {
+		logger := testLogger(t)
+		if err := repo.resolveDefaults(ctx, logger); err != nil {
 			t.Fatal(err)
 		}
-		base, err := repo.resolveContainerBranchBase(ctx)
+		base, err := repo.resolveContainerBranchBase(ctx, logger)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -473,7 +474,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 
 		writeTestFile(t, filepath.Join(dir, "tracked.txt"), "local main\n")
 		runTestGit(t, ctx, dir, "commit", "-q", "-am", "local main")
-		base, err = repo.resolveContainerBranchBase(ctx)
+		base, err = repo.resolveContainerBranchBase(ctx, logger)
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -34,7 +34,7 @@ import (
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/term"
 
-	"github.com/caic-xyz/md/gitutil"
+	"github.com/caic-xyz/md/git"
 )
 
 // DefaultBaseImage is the base image used when none is specified.
@@ -402,16 +402,17 @@ func commonPrefix(a, b string) string {
 }
 
 // resolveDefaults populates DefaultRemote and DefaultBranch if not already set.
-func (r *Repo) resolveDefaults(ctx context.Context) error {
+func (r *Repo) resolveDefaults(ctx context.Context, logger Logger) error {
+	g := &git.Checkout{Root: r.GitRoot, Logger: logger}
 	if r.DefaultRemote == "" {
-		remote, err := gitutil.DefaultRemote(ctx, r.GitRoot)
+		remote, err := g.DefaultRemote(ctx)
 		if err != nil {
 			return err
 		}
 		r.DefaultRemote = remote
 	}
 	if r.DefaultBranch == "" {
-		branch, err := gitutil.DefaultBranch(ctx, r.GitRoot, r.DefaultRemote)
+		branch, err := g.DefaultBranch(ctx, r.DefaultRemote)
 		if err != nil {
 			return err
 		}
@@ -438,7 +439,7 @@ func (c *Container) Launch(ctx context.Context, stdout, stderr io.Writer, opts *
 		return err
 	}
 	for i := range c.Repos {
-		if err := c.Repos[i].resolveDefaults(ctx); err != nil {
+		if err := c.Repos[i].resolveDefaults(ctx, c.Logger); err != nil {
 			return fmt.Errorf("resolve defaults for %s: %w", c.Repos[i].MountedPath, err)
 		}
 	}
@@ -667,6 +668,7 @@ func (c *Container) Push(ctx context.Context, stdout, stderr io.Writer, repoIdx 
 		return "", err
 	}
 	r := &c.Repos[repoIdx]
+	g := &git.Checkout{Root: r.GitRoot, Logger: c.Logger}
 	mp := shellQuote(r.MountedPath)
 	branch := shellQuote(r.Branch)
 	backupBranch := "backup-" + time.Now().Format("20060102-150405")
@@ -677,19 +679,19 @@ func (c *Container) Push(ctx context.Context, stdout, stderr io.Writer, repoIdx 
 		return "", fmt.Errorf("backing up container state: %w", err)
 	}
 	// Refuse if there are pending local changes on the branch being pushed.
-	currentBranch, _ := gitutil.RunGit(ctx, r.GitRoot, "branch", "--show-current")
+	currentBranch, _ := g.RunGit(ctx, "branch", "--show-current")
 	if currentBranch == r.Branch {
-		if _, err := gitutil.RunGit(ctx, r.GitRoot, "diff", "--quiet", "--exit-code"); err != nil {
+		if _, err := g.RunGit(ctx, "diff", "--quiet", "--exit-code"); err != nil {
 			return "", errors.New("there are pending changes locally. Please commit or stash them before pushing")
 		}
 	}
-	base, err := r.resolveContainerBranchBase(ctx)
+	base, err := r.resolveContainerBranchBase(ctx, c.Logger)
 	if err != nil {
 		return "", err
 	}
 	// Push the task branch and the refs used as diff bases together. Git accepts
 	// several refspecs in one invocation.
-	syncRefspecs, err := r.containerSyncRefspecs(ctx)
+	syncRefspecs, err := r.containerSyncRefspecs(ctx, c.Logger)
 	if err != nil {
 		return "", err
 	}
@@ -729,13 +731,14 @@ func (c *Container) Fetch(ctx context.Context, stdout, stderr io.Writer, repoIdx
 		return err
 	}
 	r := &c.Repos[repoIdx]
+	g := &git.Checkout{Root: r.GitRoot, Logger: c.Logger}
 	mp := shellQuote(r.MountedPath)
 	if err := c.SyncDefaultBranch(ctx, repoIdx); err != nil {
 		return err
 	}
 	commitMsg := "Pull from md"
-	gitUserName, _ := gitutil.RunGit(ctx, r.GitRoot, "config", "user.name")
-	gitUserEmail, _ := gitutil.RunGit(ctx, r.GitRoot, "config", "user.email")
+	gitUserName, _ := g.RunGit(ctx, "config", "user.name")
+	gitUserEmail, _ := g.RunGit(ctx, "config", "user.email")
 	if gitUserName == "" {
 		gitUserName = "md"
 	}
@@ -753,7 +756,7 @@ func (c *Container) Fetch(ctx context.Context, stdout, stderr io.Writer, repoIdx
 	} else if _, err := c.runCmd(ctx, "", c.SSHCommand(nil, "cd "+mp+" && git add . && git diff --quiet HEAD -- .")); err != nil {
 		metadata := c.gatherGitMetadata(ctx, r)
 		diff := c.gatherGitDiff(ctx, r)
-		if msg, err := gitutil.GenerateCommitMsg(ctx, p, metadata, diff, nil); err != nil {
+		if msg, err := git.GenerateCommitMsg(ctx, p, metadata, diff, nil); err != nil {
 			c.Logger.Log(ctx, slog.LevelWarn, "failed to generate commit message", "err", err)
 		} else if msg != "" {
 			commitMsg = msg
@@ -778,12 +781,13 @@ func (c *Container) Pull(ctx context.Context, stdout, stderr io.Writer, repoIdx 
 		return err
 	}
 	r := &c.Repos[repoIdx]
+	g := &git.Checkout{Root: r.GitRoot, Logger: c.Logger}
 	remoteRef := c.Name + "/" + r.Branch
 	branchExists, err := gitRefExists(ctx, r.GitRoot, "refs/heads/"+r.Branch)
 	if err != nil {
 		return err
 	}
-	currentBranch, _ := gitutil.RunGit(ctx, r.GitRoot, "branch", "--show-current")
+	currentBranch, _ := g.RunGit(ctx, "branch", "--show-current")
 	if !branchExists {
 		if err := c.runCmdOut(ctx, r.GitRoot, []string{"git", "update-ref", "refs/heads/" + r.Branch, remoteRef}, stdout, stderr); err != nil {
 			return err
@@ -793,7 +797,7 @@ func (c *Container) Pull(ctx context.Context, stdout, stderr io.Writer, repoIdx 
 		if err := c.runCmdOut(ctx, r.GitRoot, []string{"git", "rebase", "-q", remoteRef}, stdout, stderr); err != nil {
 			return err
 		}
-	} else if _, err := gitutil.RunGit(ctx, r.GitRoot, "merge-base", "--is-ancestor", r.Branch, remoteRef); err == nil {
+	} else if _, err := g.RunGit(ctx, "merge-base", "--is-ancestor", r.Branch, remoteRef); err == nil {
 		// Fast-forward: update ref without checkout.
 		if err := c.runCmdOut(ctx, r.GitRoot, []string{"git", "update-ref", "refs/heads/" + r.Branch, remoteRef}, stdout, stderr); err != nil {
 			return err
@@ -802,7 +806,7 @@ func (c *Container) Pull(ctx context.Context, stdout, stderr io.Writer, repoIdx 
 		// Not a fast-forward. Checkout the branch, rebase, then checkout back.
 		origRef := currentBranch
 		if origRef == "" {
-			origRef, _ = gitutil.RunGit(ctx, r.GitRoot, "rev-parse", "HEAD")
+			origRef, _ = g.RunGit(ctx, "rev-parse", "HEAD")
 		}
 		if err := c.runCmdOut(ctx, r.GitRoot, []string{"git", "checkout", "-q", r.Branch}, stdout, stderr); err != nil {
 			return err
@@ -815,7 +819,7 @@ func (c *Container) Pull(ctx context.Context, stdout, stderr io.Writer, repoIdx 
 			return err
 		}
 	}
-	base, err := r.resolveContainerBranchBase(ctx)
+	base, err := r.resolveContainerBranchBase(ctx, c.Logger)
 	if err != nil {
 		return err
 	}
@@ -1011,7 +1015,7 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 	extraRepos := slices.Clone(opts.ExtraRepos)
 	for i := range extraRepos {
 		if extraRepos[i].Branch == "" {
-			if err := extraRepos[i].resolveDefaults(ctx); err != nil {
+			if err := extraRepos[i].resolveDefaults(ctx, c.Logger); err != nil {
 				return nil, fmt.Errorf("resolving defaults for extra repo %s: %w", extraRepos[i].GitRoot, err)
 			}
 			extraRepos[i].Branch = extraRepos[i].DefaultBranch
@@ -1024,6 +1028,7 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 	forkRepos := slices.Clone(allSrc)
 	existing, _ := c.List(ctx)
 	for i, src := range allSrc {
+		g := &git.Checkout{Root: src.GitRoot, Logger: c.Logger}
 		usedBranches := map[string]struct{}{}
 		for _, ct := range existing {
 			for _, r := range ct.Repos {
@@ -1037,7 +1042,7 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 			if _, ok := usedBranches[cand]; ok {
 				continue
 			}
-			if _, err := gitutil.RunGit(ctx, src.GitRoot, "rev-parse", "--verify", cand); err != nil {
+			if _, err := g.RunGit(ctx, "rev-parse", "--verify", cand); err != nil {
 				forkRepos[i].Branch = cand
 				break
 			}
@@ -1082,7 +1087,7 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 			return nil, fmt.Errorf("fetching %s from source container: %w", r.MountedPath, err)
 		}
 		fetchedRef := c.Name + "/" + r.Branch
-		curr, _ := gitutil.CurrentBranch(ctx, r.GitRoot)
+		curr, _ := (&git.Checkout{Root: r.GitRoot, Logger: c.Logger}).CurrentBranch(ctx)
 		newBranch := fork.Repos[i].Branch
 		if curr == newBranch {
 			if err := c.runCmdOut(ctx, r.GitRoot, []string{"git", "reset", "--hard", fetchedRef}, stdout, stderr); err != nil {
@@ -1396,7 +1401,7 @@ func (c *Container) SyncDefaultBranch(ctx context.Context, repoIdx int) error {
 	if len(c.Repos) == 0 {
 		return errors.New("container has no repos")
 	}
-	refspecs, err := c.Repos[repoIdx].containerSyncRefspecs(ctx)
+	refspecs, err := c.Repos[repoIdx].containerSyncRefspecs(ctx, c.Logger)
 	if err != nil {
 		return err
 	}
@@ -1420,11 +1425,11 @@ func (c *Container) untagImage(ctx context.Context, image string) error {
 	return nil
 }
 
-func (r *Repo) containerSyncRefspecs(ctx context.Context) ([]string, error) {
+func (r *Repo) containerSyncRefspecs(ctx context.Context, logger Logger) ([]string, error) {
 	// These refspecs refresh the container's copy of the default branch and the
 	// tracked branch, when distinct. Callers append them to the push that already
 	// transfers the task branch.
-	if err := r.resolveDefaults(ctx); err != nil {
+	if err := r.resolveDefaults(ctx, logger); err != nil {
 		return nil, fmt.Errorf("sync default branch: %w", err)
 	}
 	refspecs := []string{}
@@ -1437,7 +1442,7 @@ func (r *Repo) containerSyncRefspecs(ctx context.Context) ([]string, error) {
 	}
 	// Containers can outlive the branch recorded at launch. If that branch was
 	// deleted locally and remotely, leave the existing container refs in place.
-	branch, src, ok, err := r.trackedBranchPushSource(ctx)
+	branch, src, ok, err := r.trackedBranchPushSource(ctx, logger)
 	if err != nil {
 		return nil, fmt.Errorf("sync tracked branch for %q: %w", r.Branch, err)
 	}
@@ -1571,24 +1576,25 @@ type containerBranchBase struct {
 	destination string
 }
 
-func (r *Repo) resolveContainerBranchBase(ctx context.Context) (containerBranchBase, error) {
+func (r *Repo) resolveContainerBranchBase(ctx context.Context, logger Logger) (containerBranchBase, error) {
+	g := &git.Checkout{Root: r.GitRoot, Logger: logger}
 	localRef := "refs/heads/" + r.Branch
-	localCommit, err := gitutil.RevParse(ctx, r.GitRoot, localRef)
+	localCommit, err := g.RevParse(ctx, localRef)
 	if err != nil {
 		return containerBranchBase{}, err
 	}
-	remote, branch, ok, err := r.branchUpstream(ctx)
+	remote, branch, ok, err := r.branchUpstream(ctx, logger)
 	if err != nil {
 		return containerBranchBase{}, err
 	}
 	if ok && remote == r.DefaultRemote {
 		remoteRef := remoteTrackingRef(remote, branch)
-		if remoteCommit, err := gitutil.RevParse(ctx, r.GitRoot, remoteRef); err == nil && remoteCommit == localCommit {
+		if remoteCommit, err := g.RevParse(ctx, remoteRef); err == nil && remoteCommit == localCommit {
 			return containerBranchBase{source: remoteRef, ref: remote + "/" + branch, destination: remoteRef}, nil
 		}
 	}
 	remoteRef := remoteTrackingRef(r.DefaultRemote, r.Branch)
-	if remoteCommit, err := gitutil.RevParse(ctx, r.GitRoot, remoteRef); err == nil && remoteCommit == localCommit {
+	if remoteCommit, err := g.RevParse(ctx, remoteRef); err == nil && remoteCommit == localCommit {
 		return containerBranchBase{source: remoteRef, ref: r.DefaultRemote + "/" + r.Branch, destination: remoteRef}, nil
 	}
 	return containerBranchBase{source: localRef, ref: "host/" + r.Branch, useHost: true, destination: "refs/remotes/host/" + r.Branch}, nil
@@ -1630,20 +1636,20 @@ func gitRefExists(ctx context.Context, dir, ref string) (bool, error) {
 	return true, nil
 }
 
-func (r *Repo) trackedBranchPushSource(ctx context.Context) (branch, src string, ok bool, err error) {
-	remote, branch, ok, err := r.branchUpstream(ctx)
+func (r *Repo) trackedBranchPushSource(ctx context.Context, logger Logger) (branch, src string, ok bool, err error) {
+	remote, branch, ok, err := r.branchUpstream(ctx, logger)
 	if err != nil || !ok || remote != r.DefaultRemote {
 		return "", "", false, err
 	}
 	src = remoteTrackingRef(remote, branch)
-	if _, err := gitutil.RevParse(ctx, r.GitRoot, src); err != nil {
+	if _, err := (&git.Checkout{Root: r.GitRoot, Logger: logger}).RevParse(ctx, src); err != nil {
 		return "", "", false, err
 	}
 	return branch, src, true, nil
 }
 
-func (r *Repo) branchUpstream(ctx context.Context) (remote, branch string, ok bool, err error) {
-	out, err := gitutil.RunGit(ctx, r.GitRoot, "for-each-ref", "--format=%(upstream:remotename)%00%(upstream:remoteref)", "refs/heads/"+r.Branch)
+func (r *Repo) branchUpstream(ctx context.Context, logger Logger) (remote, branch string, ok bool, err error) {
+	out, err := (&git.Checkout{Root: r.GitRoot, Logger: logger}).RunGit(ctx, "for-each-ref", "--format=%(upstream:remotename)%00%(upstream:remoteref)", "refs/heads/"+r.Branch)
 	if err != nil {
 		return "", "", false, err
 	}
@@ -1853,14 +1859,15 @@ func (c *Container) ensureImage(ctx context.Context, stdout, stderr io.Writer, b
 // Returns nil when no submodules are declared or when submodules are declared
 // but not yet cloned on the host (uninitialized).
 func (c *Container) pushSubmodules(ctx context.Context, stdout, stderr io.Writer, containerRepoPath, hostGitRoot string, quiet bool) error {
-	subs, err := gitutil.ListSubmodules(ctx, hostGitRoot)
+	g := &git.Checkout{Root: hostGitRoot, Logger: c.Logger}
+	subs, err := g.ListSubmodules(ctx)
 	if err != nil {
 		return err
 	}
 	if len(subs) == 0 {
 		return nil
 	}
-	moduleDirs, err := gitutil.FindModuleDirs(hostGitRoot)
+	moduleDirs, err := g.FindModuleDirs(ctx)
 	if err != nil {
 		return err
 	}
@@ -2321,17 +2328,17 @@ func (c *Container) provisionContainer(ctx context.Context, stdout, stderr io.Wr
 					return fmt.Errorf("init repo %s in container: %w", c.Repos[repoIdx].MountedPath, err)
 				}
 
-				if err := c.Repos[repoIdx].resolveDefaults(egCtx); err != nil {
+				if err := c.Repos[repoIdx].resolveDefaults(egCtx, c.Logger); err != nil {
 					return fmt.Errorf("resolve defaults for %s: %w", c.Repos[repoIdx].MountedPath, err)
 				}
-				base, err := c.Repos[repoIdx].resolveContainerBranchBase(egCtx)
+				base, err := c.Repos[repoIdx].resolveContainerBranchBase(egCtx, c.Logger)
 				if err != nil {
 					return fmt.Errorf("resolve branch base for %s: %w", c.Repos[repoIdx].MountedPath, err)
 				}
 				// Seed the task branch and the refs used as diff bases in one push. The
 				// checkout below can then set the branch upstream against refs that already
 				// exist in the container.
-				syncRefspecs, err := c.Repos[repoIdx].containerSyncRefspecs(egCtx)
+				syncRefspecs, err := c.Repos[repoIdx].containerSyncRefspecs(egCtx, c.Logger)
 				if err != nil {
 					return err
 				}

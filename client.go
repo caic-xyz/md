@@ -36,12 +36,14 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/caic-xyz/md/git"
 )
 
-// Logger receives structured log records.
-type Logger interface {
-	Log(ctx context.Context, level slog.Level, msg string, args ...any)
-}
+// Logger receives structured log records. It is an alias of git.Logger so
+// that a single Logger value can be shared between this package and git
+// without conversion.
+type Logger = git.Logger
 
 // Client holds global MD tool state (paths, image config, SSH keys).
 type Client struct {
