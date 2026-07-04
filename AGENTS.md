@@ -16,6 +16,7 @@ A file to [guide coding agents](https://agents.md/).
 - **Cross-platform paths**: When passing host paths to Docker CLI or SSH config files, always use `filepath.ToSlash()`.
   Docker Desktop on Windows expects forward slashes; SSH config uses POSIX convention.
 - **Docker knowledge is outdated by default**: when a change depends on Docker behavior, run `git clone https://github.com/docker/docs` and read the relevant site documentation as the source of truth.
+- **Podman knowledge is outdated by default**: when a change depends on Podman behavior, run `git clone https://github.com/containers/podman` and read the relevant documentation under `docs/source/markdown/` as the source of truth.
 - For Python code changes, ensure code passes `pylint .` and `ruff check --no-cache` as defined in `.github/workflows/test.yml`
 - When adding new tools to the system, they must also be added to `rsc/user/home/user/setup/generate_version_report.sh` to ensure they appear in version reports. The script generates `/home/user/src/tool_versions.md` which is used in release notes and build reports
 

@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -736,6 +737,54 @@ func TestFork(t *testing.T) {
 			if !slices.Contains(changes, want) {
 				t.Fatalf("fork snapshot changes missing %q in %v", want, changes)
 			}
+		}
+	})
+
+	t.Run("valid_untags_image", func(t *testing.T) {
+		t.Parallel()
+		for _, tt := range []struct {
+			name string
+			rt   string
+			want string
+		}{
+			{name: "docker", rt: "docker", want: "rmi -f --no-prune md-fork-md-source"},
+			{name: "podman", rt: "podman", want: "image untag md-fork-md-source"},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				t.Parallel()
+				exe, err := os.Executable()
+				if err != nil {
+					t.Fatal(err)
+				}
+				dir := t.TempDir()
+				runtimeName := tt.rt
+				if runtime.GOOS == "windows" {
+					runtimeName += ".exe"
+				}
+				runtimePath := filepath.Join(dir, runtimeName)
+				if err := linkOrCopyExecutable(exe, runtimePath); err != nil {
+					t.Fatal(err)
+				}
+				logPath := filepath.Join(t.TempDir(), "runtime.log")
+				ct := &Container{Client: &Client{
+					Logger:  testLogger(t),
+					Runtime: runtimePath,
+					env: []string{
+						fakeRuntimeEnv + "=1",
+						fakeRuntimeLogEnv + "=" + logPath,
+					},
+				}}
+				if err := ct.untagImage(t.Context(), "md-fork-md-source"); err != nil {
+					t.Fatal(err)
+				}
+				logData, err := os.ReadFile(logPath) //nolint:gosec // logPath is a private test temp file.
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got := strings.TrimSpace(string(logData)); got != tt.want {
+					t.Fatalf("runtime command = %q, want %q", got, tt.want)
+				}
+			})
 		}
 	})
 }

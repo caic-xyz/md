@@ -1109,6 +1109,12 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 			return nil, err
 		}
 	}
+	if !opts.Quiet {
+		_, _ = fmt.Fprintf(stdout, "- Removing temporary snapshot tag %s ...\n", snapshotImage)
+	}
+	if err := fork.untagImage(ctx, snapshotImage); err != nil {
+		return nil, err
+	}
 	fork.Display = startOpts.Display
 	fork.Tailscale = startOpts.Tailscale
 	fork.USB = startOpts.USB
@@ -1396,6 +1402,20 @@ func (c *Container) SyncDefaultBranch(ctx context.Context, repoIdx int) error {
 	}
 	if err := c.pushContainerRefs(ctx, &c.Repos[repoIdx], refspecs); err != nil {
 		return fmt.Errorf("sync refs %q: %w", refspecs, err)
+	}
+	return nil
+}
+
+func (c *Container) untagImage(ctx context.Context, image string) error {
+	// Docker has no untag command; rmi -f removes the tag after a container has
+	// captured the image. Podman's rmi -f removes containers that use the image,
+	// so use its dedicated untag command.
+	args := []string{c.Runtime, "rmi", "-f", "--no-prune", image}
+	if strings.TrimSuffix(filepath.Base(c.Runtime), ".exe") == "podman" {
+		args = []string{c.Runtime, "image", "untag", image}
+	}
+	if _, err := c.runCmd(ctx, "", args); err != nil {
+		return fmt.Errorf("untagging image %s: %w", image, err)
 	}
 	return nil
 }

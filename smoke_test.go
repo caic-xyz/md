@@ -645,6 +645,10 @@ func TestSmoke(t *testing.T) {
 						}
 					})
 
+					if _, err := client.runCmd(t.Context(), "", []string{client.Runtime, "image", "inspect", "md-fork-" + ct.Name}); err == nil {
+						t.Fatalf("temporary fork snapshot tag md-fork-%s still exists", ct.Name)
+					}
+
 					if len(fork.Repos) != 1 {
 						t.Fatalf("fork repos = %d, want 1", len(fork.Repos))
 					}

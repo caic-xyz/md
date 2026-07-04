@@ -630,11 +630,17 @@ func runFakeRuntime(args []string, logPath string, localBase bool) int {
 	if len(args) >= 2 && args[0] == "image" && args[1] == "inspect" {
 		return fakeRuntimeInspect(args, localBase)
 	}
+	if len(args) >= 2 && args[0] == "image" && args[1] == "untag" {
+		return 0
+	}
 	if len(args) >= 1 && args[0] == "pull" {
 		_, _ = fmt.Fprintln(os.Stderr, "network unreachable")
 		return 1
 	}
 	if len(args) >= 1 && args[0] == "build" {
+		return 0
+	}
+	if len(args) >= 1 && args[0] == "rmi" {
 		return 0
 	}
 	if len(args) >= 1 && args[0] == "stats" {
