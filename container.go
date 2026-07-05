@@ -118,6 +118,134 @@ type Repo struct {
 	DefaultBranch string `json:"default_branch,omitempty"`
 }
 
+// Validate returns an error for invalid repo fields.
+func (r *Repo) Validate() error {
+	r.populateMountPath()
+	r.MountedPath = ResolveContainerPath(r.MountedPath)
+	if r.GitRoot == "" {
+		return errors.New("Repo.GitRoot is empty")
+	}
+	if r.MountedPath == "" {
+		return errors.New("Repo.MountedPath could not be determined from GitRoot")
+	}
+	if !path.IsAbs(r.MountedPath) {
+		return fmt.Errorf("Repo.MountedPath must be an absolute POSIX path, got %q", r.MountedPath)
+	}
+	return nil
+}
+
+// resolveDefaults populates DefaultRemote and DefaultBranch if not already set.
+func (r *Repo) resolveDefaults(ctx context.Context, logger Logger) error {
+	g := &git.Checkout{Root: r.GitRoot, Logger: logger}
+	if r.DefaultRemote == "" {
+		remote, err := g.DefaultRemote(ctx)
+		if err != nil {
+			return err
+		}
+		r.DefaultRemote = remote
+	}
+	if r.DefaultBranch == "" {
+		branch, err := g.DefaultBranch(ctx, r.DefaultRemote)
+		if err != nil {
+			return err
+		}
+		r.DefaultBranch = branch
+	}
+	return nil
+}
+
+// populateMountPath sets MountedPath from GitRoot if not already set.
+func (r *Repo) populateMountPath() {
+	if r.MountedPath == "" {
+		r.MountedPath = "/home/user/src/" + strings.TrimSuffix(filepath.Base(r.GitRoot), ".git")
+	}
+}
+
+func (r *Repo) containerSyncRefspecs(ctx context.Context, logger Logger) ([]string, error) {
+	// These refspecs refresh the container's copy of the default branch and the
+	// tracked branch, when distinct. Callers append them to the push that already
+	// transfers the task branch.
+	if err := r.resolveDefaults(ctx, logger); err != nil {
+		return nil, fmt.Errorf("sync default branch: %w", err)
+	}
+	refspecs := []string{}
+	src, ok, err := defaultBranchPushSource(ctx, r)
+	if err != nil {
+		return nil, fmt.Errorf("sync default branch %q: %w", r.DefaultBranch, err)
+	}
+	if ok {
+		refspecs = append(refspecs, src+":"+remoteTrackingRef(r.DefaultRemote, r.DefaultBranch))
+	}
+	// Containers can outlive the branch recorded at launch. If that branch was
+	// deleted locally and remotely, leave the existing container refs in place.
+	branch, src, ok, err := r.trackedBranchPushSource(ctx, logger)
+	if err != nil {
+		return nil, fmt.Errorf("sync tracked branch for %q: %w", r.Branch, err)
+	}
+	if ok && branch != r.DefaultBranch {
+		refspecs = append(refspecs, src+":"+remoteTrackingRef(r.DefaultRemote, branch))
+	}
+	return refspecs, nil
+}
+
+func (r *Repo) resolveContainerBranchBase(ctx context.Context, logger Logger) (containerBranchBase, error) {
+	g := &git.Checkout{Root: r.GitRoot, Logger: logger}
+	localRef := "refs/heads/" + r.Branch
+	localCommit, err := g.RevParse(ctx, localRef)
+	if err != nil {
+		return containerBranchBase{}, err
+	}
+	remote, branch, ok, err := r.branchUpstream(ctx, logger)
+	if err != nil {
+		return containerBranchBase{}, err
+	}
+	if ok && remote == r.DefaultRemote {
+		remoteRef := remoteTrackingRef(remote, branch)
+		if remoteCommit, err := g.RevParse(ctx, remoteRef); err == nil && remoteCommit == localCommit {
+			return containerBranchBase{source: remoteRef, ref: remote + "/" + branch, destination: remoteRef}, nil
+		}
+	}
+	remoteRef := remoteTrackingRef(r.DefaultRemote, r.Branch)
+	if remoteCommit, err := g.RevParse(ctx, remoteRef); err == nil && remoteCommit == localCommit {
+		return containerBranchBase{source: remoteRef, ref: r.DefaultRemote + "/" + r.Branch, destination: remoteRef}, nil
+	}
+	return containerBranchBase{source: localRef, ref: "host/" + r.Branch, useHost: true, destination: "refs/remotes/host/" + r.Branch}, nil
+}
+
+func (r *Repo) trackedBranchPushSource(ctx context.Context, logger Logger) (branch, src string, ok bool, err error) {
+	remote, branch, ok, err := r.branchUpstream(ctx, logger)
+	if err != nil || !ok || remote != r.DefaultRemote {
+		return "", "", false, err
+	}
+	src = remoteTrackingRef(remote, branch)
+	if _, err := (&git.Checkout{Root: r.GitRoot, Logger: logger}).RevParse(ctx, src); err != nil {
+		return "", "", false, err
+	}
+	return branch, src, true, nil
+}
+
+func (r *Repo) branchUpstream(ctx context.Context, logger Logger) (remote, branch string, ok bool, err error) {
+	out, err := (&git.Checkout{Root: r.GitRoot, Logger: logger}).RunGit(ctx, "for-each-ref", "--format=%(upstream:remotename)%00%(upstream:remoteref)", "refs/heads/"+r.Branch)
+	if err != nil {
+		return "", "", false, err
+	}
+	if out == "" {
+		return "", "", false, nil
+	}
+	remote, remoteRef, ok := strings.Cut(out, "\x00")
+	if ok && remote == "" && remoteRef == "" {
+		return "", "", false, nil
+	}
+	if !ok || remote == "" || remoteRef == "" {
+		return "", "", false, fmt.Errorf("invalid upstream for branch %q: %q", r.Branch, out)
+	}
+	branch, ok = strings.CutPrefix(remoteRef, "refs/heads/")
+	if !ok || branch == "" {
+		return "", "", false, fmt.Errorf("invalid upstream ref for branch %q: %q", r.Branch, remoteRef)
+	}
+	return remote, branch, true, nil
+}
+
 // StartOpts configures container startup.
 type StartOpts struct {
 	// BaseImage is the full Docker image reference (e.g.
@@ -196,6 +324,82 @@ type ProcessInfo struct {
 	Mem     float64
 	Time    string
 	Command string
+}
+
+// ForkOpts configures a container fork operation.
+type ForkOpts struct {
+	// ExtraRepos are additional repos to map into the fork beyond the
+	// source container's repos. Branch is the source branch to push from
+	// the host; if empty, defaults to the repo's default upstream branch.
+	// Fork generates a unique destination branch, same as for source repos.
+	ExtraRepos []Repo
+	// Display enables X11/VNC virtual display on the forked container.
+	Display bool
+	// Tailscale enables Tailscale networking on the forked container.
+	Tailscale bool
+	// USB enables USB device passthrough on the forked container.
+	USB bool
+	// Sudo enables root access via sudo on the forked container.
+	Sudo bool
+	// Labels are additional Docker labels (key=value) applied to the forked container.
+	Labels []string
+	// Quiet suppresses informational output.
+	Quiet bool
+	// ExtraEnv holds environment updates to inject into the container's ~/.env.
+	// Entries use KEY=VALUE to set a value or KEY= to remove one. Values are
+	// shell-quoted before writing, so they may contain spaces and newlines.
+	ExtraEnv []string
+	// Mounts lists host directories to bind-mount into the running container.
+	// Missing host directories are rejected before the runtime is invoked.
+	Mounts []Mount
+	// MaxCPUs limits the number of CPU cores the forked container may use.
+	// Passed as --cpus to docker/podman. Zero means no limit.
+	// Use [DefaultMaxCPUs] for a sensible default.
+	MaxCPUs int
+	// ExtraRunArgs are additional arguments passed verbatim to the
+	// container runtime's "run" command. Not portable across runtimes.
+	ExtraRunArgs []string
+}
+
+// startOptions converts fork options into startup options for the forked container.
+func (opts *ForkOpts) startOptions() *StartOpts {
+	startOpts := &StartOpts{
+		Quiet:        opts.Quiet,
+		Labels:       opts.Labels,
+		ExtraEnv:     opts.ExtraEnv,
+		Mounts:       opts.Mounts,
+		Display:      opts.Display,
+		Tailscale:    opts.Tailscale,
+		USB:          opts.USB,
+		Sudo:         opts.Sudo,
+		MaxCPUs:      opts.MaxCPUs,
+		ExtraRunArgs: append(opts.runtimeEnvOverrides(), opts.ExtraRunArgs...),
+	}
+	startOpts.resetTailscale = startOpts.Tailscale
+	return startOpts
+}
+
+// runtimeEnvOverrides returns run arguments that clear inherited startup env.
+//
+// Fork snapshots can contain ENV values from the source container image. Empty
+// assignments force disabled fork capabilities to stay disabled at startup.
+func (opts *ForkOpts) runtimeEnvOverrides() []string {
+	var args []string
+	if !opts.Display {
+		args = append(args, "-e", "MD_DISPLAY=")
+	}
+	if !opts.Tailscale {
+		args = append(args,
+			"-e", "MD_TAILSCALE=",
+			"-e", "MD_TAILSCALE_EPHEMERAL=",
+			"-e", "MD_TAILSCALE_RESET=",
+			"-e", "TAILSCALE_AUTHKEY=",
+		)
+	}
+	if !opts.Sudo {
+		args = append(args, "-e", "MD_SUDO_PASSWORD=")
+	}
+	return args
 }
 
 // Container holds state for a single container instance.
@@ -296,22 +500,6 @@ func (c *Container) Signal(ctx context.Context, pid int, sig string) error {
 	return nil
 }
 
-// Validate returns an error for invalid repo fields.
-func (r *Repo) Validate() error {
-	r.populateMountPath()
-	r.MountedPath = ResolveContainerPath(r.MountedPath)
-	if r.GitRoot == "" {
-		return errors.New("Repo.GitRoot is empty")
-	}
-	if r.MountedPath == "" {
-		return errors.New("Repo.MountedPath could not be determined from GitRoot")
-	}
-	if !path.IsAbs(r.MountedPath) {
-		return fmt.Errorf("Repo.MountedPath must be an absolute POSIX path, got %q", r.MountedPath)
-	}
-	return nil
-}
-
 // resolveMountPaths sets MountedPath for any repo that doesn't have one,
 // using filepath.Base(GitRoot) by default. When any two repos share the
 // same basename, all auto-populated repos switch to paths relative to the
@@ -400,33 +588,6 @@ func commonPrefix(a, b string) string {
 		return "/"
 	}
 	return a[:i]
-}
-
-// resolveDefaults populates DefaultRemote and DefaultBranch if not already set.
-func (r *Repo) resolveDefaults(ctx context.Context, logger Logger) error {
-	g := &git.Checkout{Root: r.GitRoot, Logger: logger}
-	if r.DefaultRemote == "" {
-		remote, err := g.DefaultRemote(ctx)
-		if err != nil {
-			return err
-		}
-		r.DefaultRemote = remote
-	}
-	if r.DefaultBranch == "" {
-		branch, err := g.DefaultBranch(ctx, r.DefaultRemote)
-		if err != nil {
-			return err
-		}
-		r.DefaultBranch = branch
-	}
-	return nil
-}
-
-// populateMountPath sets MountedPath from GitRoot if not already set.
-func (r *Repo) populateMountPath() {
-	if r.MountedPath == "" {
-		r.MountedPath = "/home/user/src/" + strings.TrimSuffix(filepath.Base(r.GitRoot), ".git")
-	}
 }
 
 // Launch prepares the image and starts the Docker container. It does NOT
@@ -912,82 +1073,6 @@ func gitDiffCommand(repo string, extraArgs []string, exitOnDiff bool) string {
 	return strings.Join(commands, "; ")
 }
 
-// ForkOpts configures a container fork operation.
-type ForkOpts struct {
-	// ExtraRepos are additional repos to map into the fork beyond the
-	// source container's repos. Branch is the source branch to push from
-	// the host; if empty, defaults to the repo's default upstream branch.
-	// Fork generates a unique destination branch, same as for source repos.
-	ExtraRepos []Repo
-	// Display enables X11/VNC virtual display on the forked container.
-	Display bool
-	// Tailscale enables Tailscale networking on the forked container.
-	Tailscale bool
-	// USB enables USB device passthrough on the forked container.
-	USB bool
-	// Sudo enables root access via sudo on the forked container.
-	Sudo bool
-	// Labels are additional Docker labels (key=value) applied to the forked container.
-	Labels []string
-	// Quiet suppresses informational output.
-	Quiet bool
-	// ExtraEnv holds environment updates to inject into the container's ~/.env.
-	// Entries use KEY=VALUE to set a value or KEY= to remove one. Values are
-	// shell-quoted before writing, so they may contain spaces and newlines.
-	ExtraEnv []string
-	// Mounts lists host directories to bind-mount into the running container.
-	// Missing host directories are rejected before the runtime is invoked.
-	Mounts []Mount
-	// MaxCPUs limits the number of CPU cores the forked container may use.
-	// Passed as --cpus to docker/podman. Zero means no limit.
-	// Use [DefaultMaxCPUs] for a sensible default.
-	MaxCPUs int
-	// ExtraRunArgs are additional arguments passed verbatim to the
-	// container runtime's "run" command. Not portable across runtimes.
-	ExtraRunArgs []string
-}
-
-// startOptions converts fork options into startup options for the forked container.
-func (opts *ForkOpts) startOptions() *StartOpts {
-	startOpts := &StartOpts{
-		Quiet:        opts.Quiet,
-		Labels:       opts.Labels,
-		ExtraEnv:     opts.ExtraEnv,
-		Mounts:       opts.Mounts,
-		Display:      opts.Display,
-		Tailscale:    opts.Tailscale,
-		USB:          opts.USB,
-		Sudo:         opts.Sudo,
-		MaxCPUs:      opts.MaxCPUs,
-		ExtraRunArgs: append(opts.runtimeEnvOverrides(), opts.ExtraRunArgs...),
-	}
-	startOpts.resetTailscale = startOpts.Tailscale
-	return startOpts
-}
-
-// runtimeEnvOverrides returns run arguments that clear inherited startup env.
-//
-// Fork snapshots can contain ENV values from the source container image. Empty
-// assignments force disabled fork capabilities to stay disabled at startup.
-func (opts *ForkOpts) runtimeEnvOverrides() []string {
-	var args []string
-	if !opts.Display {
-		args = append(args, "-e", "MD_DISPLAY=")
-	}
-	if !opts.Tailscale {
-		args = append(args,
-			"-e", "MD_TAILSCALE=",
-			"-e", "MD_TAILSCALE_EPHEMERAL=",
-			"-e", "MD_TAILSCALE_RESET=",
-			"-e", "TAILSCALE_AUTHKEY=",
-		)
-	}
-	if !opts.Sudo {
-		args = append(args, "-e", "MD_SUDO_PASSWORD=")
-	}
-	return args
-}
-
 // Fork snapshots a running container and creates a new one where each mapped
 // repository is checked out on a new branch.
 //
@@ -1352,33 +1437,6 @@ func (c *Container) untagImage(ctx context.Context, image string) error {
 	return nil
 }
 
-func (r *Repo) containerSyncRefspecs(ctx context.Context, logger Logger) ([]string, error) {
-	// These refspecs refresh the container's copy of the default branch and the
-	// tracked branch, when distinct. Callers append them to the push that already
-	// transfers the task branch.
-	if err := r.resolveDefaults(ctx, logger); err != nil {
-		return nil, fmt.Errorf("sync default branch: %w", err)
-	}
-	refspecs := []string{}
-	src, ok, err := defaultBranchPushSource(ctx, r)
-	if err != nil {
-		return nil, fmt.Errorf("sync default branch %q: %w", r.DefaultBranch, err)
-	}
-	if ok {
-		refspecs = append(refspecs, src+":"+remoteTrackingRef(r.DefaultRemote, r.DefaultBranch))
-	}
-	// Containers can outlive the branch recorded at launch. If that branch was
-	// deleted locally and remotely, leave the existing container refs in place.
-	branch, src, ok, err := r.trackedBranchPushSource(ctx, logger)
-	if err != nil {
-		return nil, fmt.Errorf("sync tracked branch for %q: %w", r.Branch, err)
-	}
-	if ok && branch != r.DefaultBranch {
-		refspecs = append(refspecs, src+":"+remoteTrackingRef(r.DefaultRemote, branch))
-	}
-	return refspecs, nil
-}
-
 // revokeSudo removes sudo access from a forked container.
 //
 // A fork created from a sudo-enabled snapshot can inherit /etc/group and the
@@ -1505,30 +1563,6 @@ type containerBranchBase struct {
 	destination string
 }
 
-func (r *Repo) resolveContainerBranchBase(ctx context.Context, logger Logger) (containerBranchBase, error) {
-	g := &git.Checkout{Root: r.GitRoot, Logger: logger}
-	localRef := "refs/heads/" + r.Branch
-	localCommit, err := g.RevParse(ctx, localRef)
-	if err != nil {
-		return containerBranchBase{}, err
-	}
-	remote, branch, ok, err := r.branchUpstream(ctx, logger)
-	if err != nil {
-		return containerBranchBase{}, err
-	}
-	if ok && remote == r.DefaultRemote {
-		remoteRef := remoteTrackingRef(remote, branch)
-		if remoteCommit, err := g.RevParse(ctx, remoteRef); err == nil && remoteCommit == localCommit {
-			return containerBranchBase{source: remoteRef, ref: remote + "/" + branch, destination: remoteRef}, nil
-		}
-	}
-	remoteRef := remoteTrackingRef(r.DefaultRemote, r.Branch)
-	if remoteCommit, err := g.RevParse(ctx, remoteRef); err == nil && remoteCommit == localCommit {
-		return containerBranchBase{source: remoteRef, ref: r.DefaultRemote + "/" + r.Branch, destination: remoteRef}, nil
-	}
-	return containerBranchBase{source: localRef, ref: "host/" + r.Branch, useHost: true, destination: "refs/remotes/host/" + r.Branch}, nil
-}
-
 func defaultBranchPushSource(ctx context.Context, r *Repo) (src string, ok bool, err error) {
 	remoteRef := remoteTrackingRef(r.DefaultRemote, r.DefaultBranch)
 	ok, err = gitRefExists(ctx, r.GitRoot, remoteRef)
@@ -1563,40 +1597,6 @@ func gitRefExists(ctx context.Context, dir, ref string) (bool, error) {
 		return false, fmt.Errorf("git show-ref --verify --quiet %s: %w: %s", ref, err, stderr.String())
 	}
 	return true, nil
-}
-
-func (r *Repo) trackedBranchPushSource(ctx context.Context, logger Logger) (branch, src string, ok bool, err error) {
-	remote, branch, ok, err := r.branchUpstream(ctx, logger)
-	if err != nil || !ok || remote != r.DefaultRemote {
-		return "", "", false, err
-	}
-	src = remoteTrackingRef(remote, branch)
-	if _, err := (&git.Checkout{Root: r.GitRoot, Logger: logger}).RevParse(ctx, src); err != nil {
-		return "", "", false, err
-	}
-	return branch, src, true, nil
-}
-
-func (r *Repo) branchUpstream(ctx context.Context, logger Logger) (remote, branch string, ok bool, err error) {
-	out, err := (&git.Checkout{Root: r.GitRoot, Logger: logger}).RunGit(ctx, "for-each-ref", "--format=%(upstream:remotename)%00%(upstream:remoteref)", "refs/heads/"+r.Branch)
-	if err != nil {
-		return "", "", false, err
-	}
-	if out == "" {
-		return "", "", false, nil
-	}
-	remote, remoteRef, ok := strings.Cut(out, "\x00")
-	if ok && remote == "" && remoteRef == "" {
-		return "", "", false, nil
-	}
-	if !ok || remote == "" || remoteRef == "" {
-		return "", "", false, fmt.Errorf("invalid upstream for branch %q: %q", r.Branch, out)
-	}
-	branch, ok = strings.CutPrefix(remoteRef, "refs/heads/")
-	if !ok || branch == "" {
-		return "", "", false, fmt.Errorf("invalid upstream ref for branch %q: %q", r.Branch, remoteRef)
-	}
-	return remote, branch, true, nil
 }
 
 func remoteTrackingRef(remote, branch string) string {

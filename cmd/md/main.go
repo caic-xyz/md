@@ -161,41 +161,6 @@ func usage() {
 		"  vnc           Open VNC connection to the container\n")
 }
 
-func (a *app) Close() error {
-	if a.client == nil {
-		return nil
-	}
-	return a.client.Close()
-}
-
-func (a *app) newClient() (*md.Client, error) {
-	if a.runtimeOverride != "" && a.runtimeOverride != "docker" && a.runtimeOverride != "podman" {
-		return nil, fmt.Errorf("--runtime must be \"docker\" or \"podman\", got %q", a.runtimeOverride)
-	}
-	if a.client != nil {
-		return a.client, nil
-	}
-	logger := slog.Default()
-	var rt containers.Runtime
-	if a.runtimeOverride != "" {
-		var err error
-		rt, err = containers.New(a.runtimeOverride, logger, nil)
-		if err != nil {
-			return nil, err
-		}
-	}
-	c, err := md.New(logger, rt, os.Stdout)
-	if err != nil {
-		return nil, err
-	}
-	c.ControlMaster = a.controlMasterEnabled
-	c.GithubToken = os.Getenv("GITHUB_TOKEN")
-	c.TailscaleAPIKey = os.Getenv("TAILSCALE_API_KEY")
-	a.client = c
-	return c, nil
-}
-
-// containerFlags holds the common flags for commands that target a container.
 type containerFlags struct {
 	image    *string
 	tag      *string
@@ -247,6 +212,40 @@ func (cf *containerFlags) baseImage() (string, error) {
 		return md.DefaultBaseImage + ":" + *cf.tag, nil
 	}
 	return "", nil
+}
+
+func (a *app) Close() error {
+	if a.client == nil {
+		return nil
+	}
+	return a.client.Close()
+}
+
+func (a *app) newClient() (*md.Client, error) {
+	if a.runtimeOverride != "" && a.runtimeOverride != "docker" && a.runtimeOverride != "podman" {
+		return nil, fmt.Errorf("--runtime must be \"docker\" or \"podman\", got %q", a.runtimeOverride)
+	}
+	if a.client != nil {
+		return a.client, nil
+	}
+	logger := slog.Default()
+	var rt containers.Runtime
+	if a.runtimeOverride != "" {
+		var err error
+		rt, err = containers.New(a.runtimeOverride, logger, nil)
+		if err != nil {
+			return nil, err
+		}
+	}
+	c, err := md.New(logger, rt, os.Stdout)
+	if err != nil {
+		return nil, err
+	}
+	c.ControlMaster = a.controlMasterEnabled
+	c.GithubToken = os.Getenv("GITHUB_TOKEN")
+	c.TailscaleAPIKey = os.Getenv("TAILSCALE_API_KEY")
+	a.client = c
+	return c, nil
 }
 
 // findContainerAndRepo searches all containers for one that contains the
