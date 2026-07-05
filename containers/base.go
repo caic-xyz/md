@@ -23,23 +23,29 @@ import (
 )
 
 type base struct {
-	name   string
-	logger Logger
-	env    []string
+	name       string
+	executable string
+	logger     Logger
+	env        []string
 }
 
-// Name returns the runtime executable name.
+// Name returns the normalized runtime name.
 func (b *base) Name() string {
 	return b.name
 }
 
+// Executable returns the runtime command used for execution.
+func (b *base) Executable() string {
+	return b.executable
+}
+
 // Run executes a runtime command and returns trimmed stdout.
 func (b *base) Run(ctx context.Context, dir string, args ...string) (string, error) {
-	cmdArgs := append([]string{b.name}, args...)
+	cmdArgs := append([]string{b.executable}, args...)
 	// Command arguments are redacted before logging.
 	// codeql[go/clear-text-logging]
 	b.logger.Log(ctx, slog.LevelDebug, "exec", "cmd", RedactCommandArgsForLog(cmdArgs))
-	cmd := exec.CommandContext(ctx, b.name, args...) //nolint:gosec // args are from trusted callers.
+	cmd := exec.CommandContext(ctx, b.executable, args...) //nolint:gosec // args are from trusted callers.
 	cmd.Dir = dir
 	cmd.Env = b.commandEnv("LANG=C")
 	out, err := cmd.Output()
@@ -48,11 +54,11 @@ func (b *base) Run(ctx context.Context, dir string, args ...string) (string, err
 
 // RunOut executes a runtime command with stdout and stderr connected to writers.
 func (b *base) RunOut(ctx context.Context, dir string, stdout, stderr io.Writer, args ...string) error {
-	cmdArgs := append([]string{b.name}, args...)
+	cmdArgs := append([]string{b.executable}, args...)
 	// Command arguments are redacted before logging.
 	// codeql[go/clear-text-logging]
 	b.logger.Log(ctx, slog.LevelDebug, "exec", "cmd", RedactCommandArgsForLog(cmdArgs))
-	cmd := exec.CommandContext(ctx, b.name, args...) //nolint:gosec // args are from trusted callers.
+	cmd := exec.CommandContext(ctx, b.executable, args...) //nolint:gosec // args are from trusted callers.
 	cmd.Dir = dir
 	cmd.Env = b.commandEnv("LANG=C")
 	cmd.Stdout = stdout

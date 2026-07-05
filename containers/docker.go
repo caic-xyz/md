@@ -4,10 +4,7 @@
 
 package containers
 
-import (
-	"context"
-	"slices"
-)
+import "context"
 
 // docker wraps the docker CLI.
 type docker struct {
@@ -15,11 +12,11 @@ type docker struct {
 }
 
 // newDocker returns a Docker runtime wrapper.
-func newDocker(name string, logger Logger, env []string) *docker {
-	if name == "" {
-		name = "docker"
+func newDocker(executable string, logger Logger, env []string) *docker {
+	if executable == "" {
+		executable = "docker"
 	}
-	return &docker{base: base{name: name, logger: logger, env: slices.Clone(env)}}
+	return &docker{base: newBase(executable, logger, env)}
 }
 
 // UntagImage removes an image tag without deleting containers that use it.

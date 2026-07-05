@@ -6,13 +6,41 @@ package containers
 
 import (
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
 
 func TestNew(t *testing.T) {
 	t.Parallel()
-	// Covered by concrete constructor tests in docker.go/podman.go call sites.
+	t.Run("valid", func(t *testing.T) {
+		t.Parallel()
+		tests := []struct {
+			name     string
+			file     string
+			wantName string
+		}{
+			{name: "docker_path", file: "docker", wantName: "docker"},
+			{name: "podman_exe_path", file: "podman.exe", wantName: "podman"},
+			{name: "unknown_runtime_path", file: "nerdctl", wantName: "nerdctl"},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				t.Parallel()
+				executable := filepath.Join(t.TempDir(), tt.file)
+				r, err := New(executable, nil, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if r.Name() != tt.wantName {
+					t.Errorf("Name() = %q, want %q", r.Name(), tt.wantName)
+				}
+				if r.Executable() != executable {
+					t.Errorf("Executable() = %q, want %q", r.Executable(), executable)
+				}
+			})
+		}
+	})
 }
 
 func TestDetect(t *testing.T) {

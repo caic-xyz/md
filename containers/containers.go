@@ -87,19 +87,30 @@ func RedactCommandArgsForLog(args []string) []string {
 	return redacted
 }
 
-// New returns a runtime wrapper for name.
-func New(name string, logger Logger, env []string) (Runtime, error) {
+// New returns a runtime wrapper for executable.
+func New(executable string, logger Logger, env []string) (Runtime, error) {
+	switch runtimeName(executable) {
+	case "docker":
+		return newDocker(executable, logger, env), nil
+	case "podman":
+		return newPodman(executable, logger, env), nil
+	default:
+		return &commandRuntime{base: newBase(executable, logger, env)}, nil
+	}
+}
+
+func newBase(executable string, logger Logger, env []string) base {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	switch strings.TrimSuffix(filepath.Base(name), ".exe") {
-	case "docker":
-		return newDocker(name, logger, env), nil
-	case "podman":
-		return newPodman(name, logger, env), nil
-	default:
-		return &commandRuntime{base: base{name: name, logger: logger, env: slices.Clone(env)}}, nil
+	return base{name: runtimeName(executable), executable: executable, logger: logger, env: slices.Clone(env)}
+}
+
+func runtimeName(executable string) string {
+	if executable == "" {
+		return ""
 	}
+	return strings.TrimSuffix(filepath.Base(executable), ".exe")
 }
 
 // Detect returns the preferred container runtime name.
@@ -284,8 +295,10 @@ type Logger interface {
 
 // Runtime is a Docker-compatible container runtime.
 type Runtime interface {
-	// Name returns the runtime executable name.
+	// Name returns the normalized runtime name, such as "docker" or "podman".
 	Name() string
+	// Executable returns the runtime command used for execution.
+	Executable() string
 	// Run executes a runtime command and returns trimmed stdout.
 	Run(ctx context.Context, dir string, args ...string) (string, error)
 	// RunOut executes a runtime command with stdout and stderr connected to writers.

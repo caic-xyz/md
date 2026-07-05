@@ -56,18 +56,45 @@ func newSmokeClient(t *testing.T, rt string) *Client {
 
 	// podman system reset cleans up overlay storage before t.TempDir removal,
 	// avoiding permission errors.
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 30*time.Second)
-		defer cancel()
-		_, _ = client.runCmd(ctx, "", []string{rt, "system", "reset", "-f"})
-	})
+	if rt == "podman" {
+		t.Cleanup(func() {
+			ctx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 30*time.Second)
+			defer cancel()
+			if _, err := client.runCmd(ctx, "", []string{rt, "system", "reset", "-f"}); err != nil {
+				t.Errorf("podman system reset cleanup: %v", err)
+			}
+		})
+	}
 	return client
 }
 
 // hasImage checks whether a container image exists in the local store.
 func hasImage(ctx context.Context, c *Client, name string) bool {
-	_, err := c.runCmd(ctx, "", []string{c.Runtime.Name(), "image", "inspect", "--format", "{{.Id}}", name})
+	_, err := c.runCmd(ctx, "", []string{c.Runtime.Executable(), "image", "inspect", "--format", "{{.Id}}", name})
 	return err == nil
+}
+
+func removeSmokeContainerIfPresent(t testing.TB, ctx context.Context, c *Client, name string) {
+	out, err := c.runCmd(ctx, "", []string{c.Runtime.Executable(), "ps", "-a", "--format", "{{.Names}}", "--filter", "name=^" + name + "$"})
+	if err != nil {
+		t.Errorf("list container %s before cleanup: %v", name, err)
+		return
+	}
+	if !slices.Contains(strings.Fields(out), name) {
+		return
+	}
+	if _, err := c.runCmd(ctx, "", []string{c.Runtime.Executable(), "rm", "-f", "-v", name}); err != nil {
+		t.Errorf("remove container %s: %v", name, err)
+	}
+}
+
+func removeSmokeImageIfPresent(t testing.TB, ctx context.Context, c *Client, name string) {
+	if !hasImage(ctx, c, name) {
+		return
+	}
+	if _, err := c.runCmd(ctx, "", []string{c.Runtime.Executable(), "rmi", "-f", name}); err != nil {
+		t.Errorf("remove image %s: %v", name, err)
+	}
 }
 
 // ensureImages ensures md-root-local and md-user-local exist. When they don't
@@ -117,7 +144,7 @@ func launchSmokeContainer(t *testing.T, ctx context.Context, c *Client, baseImag
 	}
 	ct.Name = "md-smoke-" + nameSuffix
 
-	_, _ = c.runCmd(ctx, "", []string{c.Runtime.Name(), "rm", "-f", "-v", ct.Name})
+	removeSmokeContainerIfPresent(t, ctx, c, ct.Name)
 
 	opts := &StartOpts{
 		BaseImage: baseImage,
@@ -151,7 +178,7 @@ func launchSmokeRepoContainer(t *testing.T, ctx context.Context, c *Client, base
 		t.Fatalf("Container: %v", err)
 	}
 
-	_, _ = c.runCmd(ctx, "", []string{c.Runtime.Name(), "rm", "-f", "-v", ct.Name})
+	removeSmokeContainerIfPresent(t, ctx, c, ct.Name)
 
 	opts := &StartOpts{
 		BaseImage: baseImage,
@@ -358,7 +385,7 @@ func TestSmoke(t *testing.T) {
 							t.Cleanup(func() {
 								cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 30*time.Second)
 								defer cancel()
-								_, _ = client.runCmd(cleanupCtx, "", []string{client.Runtime.Name(), "rmi", "-f", cleanupImage})
+								removeSmokeImageIfPresent(t, cleanupCtx, client, cleanupImage)
 							})
 
 							var forkStdout, forkStderr strings.Builder
@@ -606,12 +633,12 @@ func TestSmoke(t *testing.T) {
 
 				t.Run("fork", func(t *testing.T) {
 					staleForkName := containerName(sanitizeDockerName(filepath.Base(mountedPath)), "main-0")
-					_, _ = client.runCmd(t.Context(), "", []string{client.Runtime.Name(), "rm", "-f", "-v", staleForkName})
-					_, _ = client.runCmd(t.Context(), "", []string{client.Runtime.Name(), "rmi", "-f", "md-fork-" + ct.Name})
+					removeSmokeContainerIfPresent(t, t.Context(), client, staleForkName)
+					removeSmokeImageIfPresent(t, t.Context(), client, "md-fork-"+ct.Name)
 					t.Cleanup(func() {
 						cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 30*time.Second)
 						defer cancel()
-						_, _ = client.runCmd(cleanupCtx, "", []string{client.Runtime.Name(), "rmi", "-f", "md-fork-" + ct.Name})
+						removeSmokeImageIfPresent(t, cleanupCtx, client, "md-fork-"+ct.Name)
 					})
 
 					prepareForkCmd := "printf snapshot > /tmp/fork-marker" +
@@ -631,14 +658,23 @@ func TestSmoke(t *testing.T) {
 						MaxCPUs: DefaultMaxCPUs(),
 					})
 					if err != nil {
-						state, _ := client.runCmd(t.Context(), "", []string{client.Runtime.Name(), "inspect", "--format", "{{json .State}}", staleForkName})
-						logs, _ := client.runCmd(t.Context(), "", []string{client.Runtime.Name(), "logs", staleForkName})
-						sshDiag, _ := client.runCmd(t.Context(), "", []string{client.Runtime.Name(), "exec", staleForkName, "bash", "-lc", strings.Join([]string{
+						state, stateErr := client.runCmd(t.Context(), "", []string{client.Runtime.Executable(), "inspect", "--format", "{{json .State}}", staleForkName})
+						if stateErr != nil {
+							state = fmt.Sprintf("inspect state failed: %v", stateErr)
+						}
+						logs, logsErr := client.runCmd(t.Context(), "", []string{client.Runtime.Executable(), "logs", staleForkName})
+						if logsErr != nil {
+							logs = fmt.Sprintf("logs failed: %v", logsErr)
+						}
+						sshDiag, sshDiagErr := client.runCmd(t.Context(), "", []string{client.Runtime.Executable(), "exec", staleForkName, "bash", "-lc", strings.Join([]string{
 							"stat -c '%U:%G %a %n' /home/user /home/user/.ssh /home/user/.ssh/authorized_keys /etc/ssh/ssh_host_ed25519_key 2>&1",
 							"pgrep -a sshd 2>&1 || true",
 							"tail -120 /var/log/auth.log 2>&1 || true",
 							"/usr/sbin/sshd -T 2>&1 | head -80 || true",
 						}, "; ")})
+						if sshDiagErr != nil {
+							sshDiag = fmt.Sprintf("ssh diagnostics failed: %v", sshDiagErr)
+						}
 						t.Fatalf("Fork: %v\nstdout:\n%s\nstderr:\n%s\nstate:\n%s\nlogs:\n%s\nssh diagnostics:\n%s", err, forkStdout.String(), forkStderr.String(), state, logs, sshDiag)
 					}
 					t.Cleanup(func() {
@@ -649,7 +685,7 @@ func TestSmoke(t *testing.T) {
 						}
 					})
 
-					if _, err := client.runCmd(t.Context(), "", []string{client.Runtime.Name(), "image", "inspect", "md-fork-" + ct.Name}); err == nil {
+					if _, err := client.runCmd(t.Context(), "", []string{client.Runtime.Executable(), "image", "inspect", "md-fork-" + ct.Name}); err == nil {
 						t.Fatalf("temporary fork snapshot tag md-fork-%s still exists", ct.Name)
 					}
 
@@ -806,7 +842,7 @@ func TestSmoke(t *testing.T) {
 				for _, img := range []string{"md-root-local", "md-user-local"} {
 					if hasImage(subCtx, client, img) {
 						t.Logf("removing existing image %s for clean build test", img)
-						_, _ = client.runCmd(subCtx, "", []string{rt, "rmi", "-f", img})
+						removeSmokeImageIfPresent(t, subCtx, client, img)
 					}
 				}
 

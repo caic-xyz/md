@@ -8,7 +8,6 @@ import (
 	"context"
 	"os"
 	"runtime"
-	"slices"
 )
 
 // podman wraps the podman CLI.
@@ -17,11 +16,11 @@ type podman struct {
 }
 
 // newPodman returns a Podman runtime wrapper.
-func newPodman(name string, logger Logger, env []string) *podman {
-	if name == "" {
-		name = "podman"
+func newPodman(executable string, logger Logger, env []string) *podman {
+	if executable == "" {
+		executable = "podman"
 	}
-	return &podman{base: base{name: name, logger: logger, env: slices.Clone(env)}}
+	return &podman{base: newBase(executable, logger, env)}
 }
 
 // UntagImage removes an image tag without deleting containers that use it.
