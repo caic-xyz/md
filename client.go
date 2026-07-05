@@ -1040,32 +1040,46 @@ func readOnlyCachePaths(active []activeCM) []string {
 }
 
 // buildSpecializedImage builds the per-user Docker image by generating a
-// Dockerfile at build time and running "docker build".
+// Dockerfile and running the default runtime builder.
 //
-// Design rationale — three approaches were evaluated:
+// Specialized image build trade-offs:
 //
-//  1. docker create + docker cp + docker exec + docker commit: avoids BuildKit
-//     entirely but "docker cp" is significantly slower than Dockerfile COPY
-//     (API round-trips vs storage-driver-level tar streaming). Also requires
-//     starting the container to fix file ownership, adding latency.
+//   - Docker's default build driver is the fastest and simplest path. It uses
+//     the Docker daemon-local image store, so it can resolve base images such as
+//     md-user-local that were created by `md build-image`, and the resulting
+//     image is available locally without an explicit --load export/import step.
+//     The drawback is shared BuildKit state: specialized image rebuilds write
+//     COPY cache records into the shared/default BuildKit cache. Docker may
+//     later reuse or garbage-collect them, but md cannot delete only its own
+//     records without a broad `docker builder prune`.
 //
-//  2. Maintained Dockerfile in rsc/specialized/ with BuildKit: fast COPY but
-//     requires keeping the file in sync with runtime logic (which caches
-//     exist, what mount paths to create). BuildKit's persistent build cache
-//     also accumulates multi-GB of intermediate layers over repeated rebuilds,
-//     requiring periodic "docker builder prune" and slowing subsequent builds
-//     as the cache grows.
+//   - A temporary buildx docker-container builder isolates BuildKit state. Docker
+//     documents docker-container builders as dedicated BuildKit containers whose
+//     state is stored separately; removing the builder without --keep-state
+//     removes that state. This avoids global cache pollution. The costs are
+//     builder creation/removal, possible BuildKit image pull/boot, and --load
+//     export/import because non-default drivers do not automatically load images
+//     into Docker's local image store.
 //
-//  3. Maintained Dockerfile in rsc/specialized/ without BuildKit: avoids
-//     BuildKit cache growth but cannot adapt to dynamic inputs and still
-//     requires keeping the file in sync with runtime logic.
+//   - A docker-container builder cannot resolve images that exist only in the
+//     Docker daemon-local image store. If the generated Dockerfile says
+//     `FROM md-user-local`, BuildKit treats it as a registry reference and may
+//     try docker.io/library/md-user-local:latest. Local bases and offline
+//     fallback to an already-pulled remote base therefore need the default Docker
+//     builder unless the base is made available another way.
 //
-//  4. Generated Dockerfile + docker build (current): combines COPY's speed with
-//     dynamic generation. Uses --build-context per cache directory so large host
-//     trees are read in-place without copying into the build context. COPY
-//     --chown sets ownership at copy time, eliminating the container
-//     start/exec/stop cycle. --no-cache prevents stale layer reuse and keeps
-//     BuildKit's residual cache small.
+//   - Fully isolated Docker builds for local bases are possible but heavy. Docker
+//     documents additional build contexts, including container images via
+//     docker-image:// and local OCI layout directories via oci-layout://. In
+//     practice this means pushing/tagging the local base through a local registry,
+//     or exporting/converting it to an OCI layout before the specialized build.
+//     Both add IO, lifecycle management, and failure modes, so they are worse
+//     when startup latency matters.
+//
+//   - Podman has no equivalent isolated buildx builder: `podman buildx build` is
+//     documented as an alias for `podman build`. The practical low-leak path is
+//     to disable intermediate layer caching with --layers=false and prune only
+//     dangling md specialized images selected by label.
 //
 // keysDir contains SSH host keys and authorized_keys. home resolves "~/" in
 // cache HostPaths. mountPaths lists container-side -v mount targets to
