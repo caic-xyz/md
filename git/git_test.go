@@ -14,10 +14,25 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
+var testLogStart = time.Now()
+
 func testLogger(t testing.TB) *slog.Logger {
-	return slog.New(slog.NewTextHandler(testLogWriter{t: t}, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	return slog.New(slog.NewTextHandler(testLogWriter{t: t}, testLoggerOptions()))
+}
+
+func testLoggerOptions() *slog.HandlerOptions {
+	return &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+		ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
+			if a.Key == slog.TimeKey {
+				return slog.Int64("ms", time.Since(testLogStart).Milliseconds())
+			}
+			return a
+		},
+	}
 }
 
 type testLogWriter struct {

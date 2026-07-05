@@ -308,7 +308,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			runTestGit(t, ctx, dir, "commit", "-q", "-am", "task")
 
 			ct := &Container{
-				Client: &Client{Logger: testLogger(t)},
+				Client: testClient(t),
 				Name:   remoteDir,
 				Repos: []Repo{{
 					GitRoot:       dir,
@@ -346,7 +346,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			runTestGit(t, ctx, dir, "commit", "-q", "-am", "local main")
 
 			ct := &Container{
-				Client: &Client{Logger: testLogger(t)},
+				Client: testClient(t),
 				Name:   remoteDir,
 				Repos: []Repo{{
 					GitRoot:       dir,
@@ -389,7 +389,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			localFeatureCommit := runTestGit(t, ctx, dir, "rev-parse", "feature")
 
 			ct := &Container{
-				Client: &Client{Logger: testLogger(t)},
+				Client: testClient(t),
 				Name:   remoteDir,
 				Repos: []Repo{{
 					GitRoot:       dir,
@@ -429,7 +429,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			runTestGit(t, ctx, dir, "branch", "-D", "multiple_branches")
 
 			ct := &Container{
-				Client: &Client{Logger: testLogger(t)},
+				Client: testClient(t),
 				Name:   remoteDir,
 				Repos: []Repo{{
 					GitRoot:       dir,
@@ -516,7 +516,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			runTestGit(t, ctx, hostDir, "remote", "add", "md-test", containerDir)
 
 			ct := &Container{
-				Client: &Client{Home: home, Logger: testLogger(t), Runtime: "true"},
+				Client: &Client{Home: home, Logger: testLogger(t), Runtime: testRuntime(t, "true", testLogger(t), nil)},
 				Name:   "md-test",
 				Repos: []Repo{{
 					GitRoot:       hostDir,
@@ -592,7 +592,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			runTestGit(t, ctx, hostDir, "remote", "add", "md-test", containerDir)
 
 			ct := &Container{
-				Client: &Client{Home: home, Logger: testLogger(t), Runtime: "true"},
+				Client: &Client{Home: home, Logger: testLogger(t), Runtime: testRuntime(t, "true", testLogger(t), nil)},
 				Name:   "md-test",
 				Repos: []Repo{{
 					GitRoot:       hostDir,
@@ -658,7 +658,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			runTestGit(t, ctx, hostDir, "remote", "add", "md-test", containerDir)
 
 			ct := &Container{
-				Client: &Client{Home: home, Logger: testLogger(t), Runtime: "true"},
+				Client: &Client{Home: home, Logger: testLogger(t), Runtime: testRuntime(t, "true", testLogger(t), nil)},
 				Name:   "md-test",
 				Repos: []Repo{{
 					GitRoot:       hostDir,
@@ -767,13 +767,15 @@ func TestFork(t *testing.T) {
 					t.Fatal(err)
 				}
 				logPath := filepath.Join(t.TempDir(), "runtime.log")
+				logger := testLogger(t)
+				env := []string{
+					fakeRuntimeEnv + "=1",
+					fakeRuntimeLogEnv + "=" + logPath,
+				}
 				ct := &Container{Client: &Client{
-					Logger:  testLogger(t),
-					Runtime: runtimePath,
-					env: []string{
-						fakeRuntimeEnv + "=1",
-						fakeRuntimeLogEnv + "=" + logPath,
-					},
+					Logger:  logger,
+					Runtime: testRuntime(t, runtimePath, logger, env),
+					env:     env,
 				}}
 				if err := ct.untagImage(t.Context(), "md-fork-md-source"); err != nil {
 					t.Fatal(err)
@@ -795,7 +797,7 @@ func TestUnmarshalContainer(t *testing.T) {
 	t.Run("valid", func(t *testing.T) {
 		t.Parallel()
 		raw := `{"Names":"md-repo-main","State":"running","CreatedAt":"2025-06-15 10:30:00 +0000 UTC"}`
-		ct, err := unmarshalContainer(t.Context(), &Client{Logger: testLogger(t)}, []byte(raw))
+		ct, err := unmarshalContainer(t.Context(), testClient(t), []byte(raw))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -818,7 +820,7 @@ func TestUnmarshalContainer(t *testing.T) {
 		reposData, _ := json.Marshal([]Repo{{GitRoot: "/home/user/repo", Branch: "main"}})
 		reposB64 := base64.StdEncoding.EncodeToString(reposData)
 		raw := `{"Names":"md-repo-main","State":"running","CreatedAt":"2025-06-15 10:30:00 +0000 UTC","Labels":"md.repos=` + reposB64 + `,other=ignored"}`
-		ct, err := unmarshalContainer(t.Context(), &Client{Logger: testLogger(t)}, []byte(raw))
+		ct, err := unmarshalContainer(t.Context(), testClient(t), []byte(raw))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -835,7 +837,7 @@ func TestUnmarshalContainer(t *testing.T) {
 	t.Run("no_labels", func(t *testing.T) {
 		t.Parallel()
 		raw := `{"Names":"md-repo-main","State":"running","CreatedAt":"2025-06-15 10:30:00 +0000 UTC","Labels":""}`
-		ct, err := unmarshalContainer(t.Context(), &Client{Logger: testLogger(t)}, []byte(raw))
+		ct, err := unmarshalContainer(t.Context(), testClient(t), []byte(raw))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -849,7 +851,7 @@ func TestUnmarshalContainer(t *testing.T) {
 		reposData, _ := json.Marshal([]Repo{})
 		reposB64 := base64.StdEncoding.EncodeToString(reposData)
 		raw := `{"Names":"md-agent","State":"running","CreatedAt":"2025-06-15 10:30:00 +0000 UTC","Labels":"md.repos=` + reposB64 + `"}`
-		ct, err := unmarshalContainer(t.Context(), &Client{Logger: testLogger(t)}, []byte(raw))
+		ct, err := unmarshalContainer(t.Context(), testClient(t), []byte(raw))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -860,7 +862,7 @@ func TestUnmarshalContainer(t *testing.T) {
 	t.Run("podman_rfc3339", func(t *testing.T) {
 		t.Parallel()
 		raw := `{"Names":"md-repo-main","State":"running","CreatedAt":"2025-06-15T10:30:00.123456789Z"}`
-		ct, err := unmarshalContainer(t.Context(), &Client{Logger: testLogger(t)}, []byte(raw))
+		ct, err := unmarshalContainer(t.Context(), testClient(t), []byte(raw))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -872,7 +874,7 @@ func TestUnmarshalContainer(t *testing.T) {
 	t.Run("podman_rfc3339_no_frac", func(t *testing.T) {
 		t.Parallel()
 		raw := `{"Names":"md-repo-main","State":"running","CreatedAt":"2025-06-15T10:30:00Z"}`
-		ct, err := unmarshalContainer(t.Context(), &Client{Logger: testLogger(t)}, []byte(raw))
+		ct, err := unmarshalContainer(t.Context(), testClient(t), []byte(raw))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -884,7 +886,7 @@ func TestUnmarshalContainer(t *testing.T) {
 	t.Run("podman_rfc3339_offset", func(t *testing.T) {
 		t.Parallel()
 		raw := `{"Names":"md-repo-main","State":"running","CreatedAt":"2025-06-15T10:30:00+02:00"}`
-		ct, err := unmarshalContainer(t.Context(), &Client{Logger: testLogger(t)}, []byte(raw))
+		ct, err := unmarshalContainer(t.Context(), testClient(t), []byte(raw))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -896,237 +898,23 @@ func TestUnmarshalContainer(t *testing.T) {
 	t.Run("bad_created_at", func(t *testing.T) {
 		t.Parallel()
 		raw := `{"Names":"x","State":"running","CreatedAt":"not-a-date"}`
-		_, err := unmarshalContainer(t.Context(), &Client{Logger: testLogger(t)}, []byte(raw))
+		_, err := unmarshalContainer(t.Context(), testClient(t), []byte(raw))
 		if err == nil {
 			t.Fatal("expected error for bad CreatedAt")
 		}
 	})
 	t.Run("empty_input", func(t *testing.T) {
 		t.Parallel()
-		_, err := unmarshalContainer(t.Context(), &Client{Logger: testLogger(t)}, []byte(""))
+		_, err := unmarshalContainer(t.Context(), testClient(t), []byte(""))
 		if err == nil {
 			t.Fatal("expected error for empty input")
 		}
 	})
 	t.Run("bad_json", func(t *testing.T) {
 		t.Parallel()
-		_, err := unmarshalContainer(t.Context(), &Client{Logger: testLogger(t)}, []byte("{not json}"))
+		_, err := unmarshalContainer(t.Context(), testClient(t), []byte("{not json}"))
 		if err == nil {
 			t.Fatal("expected error for bad JSON")
-		}
-	})
-}
-
-func TestParseStatsLine(t *testing.T) {
-	t.Parallel()
-	t.Run("normal", func(t *testing.T) {
-		t.Parallel()
-		line := `{"Name":"md-repo-main","CPUPerc":"1.23%","MemUsage":"150MiB / 7.5GiB","MemPerc":"1.95%","PIDs":"12","NetIO":"1.5kB / 500B","BlockIO":"10MB / 2MB"}`
-		s, name, err := parseStatsLine(line)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if name != "md-repo-main" {
-			t.Errorf("name = %q, want %q", name, "md-repo-main")
-		}
-		if s.CPUPerc != 1.23 {
-			t.Errorf("CPUPerc = %v, want 1.23", s.CPUPerc)
-		}
-		if s.MemUsed != 150<<20 {
-			t.Errorf("MemUsed = %d, want %d", s.MemUsed, 150<<20)
-		}
-		if s.PIDs != 12 {
-			t.Errorf("PIDs = %d, want 12", s.PIDs)
-		}
-	})
-	t.Run("na_values", func(t *testing.T) {
-		t.Parallel()
-		// docker stats returns N/A when cgroup metrics are unavailable (e.g. DinD).
-		line := `{"Name":"md-repo-main","CPUPerc":"N/A","MemUsage":"N/A / N/A","MemPerc":"N/A","PIDs":"N/A","NetIO":"N/A / N/A","BlockIO":"N/A / N/A"}`
-		s, name, err := parseStatsLine(line)
-		if err != nil {
-			t.Fatalf("N/A values should not cause an error, got: %v", err)
-		}
-		if name != "md-repo-main" {
-			t.Errorf("name = %q, want %q", name, "md-repo-main")
-		}
-		if s.CPUPerc != 0 || s.MemUsed != 0 || s.MemLimit != 0 || s.NetRx != 0 || s.NetTx != 0 {
-			t.Errorf("expected all-zero stats for N/A, got %+v", s)
-		}
-	})
-	t.Run("error", func(t *testing.T) {
-		t.Parallel()
-		tests := []struct {
-			name string
-			in   string
-		}{
-			{"empty", ""},
-			{"bad_json", "{invalid json}"},
-			{"bad_cpu", `{"Name":"x","CPUPerc":"bad%","MemUsage":"0B / 0B","MemPerc":"0%","PIDs":"0","NetIO":"0B / 0B","BlockIO":"0B / 0B"}`},
-		}
-		for _, tt := range tests {
-			t.Run(tt.name, func(t *testing.T) {
-				t.Parallel()
-				_, _, err := parseStatsLine(tt.in)
-				if err == nil {
-					t.Errorf("parseStatsLine(%q) should return error", tt.in)
-				}
-			})
-		}
-	})
-}
-
-func TestParseByteSize(t *testing.T) {
-	t.Parallel()
-	t.Run("valid", func(t *testing.T) {
-		t.Parallel()
-		tests := []struct {
-			name string
-			in   string
-			want uint64
-		}{
-			{"zero_bytes", "0B", 0},
-			{"bytes", "100B", 100},
-			{"kib", "1KiB", 1 << 10},
-			{"mib", "150MiB", 150 << 20},
-			{"gib", "7.5GiB", uint64(7.5 * float64(1<<30))},
-			{"tib", "1TiB", 1 << 40},
-			{"kb", "1.5kB", 1500},
-			{"mb", "10MB", 10_000_000},
-			{"gb", "1GB", 1_000_000_000},
-			{"tb", "2TB", 2_000_000_000_000},
-		}
-		for _, tt := range tests {
-			t.Run(tt.name, func(t *testing.T) {
-				t.Parallel()
-				got, err := parseByteSize(tt.in)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if got != tt.want {
-					t.Errorf("parseByteSize(%q) = %d, want %d", tt.in, got, tt.want)
-				}
-			})
-		}
-	})
-
-	t.Run("error", func(t *testing.T) {
-		t.Parallel()
-		tests := []struct {
-			name string
-			in   string
-		}{
-			{"unknown_unit", "100XB"},
-			{"no_unit", "100"},
-			{"empty", ""},
-			{"bad_number", "abcMiB"},
-		}
-		for _, tt := range tests {
-			t.Run(tt.name, func(t *testing.T) {
-				t.Parallel()
-				_, err := parseByteSize(tt.in)
-				if err == nil {
-					t.Errorf("parseByteSize(%q) should return error", tt.in)
-				}
-			})
-		}
-	})
-}
-
-func TestParseMemUsage(t *testing.T) {
-	t.Parallel()
-	t.Run("valid", func(t *testing.T) {
-		t.Parallel()
-		used, limit, err := parseMemUsage("150MiB / 7.5GiB")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if used != 150<<20 {
-			t.Errorf("used = %d, want %d", used, 150<<20)
-		}
-		if limit != uint64(7.5*float64(1<<30)) {
-			t.Errorf("limit = %d, want %d", limit, uint64(7.5*float64(1<<30)))
-		}
-	})
-
-	t.Run("na", func(t *testing.T) {
-		t.Parallel()
-		used, limit, err := parseMemUsage("N/A / N/A")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if used != 0 || limit != 0 {
-			t.Errorf("expected (0, 0), got (%d, %d)", used, limit)
-		}
-	})
-
-	t.Run("error", func(t *testing.T) {
-		t.Parallel()
-		tests := []struct {
-			name string
-			in   string
-		}{
-			{"no_slash", "150MiB"},
-			{"bad_used", "abc / 1GiB"},
-			{"bad_limit", "1MiB / xyz"},
-		}
-		for _, tt := range tests {
-			t.Run(tt.name, func(t *testing.T) {
-				t.Parallel()
-				_, _, err := parseMemUsage(tt.in)
-				if err == nil {
-					t.Errorf("parseMemUsage(%q) should return error", tt.in)
-				}
-			})
-		}
-	})
-}
-
-func TestParseIOPair(t *testing.T) {
-	t.Parallel()
-	t.Run("valid", func(t *testing.T) {
-		t.Parallel()
-		a, b, err := parseIOPair("1.5kB / 500B")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if a != 1500 {
-			t.Errorf("a = %d, want 1500", a)
-		}
-		if b != 500 {
-			t.Errorf("b = %d, want 500", b)
-		}
-	})
-
-	t.Run("na", func(t *testing.T) {
-		t.Parallel()
-		a, b, err := parseIOPair("N/A / N/A")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if a != 0 || b != 0 {
-			t.Errorf("expected (0, 0), got (%d, %d)", a, b)
-		}
-	})
-
-	t.Run("error", func(t *testing.T) {
-		t.Parallel()
-		tests := []struct {
-			name string
-			in   string
-		}{
-			{"no_slash", "100kB"},
-			{"bad_first", "abc / 1kB"},
-			{"bad_second", "1kB / xyz"},
-		}
-		for _, tt := range tests {
-			t.Run(tt.name, func(t *testing.T) {
-				t.Parallel()
-				_, _, err := parseIOPair(tt.in)
-				if err == nil {
-					t.Errorf("parseIOPair(%q) should return error", tt.in)
-				}
-			})
 		}
 	})
 }
@@ -1312,13 +1100,15 @@ func TestContainerInspect(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		logger := testLogger(t)
+		env := []string{
+			fakeRuntimeEnv + "=1",
+			fakeRuntimeLogEnv + "=" + filepath.Join(t.TempDir(), "runtime.log"),
+		}
 		c := &Client{
-			Logger:  testLogger(t),
-			Runtime: runtimePath,
-			env: []string{
-				fakeRuntimeEnv + "=1",
-				fakeRuntimeLogEnv + "=" + filepath.Join(t.TempDir(), "runtime.log"),
-			},
+			Logger:  logger,
+			Runtime: testRuntime(t, runtimePath, logger, env),
+			env:     env,
 		}
 		info, err := (&Container{Client: c, Name: "md-test"}).Inspect(t.Context())
 		if err != nil {
@@ -1354,7 +1144,7 @@ func TestFillFromInspect(t *testing.T) {
   }
 }]`
 
-	ct := &Container{Client: &Client{Logger: testLogger(t)}}
+	ct := &Container{Client: testClient(t)}
 	if err := ct.fillFromInspect(t.Context(), []byte(inspect)); err != nil {
 		t.Fatalf("fillFromInspect: %v", err)
 	}
@@ -1376,7 +1166,7 @@ func TestFillFromInspect(t *testing.T) {
 
 	// Name without leading slash (Docker sometimes omits it).
 	noSlash := `[{"Name":"plain","State":{"Status":"running"},"Created":"2025-06-15T10:30:00Z","Config":{"Labels":{}}}]`
-	ct2 := &Container{Client: &Client{Logger: testLogger(t)}}
+	ct2 := &Container{Client: testClient(t)}
 	if err := ct2.fillFromInspect(t.Context(), []byte(noSlash)); err != nil {
 		t.Fatalf("no-slash name: %v", err)
 	}
@@ -1385,15 +1175,15 @@ func TestFillFromInspect(t *testing.T) {
 	}
 
 	// Empty array.
-	if err := (&Container{Client: &Client{Logger: testLogger(t)}}).fillFromInspect(t.Context(), []byte(`[]`)); err == nil {
+	if err := (&Container{Client: testClient(t)}).fillFromInspect(t.Context(), []byte(`[]`)); err == nil {
 		t.Error("expected error for empty array")
 	}
 	// Multiple results.
-	if err := (&Container{Client: &Client{Logger: testLogger(t)}}).fillFromInspect(t.Context(), []byte(`[{},{}]`)); err == nil {
+	if err := (&Container{Client: testClient(t)}).fillFromInspect(t.Context(), []byte(`[{},{}]`)); err == nil {
 		t.Error("expected error for multiple results")
 	}
 	// Bad JSON.
-	if err := (&Container{Client: &Client{Logger: testLogger(t)}}).fillFromInspect(t.Context(), []byte(`{bad}`)); err == nil {
+	if err := (&Container{Client: testClient(t)}).fillFromInspect(t.Context(), []byte(`{bad}`)); err == nil {
 		t.Error("expected error for bad JSON")
 	}
 }

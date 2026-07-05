@@ -34,6 +34,7 @@ import (
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/term"
 
+	"github.com/caic-xyz/md/containers"
 	"github.com/caic-xyz/md/git"
 )
 
@@ -451,11 +452,11 @@ func (c *Container) Launch(ctx context.Context, stdout, stderr io.Writer, opts *
 	// (4 bytes) as a safe fallback.
 	//
 	// 4 hex bytes = 65K namespaces, negligible collision probability.
-	if _, err := c.runCmd(ctx, "", []string{c.Runtime, "inspect", c.Name}); err == nil {
+	if _, err := c.Runtime.Run(ctx, "", "inspect", c.Name); err == nil {
 		var suffix [4]byte
 		_, _ = rand.Read(suffix[:])
 		c.Name = c.Name + "-" + hex.EncodeToString(suffix[:])
-		if _, err := c.runCmd(ctx, "", []string{c.Runtime, "inspect", c.Name}); err == nil {
+		if _, err := c.Runtime.Run(ctx, "", "inspect", c.Name); err == nil {
 			return fmt.Errorf("container %s already exists. SSH in with 'ssh %s' or clean it up via 'md purge' first",
 				c.Name, c.Name)
 		}
@@ -519,7 +520,7 @@ func (c *Container) Revive(ctx context.Context, stdout, stderr io.Writer) error 
 	}
 
 	// Start the stopped container.
-	if _, err := c.runCmd(ctx, "", []string{c.Runtime, "start", c.Name}); err != nil {
+	if _, err := c.Runtime.Run(ctx, "", "start", c.Name); err != nil {
 		return fmt.Errorf("docker start %s: %w", c.Name, err)
 	}
 
@@ -569,7 +570,7 @@ func (c *Container) Revive(ctx context.Context, stdout, stderr io.Writer) error 
 // it with the new port), but the ControlMaster socket is removed to
 // prevent stale connections from interfering with subsequent SSH commands.
 func (c *Container) Stop(ctx context.Context) error {
-	if _, err := c.runCmd(ctx, "", []string{c.Runtime, "stop", c.Name}); err != nil {
+	if _, err := c.Runtime.Run(ctx, "", "stop", c.Name); err != nil {
 		return fmt.Errorf("docker stop %s: %w", c.Name, err)
 	}
 	// Clean up stale ControlMaster socket (if any). The SSH connection is
@@ -583,7 +584,7 @@ func (c *Container) Stop(ctx context.Context) error {
 
 // Purge stops and removes the container, cleaning up SSH config and git remotes.
 func (c *Container) Purge(ctx context.Context, stdout, stderr io.Writer) error {
-	_, containerErr := c.runCmd(ctx, "", []string{c.Runtime, "inspect", c.Name})
+	_, containerErr := c.Runtime.Run(ctx, "", "inspect", c.Name)
 	containerExists := containerErr == nil
 	var anyRemoteExists bool
 	for _, repo := range c.Repos {
@@ -607,11 +608,11 @@ func (c *Container) Purge(ctx context.Context, stdout, stderr io.Writer) error {
 	// Clean up non-ephemeral Tailscale node.
 	if containerExists {
 		if !c.Tailscale {
-			tsLabel, _ := c.runCmd(ctx, "", []string{c.Runtime, "inspect", "--format", `{{index .Config.Labels "md.tailscale"}}`, c.Name})
+			tsLabel, _ := c.Runtime.Run(ctx, "", "inspect", "--format", `{{index .Config.Labels "md.tailscale"}}`, c.Name)
 			c.Tailscale = tsLabel == "1"
 		}
 		if c.Tailscale {
-			ephLabel, _ := c.runCmd(ctx, "", []string{c.Runtime, "inspect", "--format", `{{index .Config.Labels "md.tailscale_ephemeral"}}`, c.Name})
+			ephLabel, _ := c.Runtime.Run(ctx, "", "inspect", "--format", `{{index .Config.Labels "md.tailscale_ephemeral"}}`, c.Name)
 			if ephLabel != "1" {
 				deviceID, err := c.tailscaleDeviceID(ctx)
 				switch {
@@ -647,7 +648,7 @@ func (c *Container) Purge(ctx context.Context, stdout, stderr io.Writer) error {
 		}
 	}
 	if containerExists {
-		if _, err := c.runCmd(ctx, "", []string{c.Runtime, "rm", "-f", "-v", c.Name}); err != nil {
+		if _, err := c.Runtime.Run(ctx, "", "rm", "-f", "-v", c.Name); err != nil {
 			retErr = err
 		}
 	}
@@ -1058,16 +1059,16 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 		_, _ = fmt.Fprintf(stdout, "- Snapshotting container %s → %s ...\n", c.Name, snapshotImage)
 	}
 	// Inspect the source container to discover all label keys.
-	labelCSV, err := c.runCmd(ctx, "", []string{c.Runtime, "inspect", "--format", `{{range $k, $v := .Config.Labels}}{{$k}} {{end}}`, c.Name})
+	labelCSV, err := c.Runtime.Run(ctx, "", "inspect", "--format", `{{range $k, $v := .Config.Labels}}{{$k}} {{end}}`, c.Name)
 	if err != nil {
 		return nil, fmt.Errorf("inspecting labels: %w", err)
 	}
-	commitArgs := []string{c.Runtime, "commit"}
+	commitArgs := []string{"commit"}
 	for _, change := range forkSnapshotConfigChanges(labelCSV) {
 		commitArgs = append(commitArgs, "--change", change)
 	}
 	commitArgs = append(commitArgs, c.Name, snapshotImage)
-	if _, err := c.runCmd(ctx, "", commitArgs); err != nil {
+	if _, err := c.Runtime.Run(ctx, "", commitArgs...); err != nil {
 		return nil, fmt.Errorf("docker commit: %w", err)
 	}
 
@@ -1258,60 +1259,12 @@ func forkSnapshotConfigChanges(labelCSV string) []string {
 	return changes
 }
 
-// ContainerStats holds runtime resource usage for a container.
-type ContainerStats struct {
-	// CPUPerc is the CPU usage as a percentage (e.g. 1.23).
-	CPUPerc float64 `json:"cpu_perc"`
-	// MemUsed is memory currently used in bytes.
-	MemUsed uint64 `json:"mem_used"`
-	// MemLimit is the memory limit in bytes.
-	MemLimit uint64 `json:"mem_limit"`
-	// MemPerc is the memory usage as a percentage (e.g. 2.0).
-	MemPerc float64 `json:"mem_perc"`
-	// PIDs is the number of running processes.
-	PIDs int `json:"pids"`
-	// NetRx is the total network bytes received.
-	NetRx uint64 `json:"net_rx"`
-	// NetTx is the total network bytes transmitted.
-	NetTx uint64 `json:"net_tx"`
-	// BlockRead is the total bytes read from block devices.
-	BlockRead uint64 `json:"block_read"`
-	// BlockWrite is the total bytes written to block devices.
-	BlockWrite uint64 `json:"block_write"`
-	// DiskUsed is the writable container layer size in bytes (-1 if unavailable).
-	DiskUsed int64 `json:"disk_used"`
-}
-
-// Stats returns the current resource usage for the container, including CPU,
-// memory, network I/O, block I/O, and writable-layer disk usage.
-func (c *Container) Stats(ctx context.Context) (*ContainerStats, error) {
-	out, err := c.runCmd(ctx, "", []string{
-		c.Runtime, "stats", "--no-stream", "--no-trunc",
-		"--format", "{{json .}}", c.Name,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("container %s is not running", c.Name)
-	}
-	s, _, err := parseStatsLine(out)
-	if err != nil {
-		return nil, fmt.Errorf("parsing stats for %s: %w", c.Name, err)
-	}
-	s.DiskUsed, _ = c.DiskUsage(ctx)
-	return s, nil
-}
-
 // DiskUsage returns the writable container layer size in bytes via
 // docker inspect --size. Works for both running and stopped containers.
 func (c *Container) DiskUsage(ctx context.Context) (int64, error) {
-	out, err := c.runCmd(ctx, "", []string{
-		c.Runtime, "inspect", "--size", "--format", "{{json .SizeRw}}", c.Name,
-	})
+	sz, err := c.Runtime.DiskUsage(ctx, c.Name)
 	if err != nil {
 		return -1, fmt.Errorf("inspecting container %s: %w", c.Name, err)
-	}
-	var sz int64
-	if err := json.Unmarshal([]byte(out), &sz); err != nil {
-		return -1, fmt.Errorf("parsing SizeRw: %w", err)
 	}
 	return sz, nil
 }
@@ -1319,36 +1272,20 @@ func (c *Container) DiskUsage(ctx context.Context) (int64, error) {
 // Status returns the Docker container state (e.g. "running", "exited", "").
 // Returns empty string when the container does not exist.
 func (c *Container) Status(ctx context.Context) string {
-	out, err := c.runCmd(ctx, "", []string{
-		c.Runtime, "inspect", "--format", "{{.State.Status}}", c.Name,
-	})
+	out, err := c.Runtime.Run(ctx, "", "inspect", "--format", "{{.State.Status}}", c.Name)
 	if err != nil {
 		return ""
 	}
 	return strings.TrimSpace(out)
 }
 
-// GetHostPort returns the host port mapped to a container port (e.g.
-// "5901/tcp"). Returns 0 if the port is not mapped.
-func (c *Container) GetHostPort(ctx context.Context, containerPort string) (int32, error) {
-	if _, err := c.runCmd(ctx, "", []string{c.Runtime, "inspect", c.Name}); err != nil {
-		return 0, fmt.Errorf("container %s is not running", c.Name)
-	}
-	return c.getHostPort(ctx, c.Name, containerPort)
-}
-
 // Inspect returns detailed observed runtime configuration for the container.
 func (c *Container) Inspect(ctx context.Context) (*InspectInfo, error) {
-	out, err := c.runCmd(ctx, "", []string{c.Runtime, "inspect", c.Name})
+	info, err := c.Runtime.InspectInfo(ctx, c.Name)
 	if err != nil {
 		return nil, fmt.Errorf("inspecting container %s: %w", c.Name, err)
 	}
-	info, err := parseInspectInfo(c.Runtime, c.Name, []byte(out))
-	if err != nil {
-		return nil, fmt.Errorf("parsing container %s: %w", c.Name, err)
-	}
-	c.fillInspectOSArch(ctx, info)
-	return info, nil
+	return inspectInfoFromRuntime(info), nil
 }
 
 // SudoPassword retrieves the random sudo password set at container startup,
@@ -1361,10 +1298,7 @@ func (c *Container) SudoPassword(ctx context.Context) (string, error) {
 	if c.sudoPassword != "" {
 		return c.sudoPassword, nil
 	}
-	out, err := c.runCmd(ctx, "", []string{
-		c.Runtime, "inspect", "--format",
-		`{{index .Config.Labels "md.sudo-password"}}`, c.Name,
-	})
+	out, err := c.Runtime.Run(ctx, "", "inspect", "--format", `{{index .Config.Labels "md.sudo-password"}}`, c.Name)
 	if err != nil {
 		return "", err
 	}
@@ -1377,7 +1311,7 @@ func (c *Container) TailscaleFQDN(ctx context.Context) string {
 	if !c.Tailscale || c.State != "running" {
 		return ""
 	}
-	statusJSON, err := c.runCmd(ctx, "", []string{c.Runtime, "exec", c.Name, "tailscale", "status", "--json"})
+	statusJSON, err := c.Runtime.Run(ctx, "", "exec", c.Name, "tailscale", "status", "--json")
 	if err != nil {
 		c.Logger.Log(ctx, slog.LevelDebug, "tailscale status failed", "container", c.Name, "err", err)
 		return ""
@@ -1412,14 +1346,7 @@ func (c *Container) SyncDefaultBranch(ctx context.Context, repoIdx int) error {
 }
 
 func (c *Container) untagImage(ctx context.Context, image string) error {
-	// Docker has no untag command; rmi -f removes the tag after a container has
-	// captured the image. Podman's rmi -f removes containers that use the image,
-	// so use its dedicated untag command.
-	args := []string{c.Runtime, "rmi", "-f", "--no-prune", image}
-	if strings.TrimSuffix(filepath.Base(c.Runtime), ".exe") == "podman" {
-		args = []string{c.Runtime, "image", "untag", image}
-	}
-	if _, err := c.runCmd(ctx, "", args); err != nil {
+	if err := c.Runtime.UntagImage(ctx, image); err != nil {
 		return fmt.Errorf("untagging image %s: %w", image, err)
 	}
 	return nil
@@ -1458,7 +1385,7 @@ func (r *Repo) containerSyncRefspecs(ctx context.Context, logger Logger) ([]stri
 // user's password hash. Revocation makes an explicit non-sudo fork match its
 // requested capabilities before the SSH readiness probe runs.
 func (c *Container) revokeSudo(ctx context.Context) error {
-	out, err := c.runCmd(ctx, "", []string{c.Runtime, "exec", "--user", "0:0", c.Name, "bash", "-lc", revokeSudoCommand})
+	out, err := c.Runtime.Run(ctx, "", "exec", "--user", "0:0", c.Name, "bash", "-lc", revokeSudoCommand)
 	if err != nil {
 		return fmt.Errorf("revoking sudo in %s: %w: %s", c.Name, err, out)
 	}
@@ -1470,19 +1397,21 @@ func (c *Container) revokeSudo(ctx context.Context) error {
 // Both Docker and Podman inspect return a JSON array, even for a single
 // container.
 func (c *Container) fillFromInspect(ctx context.Context, data []byte) error {
-	raw, err := inspectDocument(data)
+	raw, err := containers.ParseInspectContainer(data)
 	if err != nil {
 		return err
 	}
-	c.Name = strings.TrimPrefix(raw.Name, "/")
-	c.State = raw.State.Status
-	c.Labels = maps.Clone(raw.Config.Labels)
-	c.SSHPort = hostPort(raw.NetworkSettings.Ports, "22/tcp")
-	c.VNCPort = hostPort(raw.NetworkSettings.Ports, "5901/tcp")
-	if t, err := parseCreatedAt(raw.Created); err == nil {
-		c.CreatedAt = t
-	}
-	for k, v := range raw.Config.Labels {
+	c.Name = raw.Name
+	c.State = raw.State
+	c.Labels = maps.Clone(raw.Labels)
+	c.SSHPort = raw.SSHPort
+	c.VNCPort = raw.VNCPort
+	c.CreatedAt = raw.CreatedAt
+	return c.loadMDLabels(ctx, raw.Labels)
+}
+
+func (c *Container) loadMDLabels(ctx context.Context, labels map[string]string) error {
+	for k, v := range labels {
 		switch k {
 		case "md.repos":
 			if data, err := base64.StdEncoding.DecodeString(v); err == nil {
@@ -1690,7 +1619,7 @@ func (c *Container) prepareTailscaleAuthKey(ctx context.Context, stdout io.Write
 }
 
 func (c *Container) tailscaleDeviceID(ctx context.Context) (string, error) {
-	statusJSON, statusErr := c.runCmd(ctx, "", []string{c.Runtime, "exec", c.Name, "tailscale", "status", "--json"})
+	statusJSON, statusErr := c.Runtime.Run(ctx, "", "exec", c.Name, "tailscale", "status", "--json")
 	if statusErr == nil {
 		deviceID, err := tailscaleDeviceIDFromStatus(statusJSON)
 		if err == nil && deviceID != "" {
@@ -1728,7 +1657,7 @@ func (c *Container) readContainerFile(ctx context.Context, containerPath string)
 	}()
 
 	dst := filepath.Join(tmpDir, "file")
-	if _, err = c.runCmd(ctx, "", []string{c.Runtime, "cp", c.Name + ":" + containerPath, dst}); err != nil {
+	if _, err := c.Runtime.Run(ctx, "", "cp", c.Name+":"+containerPath, dst); err != nil {
 		return "", err
 	}
 	data, err2 := os.ReadFile(dst) // #nosec G304 -- dst is a private temp file populated by docker cp.
@@ -1781,7 +1710,7 @@ func (c *Container) gatherGitDiff(ctx context.Context, r *Repo) string {
 }
 
 func (c *Container) checkContainerState(ctx context.Context) error {
-	_, containerErr := c.runCmd(ctx, "", []string{c.Runtime, "inspect", c.Name})
+	_, containerErr := c.Runtime.Run(ctx, "", "inspect", c.Name)
 	containerExists := containerErr == nil
 	var remoteExists bool
 	if len(c.Repos) > 0 {
@@ -1816,11 +1745,17 @@ func (c *Container) checkContainerState(ctx context.Context) error {
 }
 
 func (c *Container) refreshRuntimeFields(ctx context.Context) error {
-	out, err := c.runCmd(ctx, "", []string{c.Runtime, "inspect", c.Name})
+	raw, err := c.Runtime.InspectContainer(ctx, c.Name)
 	if err != nil {
 		return err
 	}
-	return c.fillFromInspect(ctx, []byte(out))
+	c.Name = raw.Name
+	c.State = raw.State
+	c.Labels = maps.Clone(raw.Labels)
+	c.SSHPort = raw.SSHPort
+	c.VNCPort = raw.VNCPort
+	c.CreatedAt = raw.CreatedAt
+	return c.loadMDLabels(ctx, raw.Labels)
 }
 
 // ensureImage checks whether the user image needs rebuilding and, if so,
@@ -1984,22 +1919,6 @@ export -f __md_sm_fix && __md_sm_fix`
 	return nil
 }
 
-// byteUnits maps suffixes used by docker/podman stats to multipliers.
-var byteUnits = []struct {
-	suffix string
-	mult   uint64
-}{
-	{"KiB", 1 << 10},
-	{"MiB", 1 << 20},
-	{"GiB", 1 << 30},
-	{"TiB", 1 << 40},
-	{"kB", 1000},
-	{"MB", 1000 * 1000},
-	{"GB", 1000 * 1000 * 1000},
-	{"TB", 1000 * 1000 * 1000 * 1000},
-	{"B", 1},
-}
-
 // launchContainer starts the Docker container, queries mapped ports, writes
 // SSH config, and sets up host-side git remotes. It does NOT wait for SSH.
 // Port and creation-time results are stored directly on c (launchSSHPort,
@@ -2008,7 +1927,7 @@ func (c *Container) launchContainer(ctx context.Context, stdout, stderr io.Write
 	if len(c.Repos) > 1000 {
 		return fmt.Errorf("too many repositories: %d (max 1000)", len(c.Repos))
 	}
-	if opts.Sudo && isRootlessPodman(c.Runtime) {
+	if opts.Sudo && c.Runtime.IsRootless() {
 		return errors.New("sudo is not supported with rootless podman; use docker instead")
 	}
 	p := Platform(opts.Platform).Resolve()
@@ -2016,8 +1935,8 @@ func (c *Container) launchContainer(ctx context.Context, stdout, stderr io.Write
 		return err
 	}
 	platform := p.String()
-	dockerArgs := []string{
-		c.Runtime, "run", "-d",
+	runArgs := []string{
+		"run", "-d",
 		"--platform", platform,
 		"--name", c.Name,
 		"--hostname", c.Name,
@@ -2027,15 +1946,15 @@ func (c *Container) launchContainer(ctx context.Context, stdout, stderr io.Write
 		"-v", "/etc/localtime:/etc/localtime:ro",
 	}
 	if opts.MaxCPUs > 0 {
-		dockerArgs = append(dockerArgs, "--cpus", strconv.Itoa(opts.MaxCPUs))
+		runArgs = append(runArgs, "--cpus", strconv.Itoa(opts.MaxCPUs))
 	}
 
 	if opts.Display {
-		dockerArgs = append(dockerArgs, "-p", "127.0.0.1::5901", "-e", "MD_DISPLAY=1")
+		runArgs = append(runArgs, "-p", "127.0.0.1::5901", "-e", "MD_DISPLAY=1")
 	}
 
 	if kvmAvailable() {
-		dockerArgs = append(dockerArgs, "--device=/dev/kvm")
+		runArgs = append(runArgs, "--device=/dev/kvm")
 	}
 	// Sandbox capabilities.
 	// - SYS_PTRACE: needed for strace/debuggers. Scoped to the container's
@@ -2043,15 +1962,15 @@ func (c *Container) launchContainer(ctx context.Context, stdout, stderr io.Write
 	// - seccomp=unconfined: disables the syscall allowlist so strace, bpf,
 	//   and Chrome's sandbox work. Does NOT grant capabilities — the
 	//   capability set still limits what the process can do.
-	dockerArgs = append(dockerArgs,
+	runArgs = append(runArgs,
 		"--cap-add=SYS_PTRACE",
 		"--security-opt", "seccomp=unconfined")
 	// - apparmor=unconfined: disables AppArmor's mandatory-access-control
 	//   profile so Chrome can create namespaces and sandboxed processes can
 	//   access /proc. Docker-only; podman uses SELinux and passing this
 	//   option can hang on kernel security filesystem access.
-	if c.Runtime != "podman" {
-		dockerArgs = append(dockerArgs, "--security-opt", "apparmor=unconfined")
+	if c.Runtime.Name() != "podman" {
+		runArgs = append(runArgs, "--security-opt", "apparmor=unconfined")
 	}
 
 	// Rootless podman: --userns=keep-id maps host UID to same UID inside the
@@ -2059,8 +1978,8 @@ func (c *Container) launchContainer(ctx context.Context, stdout, stderr io.Write
 	// start.sh running as root for privileged setup (groupmod, sshd, dbus).
 	// Rootless Docker is handled inside start.sh via /proc/self/uid_map
 	// detection since Docker lacks --userns=keep-id.
-	if isRootlessPodman(c.Runtime) {
-		dockerArgs = append(dockerArgs, "--userns=keep-id", "--user", "0:0")
+	if c.Runtime.IsRootless() {
+		runArgs = append(runArgs, "--userns=keep-id", "--user", "0:0")
 	}
 
 	// NET_ADMIN and NET_RAW are always granted:
@@ -2068,13 +1987,13 @@ func (c *Container) launchContainer(ctx context.Context, stdout, stderr io.Write
 	// - Tailscale manipulates the network interface (route table changes)
 	//   which requires NET_ADMIN.
 	// Both are scoped to the container's network namespace.
-	dockerArgs = append(dockerArgs,
+	runArgs = append(runArgs,
 		"--cap-add=NET_ADMIN", "--cap-add=NET_RAW")
 
 	// Pass through the host TUN device when Tailscale or rootless Podman
 	// (via -sudo) need to create network interfaces.
 	if opts.Tailscale || opts.Sudo {
-		dockerArgs = append(dockerArgs, "--device=/dev/net/tun:/dev/net/tun")
+		runArgs = append(runArgs, "--device=/dev/net/tun:/dev/net/tun")
 	}
 
 	// Tailscale.
@@ -2103,16 +2022,16 @@ func (c *Container) launchContainer(ctx context.Context, stdout, stderr io.Write
 	// Ref: https://github.com/containerd/containerd/issues/11078 (cgroup v2
 	//      breakage of internal mknod)
 	if opts.Tailscale {
-		dockerArgs = append(dockerArgs,
+		runArgs = append(runArgs,
 			"-e", "MD_TAILSCALE=1")
 		if opts.TailscaleAuthKey != "" {
-			dockerArgs = append(dockerArgs, "-e", "TAILSCALE_AUTHKEY="+opts.TailscaleAuthKey)
+			runArgs = append(runArgs, "-e", "TAILSCALE_AUTHKEY="+opts.TailscaleAuthKey)
 		}
 		if c.tailscaleEphemeral {
-			dockerArgs = append(dockerArgs, "-e", "MD_TAILSCALE_EPHEMERAL=1")
+			runArgs = append(runArgs, "-e", "MD_TAILSCALE_EPHEMERAL=1")
 		}
 		if opts.resetTailscale {
-			dockerArgs = append(dockerArgs, "-e", "MD_TAILSCALE_RESET=1")
+			runArgs = append(runArgs, "-e", "MD_TAILSCALE_RESET=1")
 		}
 	}
 
@@ -2123,7 +2042,7 @@ func (c *Container) launchContainer(ctx context.Context, stdout, stderr io.Write
 		if runtime.GOOS != "linux" {
 			return fmt.Errorf("--usb requires Linux; Docker Desktop on %s cannot pass through host USB devices", runtime.GOOS)
 		}
-		dockerArgs = append(dockerArgs,
+		runArgs = append(runArgs,
 			"-v", "/dev/bus/usb:/dev/bus/usb",
 			"--device-cgroup-rule=c 189:* rwm")
 	}
@@ -2134,7 +2053,7 @@ func (c *Container) launchContainer(ctx context.Context, stdout, stderr io.Write
 		if err != nil {
 			return err
 		}
-		dockerArgs = append(dockerArgs, "-v", arg)
+		runArgs = append(runArgs, "-v", arg)
 	}
 
 	// Set md metadata labels.
@@ -2149,7 +2068,7 @@ func (c *Container) launchContainer(ctx context.Context, stdout, stderr io.Write
 		// /dev/fuse:  required by fuse-overlayfs, the default rootless
 		// Podman storage driver.
 		// See: https://www.redhat.com/sysadmin/podman-inside-container
-		dockerArgs = append(dockerArgs,
+		runArgs = append(runArgs,
 			"--label", "md.sudo=1",
 			"--label", "md.sudo-password="+sudoPassword,
 			"-e", "MD_SUDO_PASSWORD="+sudoPassword,
@@ -2159,33 +2078,33 @@ func (c *Container) launchContainer(ctx context.Context, stdout, stderr io.Write
 	if reposJSON, err := json.Marshal(c.Repos); err == nil {
 		// Base64-encode so commas in JSON don't corrupt the comma-separated
 		// label parsing in unmarshalContainer.
-		dockerArgs = append(dockerArgs, "--label", "md.repos="+base64.StdEncoding.EncodeToString(reposJSON))
+		runArgs = append(runArgs, "--label", "md.repos="+base64.StdEncoding.EncodeToString(reposJSON))
 	}
 	if opts.Display {
-		dockerArgs = append(dockerArgs, "--label", "md.display=1")
+		runArgs = append(runArgs, "--label", "md.display=1")
 	}
 	if opts.Tailscale {
-		dockerArgs = append(dockerArgs, "--label", "md.tailscale=1")
+		runArgs = append(runArgs, "--label", "md.tailscale=1")
 		if c.tailscaleEphemeral {
-			dockerArgs = append(dockerArgs, "--label", "md.tailscale_ephemeral=1")
+			runArgs = append(runArgs, "--label", "md.tailscale_ephemeral=1")
 		}
 	}
 	if opts.USB {
-		dockerArgs = append(dockerArgs, "--label", "md.usb=1")
+		runArgs = append(runArgs, "--label", "md.usb=1")
 	}
 	for _, l := range opts.Labels {
-		dockerArgs = append(dockerArgs, "--label", l)
+		runArgs = append(runArgs, "--label", l)
 	}
-	dockerArgs = append(dockerArgs, opts.ExtraRunArgs...)
-	dockerArgs = append(dockerArgs, imageName)
+	runArgs = append(runArgs, opts.ExtraRunArgs...)
+	runArgs = append(runArgs, imageName)
 
 	if opts.Quiet {
-		if _, err := c.runCmd(ctx, "", dockerArgs); err != nil {
+		if _, err := c.Runtime.Run(ctx, "", runArgs...); err != nil {
 			return cmdErrWithStderr("starting container", err)
 		}
 	} else {
 		_, _ = fmt.Fprintf(stdout, "- Starting container %s ... ", c.Name)
-		if err := c.runCmdOut(ctx, "", dockerArgs, stdout, stderr); err != nil {
+		if err := c.Runtime.RunOut(ctx, "", stdout, stderr, runArgs...); err != nil {
 			_, _ = fmt.Fprintln(stdout)
 			return fmt.Errorf("starting container: %w", err)
 		}
@@ -2270,7 +2189,7 @@ func (c *Container) tryReadTailscaleAuthURL(ctx context.Context, stdout io.Write
   if jq -ce '.' /run/md/tailscale_auth_url.json 2>/dev/null; then exit 0; fi
   sleep 0.1
 done`
-	out, err := c.runCmd(readCtx, "", []string{c.Runtime, "exec", c.Name, "sh", "-c", script})
+	out, err := c.Runtime.Run(readCtx, "", "exec", c.Name, "sh", "-c", script)
 	if err != nil || out == "" {
 		return "", errors.New("timed out waiting for tailscale up --json output")
 	}
@@ -2539,20 +2458,6 @@ func parsePSOutput(out string) ([]ProcessInfo, error) {
 	}), nil
 }
 
-// parseByteSize parses a size string like "150MiB" or "7.5GiB" into bytes.
-func parseByteSize(s string) (uint64, error) {
-	for _, u := range byteUnits {
-		if numStr, ok := strings.CutSuffix(s, u.suffix); ok {
-			f, err := strconv.ParseFloat(strings.TrimSpace(numStr), 64)
-			if err != nil {
-				return 0, fmt.Errorf("parsing %q: %w", s, err)
-			}
-			return uint64(f * float64(u.mult)), nil
-		}
-	}
-	return 0, fmt.Errorf("unknown unit in %q", s)
-}
-
 // generatePassword creates a random 20-character alphanumeric password
 // suitable for the container sudo account.
 func generatePassword() (string, error) {
@@ -2704,6 +2609,27 @@ type InspectInfo struct {
 	CPULimit     int
 	Mounts       []Mount
 	Caches       []CacheMount
+}
+
+func inspectInfoFromRuntime(info *containers.InspectInfo) *InspectInfo {
+	mounts := make([]Mount, len(info.Mounts))
+	for i, m := range info.Mounts {
+		mounts[i] = Mount{HostPath: m.HostPath, ContainerPath: m.ContainerPath, ReadOnly: m.ReadOnly}
+	}
+	return &InspectInfo{
+		Runtime:      info.Runtime,
+		ID:           info.ID,
+		Name:         info.Name,
+		State:        info.State,
+		ImageRef:     info.ImageRef,
+		ImageID:      info.ImageID,
+		Platform:     info.Platform,
+		OS:           info.OS,
+		Architecture: info.Architecture,
+		CPULimit:     info.CPULimit,
+		Mounts:       mounts,
+		Caches:       cacheSpecFromLabel(info.Labels["md.cache_spec"]),
+	}
 }
 
 // containerInspectJSON is the subset of `docker inspect` output we parse.
@@ -2881,47 +2807,6 @@ func parseInspectInfo(runtimeName, requestedName string, data []byte) (*InspectI
 	}, nil
 }
 
-func (c *Container) fillInspectOSArch(ctx context.Context, info *InspectInfo) {
-	if info.OS != "" && info.Architecture != "" {
-		return
-	}
-	fallbackOS := info.OS
-	if fallbackOS == "" {
-		fallbackOS = cleanInspectValue(info.Platform)
-	}
-	if observedOS, observedArchitecture, ok := c.inspectTargetOSArch(ctx, []string{"inspect", c.Name, "--format", "{{.Os}}/{{.Architecture}}"}, fallbackOS); ok {
-		info.OS = observedOS
-		info.Architecture = observedArchitecture
-		return
-	}
-	for _, image := range []string{info.ImageID, info.ImageRef} {
-		if image == "" {
-			continue
-		}
-		observedOS, observedArchitecture, ok := c.inspectTargetOSArch(ctx, []string{"image", "inspect", image, "--format", "{{.Os}}/{{.Architecture}}"}, fallbackOS)
-		if ok {
-			info.OS = observedOS
-			info.Architecture = observedArchitecture
-			return
-		}
-	}
-}
-
-func (c *Container) inspectTargetOSArch(ctx context.Context, args []string, fallbackOS string) (osName, architecture string, ok bool) {
-	if c.Runtime == "" {
-		return "", "", false
-	}
-	out, err := c.runCmd(ctx, "", append([]string{c.Runtime}, args...))
-	if err != nil {
-		return "", "", false
-	}
-	osName, architecture, ok = splitOSArch(out, fallbackOS)
-	if !ok || fallbackOS != "" && osName != fallbackOS {
-		return "", "", false
-	}
-	return osName, architecture, true
-}
-
 func inspectDocument(data []byte) (containerInspectJSON, error) {
 	var raws []containerInspectJSON
 	if err := json.Unmarshal(data, &raws); err != nil {
@@ -2990,18 +2875,6 @@ func inspectCPULimit(c inspectHostJSON) int {
 	return 0
 }
 
-func hostPort(ports map[string][]inspectPortBindingJSON, containerPort string) int32 {
-	bindings := ports[containerPort]
-	if len(bindings) == 0 {
-		return 0
-	}
-	port, err := strconv.ParseInt(bindings[0].HostPort, 10, 32)
-	if err != nil {
-		return 0
-	}
-	return int32(port)
-}
-
 func cacheSpecFromLabel(label string) []CacheMount {
 	if label == "" || label == "<no value>" {
 		return nil
@@ -3027,57 +2900,4 @@ type tailscaleStatus struct {
 		ID      string `json:"ID"`
 		DNSName string `json:"DNSName"`
 	} `json:"Self"`
-}
-
-// parsePercent parses a percentage string like "1.23%" into 1.23.
-// Returns 0 for "N/A" (unavailable cgroup metrics).
-func parsePercent(s string) (float64, error) {
-	s = strings.TrimSpace(s)
-	if s == "N/A" {
-		return 0, nil
-	}
-	s = strings.TrimSuffix(s, "%")
-	return strconv.ParseFloat(s, 64)
-}
-
-// parseMemUsage parses "150MiB / 7.5GiB" into (used, limit) in bytes.
-// Returns (0, 0) for "N/A / N/A" (unavailable cgroup metrics).
-func parseMemUsage(s string) (used, limit uint64, err error) {
-	if strings.TrimSpace(s) == "N/A / N/A" {
-		return 0, 0, nil
-	}
-	parts := strings.SplitN(s, "/", 2)
-	if len(parts) != 2 {
-		return 0, 0, fmt.Errorf("expected 'used / limit', got %q", s)
-	}
-	used, err = parseByteSize(strings.TrimSpace(parts[0]))
-	if err != nil {
-		return 0, 0, err
-	}
-	limit, err = parseByteSize(strings.TrimSpace(parts[1]))
-	if err != nil {
-		return 0, 0, err
-	}
-	return used, limit, nil
-}
-
-// parseIOPair parses "1.23kB / 456B" (docker NetIO / BlockIO) into two byte counts.
-// Returns (0, 0) for "N/A / N/A" (unavailable cgroup metrics).
-func parseIOPair(s string) (a, b uint64, err error) {
-	if strings.TrimSpace(s) == "N/A / N/A" {
-		return 0, 0, nil
-	}
-	parts := strings.SplitN(s, "/", 2)
-	if len(parts) != 2 {
-		return 0, 0, fmt.Errorf("expected 'a / b', got %q", s)
-	}
-	a, err = parseByteSize(strings.TrimSpace(parts[0]))
-	if err != nil {
-		return 0, 0, err
-	}
-	b, err = parseByteSize(strings.TrimSpace(parts[1]))
-	if err != nil {
-		return 0, 0, err
-	}
-	return a, b, nil
 }

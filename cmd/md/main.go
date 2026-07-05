@@ -34,6 +34,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/caic-xyz/md"
+	"github.com/caic-xyz/md/containers"
 	"github.com/caic-xyz/md/git"
 )
 
@@ -174,12 +175,18 @@ func (a *app) newClient() (*md.Client, error) {
 	if a.client != nil {
 		return a.client, nil
 	}
-	c, err := md.New(os.Stdout)
+	logger := slog.Default()
+	var rt containers.Runtime
+	if a.runtimeOverride != "" {
+		var err error
+		rt, err = containers.New(a.runtimeOverride, logger, nil)
+		if err != nil {
+			return nil, err
+		}
+	}
+	c, err := md.New(logger, rt, os.Stdout)
 	if err != nil {
 		return nil, err
-	}
-	if a.runtimeOverride != "" {
-		c.Runtime = a.runtimeOverride
 	}
 	c.ControlMaster = a.controlMasterEnabled
 	c.GithubToken = os.Getenv("GITHUB_TOKEN")
@@ -274,13 +281,13 @@ func (a *app) findContainerAndRepo(ctx context.Context, cf *containerFlags) (*md
 	if branch == "" {
 		branch, _ = g.RunGit(ctx, "branch", "--show-current")
 	}
-	containers, err := c.List(ctx)
+	cts, err := c.List(ctx)
 	if err != nil {
 		return nil, 0, err
 	}
 	var matched []*md.Container
 	var matchedIdx []int
-	for _, ct := range containers {
+	for _, ct := range cts {
 		for i, repo := range ct.Repos {
 			if repo.GitRoot == g.Root && (branch == "" || repo.Branch == branch) {
 				matched = append(matched, ct)
@@ -782,18 +789,18 @@ func shellQuoteArgs(args []string) string {
 
 // containerListEntry is the JSON representation of a container in `md list --json`.
 type containerListEntry struct {
-	Name      string             `json:"name"`
-	State     string             `json:"state"`
-	Uptime    string             `json:"uptime"`
-	SSHPort   int32              `json:"ssh_port"`
-	VNCPort   int32              `json:"vncPort,omitempty"`
-	Display   bool               `json:"display,omitempty"`
-	Tailscale bool               `json:"tailscale,omitempty"`
-	FQDN      string             `json:"fqdn,omitempty"`
-	Sudo      bool               `json:"sudo,omitempty"`
-	USB       bool               `json:"usb,omitempty"`
-	Repos     []md.Repo          `json:"repos,omitempty"`
-	Stats     *md.ContainerStats `json:"stats,omitempty"`
+	Name      string            `json:"name"`
+	State     string            `json:"state"`
+	Uptime    string            `json:"uptime"`
+	SSHPort   int32             `json:"ssh_port"`
+	VNCPort   int32             `json:"vncPort,omitempty"`
+	Display   bool              `json:"display,omitempty"`
+	Tailscale bool              `json:"tailscale,omitempty"`
+	FQDN      string            `json:"fqdn,omitempty"`
+	Sudo      bool              `json:"sudo,omitempty"`
+	USB       bool              `json:"usb,omitempty"`
+	Repos     []md.Repo         `json:"repos,omitempty"`
+	Stats     *containers.Stats `json:"stats,omitempty"`
 }
 
 func (a *app) cmdList(ctx context.Context, args []string) error {
@@ -812,28 +819,28 @@ func (a *app) cmdList(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	containers, err := c.List(ctx)
+	cts, err := c.List(ctx)
 	if err != nil {
 		return err
 	}
 
 	// Batch-fetch stats for all containers in 2 docker calls.
-	var allStats map[string]*md.ContainerStats
-	if *showStats && len(containers) > 0 {
-		names := make([]string, len(containers))
-		for i, ct := range containers {
+	var allStats map[string]*containers.Stats
+	if *showStats && len(cts) > 0 {
+		names := make([]string, len(cts))
+		for i, ct := range cts {
 			names[i] = ct.Name
 		}
 		var statsErr error
-		allStats, statsErr = c.StatsAll(ctx, names)
+		allStats, statsErr = c.Runtime.StatsAll(ctx, names)
 		if statsErr != nil {
 			slog.WarnContext(ctx, "md", "msg", "fetching container stats", "err", statsErr)
 		}
 	}
 
 	if *jsonOut {
-		entries := make([]containerListEntry, len(containers))
-		for i, ct := range containers {
+		entries := make([]containerListEntry, len(cts))
+		for i, ct := range cts {
 			entries[i] = containerListEntry{
 				Name:      ct.Name,
 				State:     ct.State,
@@ -855,7 +862,7 @@ func (a *app) cmdList(ctx context.Context, args []string) error {
 		enc.SetIndent("", "  ")
 		return enc.Encode(entries)
 	}
-	if len(containers) == 0 {
+	if len(cts) == 0 {
 		fmt.Println("No running md containers")
 		return nil
 	}
@@ -865,11 +872,11 @@ func (a *app) cmdList(ctx context.Context, args []string) error {
 		repos    string
 		features string
 	}
-	rows := make([]row, len(containers))
-	tsFQDNs := make([]string, len(containers)) // populated in parallel for tailscale containers
+	rows := make([]row, len(cts))
+	tsFQDNs := make([]string, len(cts)) // populated in parallel for tailscale containers
 	nameWidth := len("Container")
 	repoWidth := len("Repos")
-	for i, ct := range containers {
+	for i, ct := range cts {
 		rows[i].name = ct.Name
 		nameWidth = max(nameWidth, len(rows[i].name))
 		var parts []string
@@ -893,7 +900,7 @@ func (a *app) cmdList(ctx context.Context, args []string) error {
 
 	// Phase 2: query Tailscale FQDNs in parallel.
 	var wg sync.WaitGroup
-	for i, ct := range containers {
+	for i, ct := range cts {
 		if ct.Tailscale && ct.State == "running" {
 			wg.Go(func() {
 				tsFQDNs[i] = ct.TailscaleFQDN(ctx)
@@ -904,7 +911,7 @@ func (a *app) cmdList(ctx context.Context, args []string) error {
 
 	// Phase 3: rebuild feature strings with FQDNs and compute feature width.
 	featWidth := len("Features")
-	for i := range containers {
+	for i := range cts {
 		if fqdn := tsFQDNs[i]; fqdn != "" {
 			rows[i].features = "tailscale:" + fqdn
 		}
@@ -915,7 +922,7 @@ func (a *app) cmdList(ctx context.Context, args []string) error {
 	sepWidth := nameWidth + 1 + 10 + 1 + repoWidth + 1 + 12 + 2 + featWidth
 	fmt.Printf("%-*s %-10s %-*s %12s  %-*s\n", nameWidth, "Container", "Status", repoWidth, "Repos", "Uptime", featWidth, "Features")
 	fmt.Println(strings.Repeat("-", sepWidth))
-	for i, ct := range containers {
+	for i, ct := range cts {
 		fmt.Printf("%-*s %-10s %-*s %12s  %-*s\n", nameWidth, rows[i].name, ct.State, repoWidth, rows[i].repos, time.Since(ct.CreatedAt).Truncate(time.Second), featWidth, rows[i].features)
 		if s := allStats[ct.Name]; s != nil {
 			if ct.State == "running" {
@@ -1273,7 +1280,7 @@ func (a *app) cmdVNC(ctx context.Context, args []string) error {
 			return err
 		}
 	}
-	vncPort, err := ct.GetHostPort(ctx, "5901/tcp")
+	vncPort, err := ct.Runtime.HostPort(ctx, ct.Name, "5901/tcp")
 	if err != nil {
 		return err
 	}

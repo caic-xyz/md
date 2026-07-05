@@ -100,40 +100,6 @@ func TestPlatform(t *testing.T) {
 	})
 }
 
-func TestParseImageArchitecture(t *testing.T) {
-	t.Parallel()
-	t.Run("valid", func(t *testing.T) {
-		t.Parallel()
-		tests := []struct {
-			raw  string
-			want string
-		}{
-			{`[{"ImageManifestDescriptor":{"platform":{"architecture":"amd64","os":"linux"}}}]`, "amd64"},
-			{`[{"Architecture":"arm64","Os":"linux"}]`, "arm64"},
-			{`[{}]`, ""},
-			{`[{"ImageManifestDescriptor":{"platform":{"architecture":"amd64","os":"windows"}}}]`, ""},
-			{`[{"Architecture":"amd64","Os":"windows"}]`, ""},
-		}
-		for _, tt := range tests {
-			got, err := parseImageArchitecture([]byte(tt.raw))
-			if err != nil {
-				t.Errorf("parseImageArchitecture(%s): %v", tt.raw, err)
-				continue
-			}
-			if got != tt.want {
-				t.Errorf("parseImageArchitecture(%s) = %q, want %q", tt.raw, got, tt.want)
-			}
-		}
-	})
-
-	t.Run("error", func(t *testing.T) {
-		t.Parallel()
-		if _, err := parseImageArchitecture([]byte(`{bad}`)); err == nil {
-			t.Fatal("expected JSON parse error")
-		}
-	})
-}
-
 func TestFormatCount(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

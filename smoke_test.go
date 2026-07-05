@@ -20,6 +20,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/caic-xyz/md/containers"
 )
 
 func newSmokeClient(t *testing.T, rt string) *Client {
@@ -40,16 +42,17 @@ func newSmokeClient(t *testing.T, rt string) *Client {
 		t.Fatalf("write storage.conf: %v", err)
 	}
 
-	client, err := newClient(tmpHome, rt, io.Discard)
-	if err != nil {
-		t.Fatalf("newClient: %v", err)
-	}
-	client.Logger = testLogger(t)
-	client.env = []string{
+	logger := testLogger(t)
+	clientEnv := []string{
 		"HOME=" + tmpHome,
 		"GIT_SSH_COMMAND=ssh -F " + filepath.Join(tmpHome, ".ssh", "config"),
 		"XDG_CONFIG_HOME=" + filepath.Join(tmpHome, ".config"),
 	}
+	client, err := newClient(tmpHome, logger, testRuntime(t, rt, logger, clientEnv), io.Discard)
+	if err != nil {
+		t.Fatalf("newClient: %v", err)
+	}
+	client.env = clientEnv
 
 	// podman system reset cleans up overlay storage before t.TempDir removal,
 	// avoiding permission errors.
@@ -63,7 +66,7 @@ func newSmokeClient(t *testing.T, rt string) *Client {
 
 // hasImage checks whether a container image exists in the local store.
 func hasImage(ctx context.Context, c *Client, name string) bool {
-	_, err := c.runCmd(ctx, "", []string{c.Runtime, "image", "inspect", "--format", "{{.Id}}", name})
+	_, err := c.runCmd(ctx, "", []string{c.Runtime.Name(), "image", "inspect", "--format", "{{.Id}}", name})
 	return err == nil
 }
 
@@ -105,7 +108,7 @@ func prebuildSpecializedImage(t *testing.T, ctx context.Context, c *Client, base
 // calls Launch+Connect. Returns the live container (caller must Purge via
 // t.Cleanup).
 func launchSmokeContainer(t *testing.T, ctx context.Context, c *Client, baseImage, nameSuffix string, sudo bool, caches ...CacheMount) *Container {
-	if sudo && isRootlessPodman(c.Runtime) {
+	if sudo && c.Runtime.IsRootless() {
 		t.Skip("skipping: sudo is not supported with rootless podman")
 	}
 	ct, err := c.Container()
@@ -114,7 +117,7 @@ func launchSmokeContainer(t *testing.T, ctx context.Context, c *Client, baseImag
 	}
 	ct.Name = "md-smoke-" + nameSuffix
 
-	_, _ = c.runCmd(ctx, "", []string{c.Runtime, "rm", "-f", "-v", ct.Name})
+	_, _ = c.runCmd(ctx, "", []string{c.Runtime.Name(), "rm", "-f", "-v", ct.Name})
 
 	opts := &StartOpts{
 		BaseImage: baseImage,
@@ -148,7 +151,7 @@ func launchSmokeRepoContainer(t *testing.T, ctx context.Context, c *Client, base
 		t.Fatalf("Container: %v", err)
 	}
 
-	_, _ = c.runCmd(ctx, "", []string{c.Runtime, "rm", "-f", "-v", ct.Name})
+	_, _ = c.runCmd(ctx, "", []string{c.Runtime.Name(), "rm", "-f", "-v", ct.Name})
 
 	opts := &StartOpts{
 		BaseImage: baseImage,
@@ -232,13 +235,13 @@ func runSmokeMD(t *testing.T, c *Client, args ...string) string {
 	if err != nil {
 		t.Fatalf("get working directory: %v", err)
 	}
-	goArgs := append([]string{"run", "./cmd/md", "--runtime", c.Runtime}, args...)
+	goArgs := append([]string{"run", "./cmd/md", "--runtime", c.Runtime.Name()}, args...)
 	cmd := exec.CommandContext(ctx, "go", goArgs...) //nolint:gosec // args are test-controlled.
 	cmd.Dir = repoRoot
 	overrides := append([]string(nil), c.env...)
 	overrides = append(overrides, "LANG=C")
 	overrides = append(overrides, smokeGoEnv(t)...)
-	cmd.Env = envWithOverrides(os.Environ(), overrides)
+	cmd.Env = containers.EnvWithOverrides(os.Environ(), overrides)
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -314,13 +317,14 @@ func TestSmoke(t *testing.T) {
 
 			client := newSmokeClient(t, rt)
 
-			// Rootless podman adds --userns=keep-id, which puts the
-			// inner container in a user namespace. Nested newuidmap
-			// then fails with EPERM — user namespace stacking is not
-			// supported. Rootful docker and rootful podman (uid 0)
-			// don't have this limitation.
+			rootlessRuntime := client.Runtime.IsRootless()
+
+			// Rootless Podman adds --userns=keep-id, which puts the inner
+			// container in a user namespace. Nested newuidmap then fails
+			// with EPERM — user namespace stacking is not supported.
+			// Rootful Docker and rootful Podman do not have this limitation.
 			// Error: "newuidmap: write to uid_map failed: Operation not permitted"
-			nestedOK := rt != "podman" || os.Getuid() == 0
+			nestedOK := !rootlessRuntime
 
 			// Fetch md-user upfront so all subtests can reuse it.
 			baseImage := ensureImages(t, t.Context(), client)
@@ -354,7 +358,7 @@ func TestSmoke(t *testing.T) {
 							t.Cleanup(func() {
 								cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 30*time.Second)
 								defer cancel()
-								_, _ = client.runCmd(cleanupCtx, "", []string{client.Runtime, "rmi", "-f", cleanupImage})
+								_, _ = client.runCmd(cleanupCtx, "", []string{client.Runtime.Name(), "rmi", "-f", cleanupImage})
 							})
 
 							var forkStdout, forkStderr strings.Builder
@@ -602,12 +606,12 @@ func TestSmoke(t *testing.T) {
 
 				t.Run("fork", func(t *testing.T) {
 					staleForkName := containerName(sanitizeDockerName(filepath.Base(mountedPath)), "main-0")
-					_, _ = client.runCmd(t.Context(), "", []string{client.Runtime, "rm", "-f", "-v", staleForkName})
-					_, _ = client.runCmd(t.Context(), "", []string{client.Runtime, "rmi", "-f", "md-fork-" + ct.Name})
+					_, _ = client.runCmd(t.Context(), "", []string{client.Runtime.Name(), "rm", "-f", "-v", staleForkName})
+					_, _ = client.runCmd(t.Context(), "", []string{client.Runtime.Name(), "rmi", "-f", "md-fork-" + ct.Name})
 					t.Cleanup(func() {
 						cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 30*time.Second)
 						defer cancel()
-						_, _ = client.runCmd(cleanupCtx, "", []string{client.Runtime, "rmi", "-f", "md-fork-" + ct.Name})
+						_, _ = client.runCmd(cleanupCtx, "", []string{client.Runtime.Name(), "rmi", "-f", "md-fork-" + ct.Name})
 					})
 
 					prepareForkCmd := "printf snapshot > /tmp/fork-marker" +
@@ -627,9 +631,9 @@ func TestSmoke(t *testing.T) {
 						MaxCPUs: DefaultMaxCPUs(),
 					})
 					if err != nil {
-						state, _ := client.runCmd(t.Context(), "", []string{client.Runtime, "inspect", "--format", "{{json .State}}", staleForkName})
-						logs, _ := client.runCmd(t.Context(), "", []string{client.Runtime, "logs", staleForkName})
-						sshDiag, _ := client.runCmd(t.Context(), "", []string{client.Runtime, "exec", staleForkName, "bash", "-lc", strings.Join([]string{
+						state, _ := client.runCmd(t.Context(), "", []string{client.Runtime.Name(), "inspect", "--format", "{{json .State}}", staleForkName})
+						logs, _ := client.runCmd(t.Context(), "", []string{client.Runtime.Name(), "logs", staleForkName})
+						sshDiag, _ := client.runCmd(t.Context(), "", []string{client.Runtime.Name(), "exec", staleForkName, "bash", "-lc", strings.Join([]string{
 							"stat -c '%U:%G %a %n' /home/user /home/user/.ssh /home/user/.ssh/authorized_keys /etc/ssh/ssh_host_ed25519_key 2>&1",
 							"pgrep -a sshd 2>&1 || true",
 							"tail -120 /var/log/auth.log 2>&1 || true",
@@ -645,7 +649,7 @@ func TestSmoke(t *testing.T) {
 						}
 					})
 
-					if _, err := client.runCmd(t.Context(), "", []string{client.Runtime, "image", "inspect", "md-fork-" + ct.Name}); err == nil {
+					if _, err := client.runCmd(t.Context(), "", []string{client.Runtime.Name(), "image", "inspect", "md-fork-" + ct.Name}); err == nil {
 						t.Fatalf("temporary fork snapshot tag md-fork-%s still exists", ct.Name)
 					}
 
@@ -753,7 +757,7 @@ func TestSmoke(t *testing.T) {
 				assertSmokeContainerGitRefMissing(t, ct, mountedPath, "refs/remotes/host/HEAD")
 			})
 
-			if isRootlessPodman(rt) {
+			if rootlessRuntime {
 				t.Log("pruning unused specialized images before cache test ...")
 				if _, err := client.PruneImages(t.Context(), io.Discard, io.Discard); err != nil {
 					t.Fatalf("PruneImages: %v", err)
@@ -764,8 +768,12 @@ func TestSmoke(t *testing.T) {
 			// mounts). Rootless podman may need an ID-mapped copy of the large
 			// base layers for each specialized image, so prune the now-unused
 			// no-cache image above before creating the cache image.
+			//
+			// Do not run this in parallel with build_image below: build_image removes
+			// and rebuilds md-user-local, which this test uses as the Dockerfile FROM
+			// image. Podman then tries to resolve the missing local short name via
+			// registries.conf and fails when no unqualified registry is configured.
 			t.Run("cache", func(t *testing.T) {
-				t.Parallel()
 				src := t.TempDir()
 				if err := os.WriteFile(filepath.Join(src, "hello.txt"), []byte("cache-works"), 0o600); err != nil {
 					t.Fatal(err)

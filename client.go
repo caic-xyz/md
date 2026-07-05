@@ -12,7 +12,6 @@
 package md
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -24,8 +23,8 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"iter"
 	"log/slog"
+	"maps"
 	"os"
 	"os/exec"
 	"path"
@@ -37,13 +36,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/caic-xyz/md/git"
+	"github.com/caic-xyz/md/containers"
 )
 
-// Logger receives structured log records. It is an alias of git.Logger so
-// that a single Logger value can be shared between this package and git
-// without conversion.
-type Logger = git.Logger
+// Logger receives structured log records. It is an alias of containers.Logger so
+// that a single Logger value can be shared by md, containers, and git without
+// conversion.
+type Logger = containers.Logger
 
 // Client holds global MD tool state (paths, image config, SSH keys).
 type Client struct {
@@ -57,8 +56,8 @@ type Client struct {
 	HostKeyPath string // ~/.config/md/ssh_host_ed25519_key (generated)
 	UserKeyPath string // ~/.ssh/md
 
-	// Container runtime.
-	Runtime string // "docker" or "podman"; auto-detected by New().
+	// Runtime is the Docker or Podman runtime.
+	Runtime containers.Runtime
 
 	// Logger receives md package logs. It must be non-nil.
 	Logger Logger
@@ -107,37 +106,20 @@ type Client struct {
 	imageBuildCache *imageBuildCacheEntry
 }
 
-// ContainerEvent describes a Docker/Podman lifecycle event for an md container.
-type ContainerEvent struct {
-	Name       string
-	Attributes map[string]string
-}
-
-// ContainerStatsSample describes one streamed Docker/Podman stats sample.
-type ContainerStatsSample struct {
-	Name  string
-	Stats *ContainerStats
-}
-
-const redactedLogValue = "<redacted>"
-
-var (
-	sensitiveLogAssignmentPattern = regexp.MustCompile(`(?i)^(.*api_key[^=]*=).+$`)
-	sensitiveLogNameMarkers       = [...]string{"password", "passwd", "secret", "token", "authkey", "apikey"}
-	sensitiveLogNameReplacer      = strings.NewReplacer("_", "", "-", "", ".", "")
-)
-
 // New creates a Client with global MD tool config and initialises SSH
 // infrastructure (keys, authorized_keys, config.d include).
-func New(stdout io.Writer) (*Client, error) {
-	return newClient("", "", stdout)
+//
+// When logger is nil, slog.Default() is used. When runtime is nil, Docker or
+// Podman is auto-detected.
+func New(logger Logger, rt containers.Runtime, stdout io.Writer) (*Client, error) {
+	return newClient("", logger, rt, stdout)
 }
 
 // newClient is like New but allows overriding the home and runtime. When
 // home is empty, os.UserHomeDir() is used and XDG_* env vars are respected.
-// When home is explicit, all paths derive from it unconditionally. When rt
-// is empty, detectRuntime() is called.
-func newClient(home, rt string, stdout io.Writer) (*Client, error) {
+// When home is explicit, all paths derive from it unconditionally. When runtime
+// is nil, Docker or Podman is auto-detected.
+func newClient(home string, logger Logger, rt containers.Runtime, stdout io.Writer) (*Client, error) {
 	fromEnv := home == ""
 	if fromEnv {
 		var err error
@@ -154,11 +136,15 @@ func newClient(home, rt string, stdout io.Writer) (*Client, error) {
 		xdgDataHome = envOr("XDG_DATA_HOME", xdgDataHome)
 		xdgStateHome = envOr("XDG_STATE_HOME", xdgStateHome)
 	}
-	if rt == "" {
-		rt = detectRuntime(exec.LookPath)
+	if logger == nil {
+		logger = slog.Default()
 	}
-	if rt != "docker" && rt != "podman" {
-		return nil, fmt.Errorf("unsupported container runtime %q; supported values: docker, podman", rt)
+	if rt == nil {
+		var err error
+		rt, err = containers.New(containers.Detect(exec.LookPath), logger, nil)
+		if err != nil {
+			return nil, err
+		}
 	}
 	c := &Client{
 		Home:           home,
@@ -168,7 +154,7 @@ func newClient(home, rt string, stdout io.Writer) (*Client, error) {
 		HostKeyPath:    filepath.Join(xdgConfigHome, "md", "ssh_host_ed25519_key"),
 		UserKeyPath:    filepath.Join(home, ".ssh", "md"),
 		Runtime:        rt,
-		Logger:         slog.Default(),
+		Logger:         logger,
 		DigestCacheTTL: 12 * time.Hour,
 		digestCache:    make(map[string]remoteDigestEntry),
 	}
@@ -182,18 +168,6 @@ func newClient(home, rt string, stdout io.Writer) (*Client, error) {
 // Close implements io.Closer.
 func (c *Client) Close() error {
 	return nil
-}
-
-// detectRuntime returns the container runtime to use.
-// Checks for docker, then podman using the provided lookup function.
-func detectRuntime(lookPath func(string) (string, error)) string {
-	if _, err := lookPath("docker"); err == nil {
-		return "docker"
-	}
-	if _, err := lookPath("podman"); err == nil {
-		return "podman"
-	}
-	return "docker"
 }
 
 // Container returns a Container handle for the given repos.
@@ -230,124 +204,39 @@ func (c *Client) Container(repos ...Repo) (*Container, error) {
 
 // List returns running md containers sorted by name.
 func (c *Client) List(ctx context.Context) ([]*Container, error) {
-	out, err := c.runCmd(ctx, "", []string{c.Runtime, "ps", "--all", "--no-trunc", "--format", "{{json .}}"})
+	runtimeContainers, err := c.Runtime.List(ctx)
 	if err != nil {
 		return nil, err
 	}
-	var containers []*Container
-	var parseErrs []error
-	for line := range strings.SplitSeq(out, "\n") {
-		if line == "" {
-			continue
-		}
-		ct, err := unmarshalContainer(ctx, c, []byte(line))
+	cts := make([]*Container, 0, len(runtimeContainers))
+	for _, runtimeContainer := range runtimeContainers {
+		ct, err := c.containerFromRuntime(ctx, runtimeContainer)
 		if err != nil {
-			parseErrs = append(parseErrs, err)
-			continue
+			return nil, err
 		}
 		if strings.HasPrefix(ct.Name, "md-") {
-			ct.Client = c
-			ct.sshConfigPath = filepath.Join(c.Home, ".ssh", "config.d", ct.Name+".conf")
-			containers = append(containers, &ct)
+			cts = append(cts, ct)
 		}
 	}
-	if len(containers) == 0 && len(parseErrs) > 0 {
-		return nil, fmt.Errorf("failed to parse container output: %w", parseErrs[0])
-	}
-	sort.Slice(containers, func(i, j int) bool { return containers[i].Name < containers[j].Name })
-	return containers, nil
+	sort.Slice(cts, func(i, j int) bool { return cts[i].Name < cts[j].Name })
+	return cts, nil
 }
 
 // Get returns a single Container by name, or an error if not found.
 // Uses docker inspect for a targeted lookup.
 func (c *Client) Get(ctx context.Context, name string) (*Container, error) {
-	out, err := c.runCmd(ctx, "", []string{c.Runtime, "inspect", name})
+	runtimeContainer, err := c.Runtime.InspectContainer(ctx, name)
 	if err != nil {
 		return nil, fmt.Errorf("inspecting container %s: %w", name, err)
 	}
-	ct := &Container{Client: c}
-	if err := ct.fillFromInspect(ctx, []byte(out)); err != nil {
+	ct, err := c.containerFromRuntime(ctx, *runtimeContainer)
+	if err != nil {
 		return nil, fmt.Errorf("parsing container %s: %w", name, err)
 	}
 	if ct.Name == "" {
 		ct.Name = name
 	}
-	ct.sshConfigPath = filepath.Join(c.Home, ".ssh", "config.d", ct.Name+".conf")
 	return ct, nil
-}
-
-// WatchDieEvents streams container die events for containers carrying labelKey.
-func (c *Client) WatchDieEvents(ctx context.Context, labelKey string) (iter.Seq2[ContainerEvent, error], error) {
-	eventCtx, cancel := context.WithCancel(ctx)
-	cmd := exec.CommandContext(eventCtx, c.Runtime, "events", //nolint:gosec // Runtime is detected by md; labelKey is passed as a Docker label filter.
-		"--filter", "event=die",
-		"--filter", "label="+labelKey,
-		"--format", "{{json .}}",
-	)
-	cmd.Env = c.commandEnv("LANG=C")
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		cancel()
-		return nil, fmt.Errorf("%s events stdout: %w", c.Runtime, err)
-	}
-	if err := cmd.Start(); err != nil {
-		cancel()
-		return nil, fmt.Errorf("%s events start: %w", c.Runtime, err)
-	}
-	return func(yield func(ContainerEvent, error) bool) {
-		waited := false
-		defer func() {
-			cancel()
-			if !waited {
-				_ = cmd.Wait()
-			}
-		}()
-		scanner := bufio.NewScanner(stdout)
-		for scanner.Scan() {
-			ev, ok := parseContainerEvent(scanner.Bytes())
-			if !ok {
-				continue
-			}
-			if !yield(ev, nil) {
-				return
-			}
-		}
-		if err := scanner.Err(); err != nil && eventCtx.Err() == nil {
-			_ = yield(ContainerEvent{}, fmt.Errorf("%s events scan: %w", c.Runtime, err))
-			return
-		}
-		waited = true
-		if err := cmd.Wait(); err != nil && eventCtx.Err() == nil {
-			_ = yield(ContainerEvent{}, fmt.Errorf("%s events wait: %w", c.Runtime, err))
-		}
-	}, nil
-}
-
-func parseContainerEvent(data []byte) (ContainerEvent, bool) {
-	var ev containerEventJSON
-	if json.Unmarshal(data, &ev) != nil {
-		return ContainerEvent{}, false
-	}
-	attributes := ev.Actor.Attributes
-	if len(attributes) == 0 {
-		attributes = ev.Attributes
-	}
-	name := attributes["name"]
-	if name == "" {
-		name = ev.Name
-	}
-	if name == "" {
-		return ContainerEvent{}, false
-	}
-	return ContainerEvent{Name: name, Attributes: attributes}, true
-}
-
-type containerEventJSON struct {
-	Name       string            `json:"Name"`
-	Attributes map[string]string `json:"Attributes"`
-	Actor      struct {
-		Attributes map[string]string `json:"Attributes"`
-	} `json:"Actor"`
 }
 
 // BuildImage builds the base Docker images locally for platform:
@@ -379,17 +268,17 @@ func (c *Client) BuildImage(ctx context.Context, stdout, stderr io.Writer, platf
 			retErr = errors.Join(retErr, err)
 		}
 	}()
-	rootCmd := []string{
-		c.Runtime, "build",
+	rootArgs := []string{
 		"--platform", platformString,
 		"-f", filepath.Join(rootCtx, "Dockerfile"),
 		"-t", "md-root-local",
 	}
 	if c.GithubToken != "" {
-		rootCmd = append(rootCmd, "--secret", "id=github_token,env=GITHUB_TOKEN")
+		rootArgs = append(rootArgs, "--secret", "id=github_token,env=GITHUB_TOKEN")
 	}
-	rootCmd = append(rootCmd, rootCtx)
-	if err := c.runCmdOut(ctx, "", rootCmd, stdout, stderr); err != nil {
+	rootArgs = append([]string{"build"}, rootArgs...)
+	rootArgs = append(rootArgs, rootCtx)
+	if err := c.Runtime.RunOut(ctx, "", stdout, stderr, rootArgs...); err != nil {
 		return err
 	}
 	_, _ = fmt.Fprintln(stdout, "- Root image built as 'md-root-local'.")
@@ -405,18 +294,18 @@ func (c *Client) BuildImage(ctx context.Context, stdout, stderr io.Writer, platf
 			retErr = errors.Join(retErr, err)
 		}
 	}()
-	userCmd := []string{
-		c.Runtime, "build",
+	userArgs := []string{
 		"--platform", platformString,
 		"-f", filepath.Join(userCtx, "Dockerfile"),
 		"--build-arg", "BASE_ROOT_IMAGE=md-root-local",
 		"-t", "md-user-local",
 	}
 	if c.GithubToken != "" {
-		userCmd = append(userCmd, "--secret", "id=github_token,env=GITHUB_TOKEN")
+		userArgs = append(userArgs, "--secret", "id=github_token,env=GITHUB_TOKEN")
 	}
-	userCmd = append(userCmd, userCtx)
-	if err := c.runCmdOut(ctx, "", userCmd, stdout, stderr); err != nil {
+	userArgs = append([]string{"build"}, userArgs...)
+	userArgs = append(userArgs, userCtx)
+	if err := c.Runtime.RunOut(ctx, "", stdout, stderr, userArgs...); err != nil {
 		return err
 	}
 	_, _ = fmt.Fprintln(stdout, "- User image built as 'md-user-local'.")
@@ -424,7 +313,7 @@ func (c *Client) BuildImage(ctx context.Context, stdout, stderr io.Writer, platf
 	// Clean up BuildKit cache (--mount=type=cache volumes from Dockerfiles).
 	// These are only useful during the build itself; pruning avoids leaving
 	// orphaned resources on disk.
-	if _, err := c.runCmd(ctx, "", []string{c.Runtime, "builder", "prune", "-f"}); err != nil {
+	if _, err := c.Runtime.Run(ctx, "", "builder", "prune", "-f"); err != nil {
 		_, _ = fmt.Fprintf(stdout, "- Warning: pruning build cache: %v\n", err)
 	}
 	return nil
@@ -478,9 +367,7 @@ func (c *Client) PruneImages(ctx context.Context, stdout, stderr io.Writer) ([]s
 	// List all md-specialized-* and md-fork-* images.
 	allImages := make(map[string]struct{})
 	for _, prefix := range []string{"md-specialized-*", "md-fork-*"} {
-		out, err := c.runCmd(ctx, "", []string{
-			c.Runtime, "images", "--format", "{{.Repository}}", "--filter", "reference=" + prefix,
-		})
+		out, err := c.Runtime.Run(ctx, "", "images", "--format", "{{.Repository}}", "--filter", "reference="+prefix)
 		if err != nil {
 			return nil, fmt.Errorf("listing images: %w", err)
 		}
@@ -495,9 +382,7 @@ func (c *Client) PruneImages(ctx context.Context, stdout, stderr io.Writer) ([]s
 	}
 
 	// Find images used by running md containers.
-	containerOut, err := c.runCmd(ctx, "", []string{
-		c.Runtime, "ps", "-a", "--filter", "name=^md-", "--format", "{{.Image}}",
-	})
+	containerOut, err := c.Runtime.Run(ctx, "", "ps", "-a", "--filter", "name=^md-", "--format", "{{.Image}}")
 	if err != nil {
 		return nil, fmt.Errorf("listing containers: %w", err)
 	}
@@ -516,7 +401,7 @@ func (c *Client) PruneImages(ctx context.Context, stdout, stderr io.Writer) ([]s
 		if _, used := inUse[img]; used {
 			continue
 		}
-		if _, err := c.runCmd(ctx, "", []string{c.Runtime, "rmi", img}); err != nil {
+		if _, err := c.Runtime.Run(ctx, "", "rmi", img); err != nil {
 			_, _ = fmt.Fprintf(stdout, "- Warning: failed to remove %s: %v\n", img, err)
 			continue
 		}
@@ -525,150 +410,10 @@ func (c *Client) PruneImages(ctx context.Context, stdout, stderr io.Writer) ([]s
 	sort.Strings(removed)
 
 	// Clean up BuildKit build cache.
-	if _, err := c.runCmd(ctx, "", []string{c.Runtime, "builder", "prune", "-f"}); err != nil {
+	if _, err := c.Runtime.Run(ctx, "", "builder", "prune", "-f"); err != nil {
 		_, _ = fmt.Fprintf(stdout, "- Warning: pruning build cache: %v\n", err)
 	}
 	return removed, nil
-}
-
-// WatchStats streams resource usage for the named running containers.
-//
-// DiskUsed is unavailable from the runtime stats stream and is set to -1.
-func (c *Client) WatchStats(ctx context.Context, names []string) (iter.Seq2[ContainerStatsSample, error], error) {
-	args := make([]string, 0, 5+len(names))
-	args = append(args, c.Runtime, "stats", "--no-trunc", "--format", "{{json .}}")
-	args = append(args, names...)
-	c.Logger.Log(ctx, slog.LevelDebug, "exec", "cmd", args)
-	cmd := exec.CommandContext(ctx, args[0], args[1:]...) //nolint:gosec // args are trusted container names.
-	cmd.Env = c.commandEnv("LANG=C")
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, fmt.Errorf("%s stats stdout: %w", c.Runtime, err)
-	}
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("%s stats: %w", c.Runtime, err)
-	}
-	return func(yield func(ContainerStatsSample, error) bool) {
-		stoppedEarly := false
-		scanner := bufio.NewScanner(stdout)
-		for scanner.Scan() {
-			line := strings.TrimSpace(scanner.Text())
-			if line == "" {
-				continue
-			}
-			s, name, err := parseStatsLine(line)
-			if err != nil {
-				_ = yield(ContainerStatsSample{}, fmt.Errorf("%s stats: %w", c.Runtime, err))
-				stoppedEarly = true
-				break
-			}
-			s.DiskUsed = -1
-			if !yield(ContainerStatsSample{Name: name, Stats: s}, nil) {
-				stoppedEarly = true
-				break
-			}
-		}
-		if stoppedEarly && ctx.Err() == nil && cmd.Process != nil {
-			_ = cmd.Process.Kill()
-		}
-		scanErr := scanner.Err()
-		waitErr := cmd.Wait()
-		if stoppedEarly || ctx.Err() != nil {
-			return
-		}
-		if scanErr != nil {
-			_ = yield(ContainerStatsSample{}, fmt.Errorf("%s stats: %w", c.Runtime, scanErr))
-			return
-		}
-		if waitErr != nil {
-			if msg := strings.TrimSpace(stderr.String()); msg != "" {
-				waitErr = fmt.Errorf("%w: %s", waitErr, msg)
-			}
-			_ = yield(ContainerStatsSample{}, fmt.Errorf("%s stats: %w", c.Runtime, waitErr))
-		}
-	}, nil
-}
-
-// StatsAll fetches resource usage for multiple containers in batch (2 docker
-// calls instead of 2N). Returns a map keyed by container name.
-func (c *Client) StatsAll(ctx context.Context, names []string) (map[string]*ContainerStats, error) {
-	result := make(map[string]*ContainerStats, len(names))
-	if len(names) == 0 {
-		return result, nil
-	}
-	var mu sync.Mutex
-	var statsErr, inspectErr error
-
-	var wg sync.WaitGroup
-
-	// Batch docker stats (one call). Stopped containers return zeros.
-	wg.Go(func() {
-		args := make([]string, 0, 6+len(names))
-		args = append(args, c.Runtime, "stats", "--no-stream", "--no-trunc", "--format", "{{json .}}")
-		args = append(args, names...)
-		out, err := c.runCmd(ctx, "", args)
-		if err != nil {
-			statsErr = fmt.Errorf("docker stats: %w", err)
-			return
-		}
-		for line := range strings.SplitSeq(out, "\n") {
-			line = strings.TrimSpace(line)
-			if line == "" {
-				continue
-			}
-			s, name, err := parseStatsLine(line)
-			if err != nil {
-				statsErr = fmt.Errorf("docker stats: %w", err)
-				return
-			}
-			mu.Lock()
-			if existing, ok := result[name]; ok {
-				// Inspect goroutine may have already set DiskUsed; preserve it.
-				s.DiskUsed = existing.DiskUsed
-			}
-			result[name] = s
-			mu.Unlock()
-		}
-	})
-
-	// Batch docker inspect --size (one call).
-	wg.Go(func() {
-		args := make([]string, 0, 5+len(names))
-		args = append(args, c.Runtime, "inspect", "--size", "--format", "{{.Name}}\t{{json .SizeRw}}")
-		args = append(args, names...)
-		out, err := c.runCmd(ctx, "", args)
-		if err != nil {
-			inspectErr = fmt.Errorf("docker inspect --size: %w", err)
-			return
-		}
-		for line := range strings.SplitSeq(out, "\n") {
-			line = strings.TrimSpace(line)
-			if line == "" {
-				continue
-			}
-			parts := strings.SplitN(line, "\t", 2)
-			if len(parts) != 2 {
-				continue
-			}
-			name := strings.TrimPrefix(parts[0], "/")
-			var sz int64
-			if err := json.Unmarshal([]byte(parts[1]), &sz); err != nil {
-				continue
-			}
-			mu.Lock()
-			if s, ok := result[name]; ok {
-				s.DiskUsed = sz
-			} else {
-				result[name] = &ContainerStats{DiskUsed: sz}
-			}
-			mu.Unlock()
-		}
-	})
-
-	wg.Wait()
-	return result, errors.Join(statsErr, inspectErr)
 }
 
 // AgentMounts returns runtime mounts for the provided agent path groups.
@@ -732,30 +477,21 @@ func (c *Client) AgentMounts(paths ...AgentPaths) ([]Mount, error) {
 	return mounts, nil
 }
 
-// getHostPort extracts the host port for containerPort from a running
-// container. It uses JSON output instead of Go templates to work around
-// Docker 27's "index of untyped nil" bug when port bindings are nil.
-func (c *Client) getHostPort(ctx context.Context, container, containerPort string) (int32, error) {
-	raw, err := c.runCmd(ctx, "", []string{c.Runtime, "inspect", "--format", "{{json .NetworkSettings.Ports}}", container})
-	if err != nil {
-		return 0, err
+func (c *Client) containerFromRuntime(ctx context.Context, raw containers.Container) (*Container, error) {
+	ct := &Container{
+		Client:    c,
+		Name:      raw.Name,
+		State:     raw.State,
+		CreatedAt: raw.CreatedAt,
+		Labels:    maps.Clone(raw.Labels),
+		SSHPort:   raw.SSHPort,
+		VNCPort:   raw.VNCPort,
 	}
-	var ports map[string][]struct {
-		HostIP   string `json:"HostIp"`
-		HostPort string `json:"HostPort"`
+	if err := ct.loadMDLabels(ctx, raw.Labels); err != nil {
+		return nil, err
 	}
-	if err := json.Unmarshal([]byte(raw), &ports); err != nil {
-		return 0, fmt.Errorf("parsing port map: %w", err)
-	}
-	bindings := ports[containerPort]
-	if len(bindings) == 0 {
-		return 0, nil
-	}
-	port, err := strconv.ParseInt(bindings[0].HostPort, 10, 32)
-	if err != nil {
-		return 0, fmt.Errorf("parsing host port %q: %w", bindings[0].HostPort, err)
-	}
-	return int32(port), nil
+	ct.sshConfigPath = filepath.Join(c.Home, ".ssh", "config.d", ct.Name+".conf")
+	return ct, nil
 }
 
 // runCmd executes a command, captures its output, and returns (stdout, error).
@@ -763,7 +499,7 @@ func (c *Client) getHostPort(ctx context.Context, container, containerPort strin
 func (c *Client) runCmd(ctx context.Context, dir string, args []string) (string, error) {
 	// Command arguments are redacted before logging.
 	// codeql[go/clear-text-logging]
-	c.Logger.Log(ctx, slog.LevelDebug, "exec", "cmd", redactCommandArgsForLog(args))
+	c.Logger.Log(ctx, slog.LevelDebug, "exec", "cmd", containers.RedactCommandArgsForLog(args))
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...) //nolint:gosec // args are from trusted callers
 	cmd.Dir = dir
 	cmd.Env = c.commandEnv("LANG=C")
@@ -776,7 +512,7 @@ func (c *Client) runCmd(ctx context.Context, dir string, args []string) (string,
 func (c *Client) runCmdOut(ctx context.Context, dir string, args []string, stdout, stderr io.Writer) error {
 	// Command arguments are redacted before logging.
 	// codeql[go/clear-text-logging]
-	c.Logger.Log(ctx, slog.LevelDebug, "exec", "cmd", redactCommandArgsForLog(args))
+	c.Logger.Log(ctx, slog.LevelDebug, "exec", "cmd", containers.RedactCommandArgsForLog(args))
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...) //nolint:gosec // args are from trusted callers
 	cmd.Dir = dir
 	cmd.Env = c.commandEnv("LANG=C")
@@ -785,116 +521,10 @@ func (c *Client) runCmdOut(ctx context.Context, dir string, args []string, stdou
 	return cmd.Run()
 }
 
-func redactCommandArgsForLog(args []string) []string {
-	redacted := make([]string, len(args))
-	redactNext := false
-	redactAssignmentNext := false
-	for i, arg := range args {
-		if redactNext {
-			redacted[i] = redactedLogValue
-			redactNext = false
-			continue
-		}
-		if redactAssignmentNext {
-			redacted[i] = redactAssignmentForLog(arg)
-			redactAssignmentNext = false
-			continue
-		}
-		if optionTakesAssignment(arg) {
-			redacted[i] = arg
-			redactAssignmentNext = true
-			continue
-		}
-		if flag, value, ok := strings.Cut(arg, "="); ok {
-			switch {
-			case optionTakesAssignment(flag):
-				redacted[i] = flag + "=" + redactAssignmentForLog(value)
-			case sensitiveOptionName(flag):
-				redacted[i] = flag + "=" + redactedLogValue
-			default:
-				redacted[i] = redactAssignmentForLog(arg)
-			}
-			continue
-		}
-		if sensitiveOptionName(arg) {
-			redacted[i] = arg
-			redactNext = true
-			continue
-		}
-		redacted[i] = redactAssignmentForLog(arg)
-	}
-	return redacted
-}
-
-func optionTakesAssignment(arg string) bool {
-	switch arg {
-	case "-e", "--env", "--label", "--build-arg":
-		return true
-	default:
-		return false
-	}
-}
-
-func redactAssignmentForLog(arg string) string {
-	name, _, ok := strings.Cut(arg, "=")
-	if !ok {
-		return arg
-	}
-	if sensitiveName(name) {
-		return name + "=" + redactedLogValue
-	}
-	if match := sensitiveLogAssignmentPattern.FindStringSubmatch(arg); match != nil {
-		return match[1] + redactedLogValue
-	}
-	return arg
-}
-
-func sensitiveOptionName(arg string) bool {
-	if !strings.HasPrefix(arg, "-") {
-		return false
-	}
-	return sensitiveName(strings.TrimLeft(arg, "-"))
-}
-
-func sensitiveName(name string) bool {
-	compact := sensitiveLogNameReplacer.Replace(strings.ToLower(name))
-	for _, marker := range sensitiveLogNameMarkers {
-		if strings.Contains(compact, marker) {
-			return true
-		}
-	}
-	return false
-}
-
 func (c *Client) commandEnv(extra ...string) []string {
 	overrides := append([]string(nil), c.env...)
 	overrides = append(overrides, extra...)
-	return envWithOverrides(os.Environ(), overrides)
-}
-
-func envWithOverrides(base, overrides []string) []string {
-	env := append([]string(nil), base...)
-	index := make(map[string]int, len(env))
-	for i, kv := range env {
-		name, _, ok := strings.Cut(kv, "=")
-		if ok {
-			index[name] = i
-		}
-	}
-	for _, kv := range overrides {
-		name, _, ok := strings.Cut(kv, "=")
-		if !ok {
-			env = append(env, kv)
-			continue
-		}
-		if i, ok := index[name]; ok {
-			env[i] = kv
-			continue
-		}
-		index[name] = len(env)
-		env = append(env, kv)
-	}
-	return env
+	return containers.EnvWithOverrides(os.Environ(), overrides)
 }
 
 // runGitDir runs a git command with GIT_DIR and GIT_WORK_TREE
@@ -913,62 +543,6 @@ func (c *Client) runGitDir(ctx context.Context, dir, gitDir string, args ...stri
 		return fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, stderr.String())
 	}
 	return nil
-}
-
-// parseStatsLine parses one JSON line from docker stats output into a
-// ContainerStats and returns the container name.
-func parseStatsLine(line string) (*ContainerStats, string, error) {
-	var raw struct {
-		Name     string `json:"Name"`
-		CPUPerc  string `json:"CPUPerc"`
-		MemUsage string `json:"MemUsage"`
-		MemPerc  string `json:"MemPerc"`
-		PIDs     string `json:"PIDs"`
-		NetIO    string `json:"NetIO"`
-		BlockIO  string `json:"BlockIO"`
-	}
-	if err := json.Unmarshal([]byte(line), &raw); err != nil {
-		return nil, "", fmt.Errorf("parsing stats JSON: %w", err)
-	}
-	cpuPerc, err := parsePercent(raw.CPUPerc)
-	if err != nil {
-		return nil, "", fmt.Errorf("parsing CPU%%: %w", err)
-	}
-	memPerc, err := parsePercent(raw.MemPerc)
-	if err != nil {
-		return nil, "", fmt.Errorf("parsing mem%%: %w", err)
-	}
-	memUsed, memLimit, err := parseMemUsage(raw.MemUsage)
-	if err != nil {
-		return nil, "", fmt.Errorf("parsing mem usage: %w", err)
-	}
-	var pids int
-	if raw.PIDs != "N/A" {
-		pids, err = strconv.Atoi(raw.PIDs)
-		if err != nil {
-			return nil, "", fmt.Errorf("parsing PIDs: %w", err)
-		}
-	}
-	netRx, netTx, err := parseIOPair(raw.NetIO)
-	if err != nil {
-		return nil, "", fmt.Errorf("parsing net I/O: %w", err)
-	}
-	blockRead, blockWrite, err := parseIOPair(raw.BlockIO)
-	if err != nil {
-		return nil, "", fmt.Errorf("parsing block I/O: %w", err)
-	}
-	return &ContainerStats{
-		CPUPerc:    cpuPerc,
-		MemUsed:    memUsed,
-		MemLimit:   memLimit,
-		MemPerc:    memPerc,
-		PIDs:       pids,
-		NetRx:      netRx,
-		NetTx:      netTx,
-		BlockRead:  blockRead,
-		BlockWrite: blockWrite,
-		DiskUsed:   -1,
-	}, raw.Name, nil
 }
 
 // cmdErrWithStderr wraps err with the captured stderr from an *exec.ExitError
@@ -1064,115 +638,18 @@ func keysSHA(keysDir string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-func (c *Client) dockerInspectFormat(ctx context.Context, name, format string) (string, error) {
-	return c.runCmd(ctx, "", []string{c.Runtime, "image", "inspect", name, "--format", format})
-}
-
 func (c *Client) getImageVersionLabel(ctx context.Context, imageName string) string {
-	out, err := c.dockerInspectFormat(ctx, imageName, `{{index .Config.Labels "org.opencontainers.image.version"}}`)
+	out, err := c.Runtime.Run(ctx, "", "image", "inspect", imageName, "--format", `{{index .Config.Labels "org.opencontainers.image.version"}}`)
 	if err != nil || out == "" || out == "<no value>" {
 		return ""
 	}
 	return out
 }
 
-func (c *Client) imageArchitecture(ctx context.Context, imageName string) (string, error) {
-	out, err := c.runCmd(ctx, "", []string{c.Runtime, "image", "inspect", imageName})
-	if err != nil {
-		return "", err
-	}
-	return parseImageArchitecture([]byte(out))
-}
-
-func parseImageArchitecture(out []byte) (string, error) {
-	var images []imageInspectJSON
-	if err := json.Unmarshal(out, &images); err != nil {
-		return "", fmt.Errorf("parsing image inspect output: %w", err)
-	}
-	if len(images) == 0 {
-		return "", nil
-	}
-	if images[0].OS != "" {
-		if images[0].OS != "linux" {
-			return "", nil
-		}
-		return images[0].Architecture, nil
-	}
-	if images[0].ImageManifestDescriptor.Platform.OS != "" && images[0].ImageManifestDescriptor.Platform.OS != "linux" {
-		return "", nil
-	}
-	return images[0].ImageManifestDescriptor.Platform.Architecture, nil
-}
-
-// getRemoteManifestDigest queries the registry for the per-architecture
-// manifest digest without downloading layers.
-//
-// For a multi-arch image the digest hierarchy is:
-//
-//	Image Index (manifest list)         sha256:AAA
-//	  └── Per-platform Manifest (amd64) sha256:BBB  ← manifest digest
-//	        ├── Config                  sha256:CCC  ← docker's {{.Id}}
-//	        └── Layers ...
-//
-// We compare manifest digests (sha256:BBB): this is what "docker pull" prints,
-// what {{index .RepoDigests 0}} stores as "repo@sha256:BBB", and what
-// "manifest inspect" returns in manifests[].digest. Any change to layers,
-// config, or manifest metadata produces a different manifest digest, making it
-// a reliable staleness signal.
-//
-// Both Docker schema v2 manifest lists and OCI image indexes share the same
-// "manifests[].{digest, platform}" JSON structure, so one parser covers both
-// runtimes and both formats.
-func (c *Client) getRemoteManifestDigest(ctx context.Context, image, arch string) (string, error) {
-	c.Logger.Log(ctx, slog.LevelDebug, "fetching remote manifest digest", "image", image, "arch", arch)
-	out, err := c.runCmd(ctx, "", []string{c.Runtime, "manifest", "inspect", image})
-	if err != nil {
-		return "", err
-	}
-	var index manifestIndex
-	if err := json.Unmarshal([]byte(out), &index); err != nil {
-		return "", fmt.Errorf("parsing manifest inspect output: %w", err)
-	}
-	for _, m := range index.Manifests {
-		if m.Platform.Architecture == arch && m.Platform.OS == "linux" && m.Digest != "" {
-			return m.Digest, nil
-		}
-	}
-	if len(index.Manifests) == 1 && index.Manifests[0].Digest != "" {
-		return index.Manifests[0].Digest, nil
-	}
-	return "", fmt.Errorf("no manifest for linux/%s in %s", arch, image)
-}
-
 type remoteDigestEntry struct {
 	digest  string
 	err     error
 	expires time.Time
-}
-
-type manifestPlatform struct {
-	Architecture string `json:"architecture"`
-	OS           string `json:"os"`
-}
-
-type manifestEntry struct {
-	Digest   string           `json:"digest"`
-	Platform manifestPlatform `json:"platform"`
-}
-
-type manifestIndex struct {
-	Manifests []manifestEntry `json:"manifests"`
-}
-
-type imageManifestDescriptor struct {
-	Platform manifestPlatform `json:"platform"`
-}
-
-type imageInspectJSON struct {
-	Architecture string `json:"Architecture"`
-	OS           string `json:"Os"`
-
-	ImageManifestDescriptor imageManifestDescriptor `json:"ImageManifestDescriptor"`
 }
 
 type activeCM struct {
@@ -1197,16 +674,16 @@ type imageBuildCacheEntry struct {
 // to skip repeated registry round-trips. When zero, the registry is always queried.
 func (c *Client) cachedRemoteManifestDigest(ctx context.Context, image, arch string) (string, error) {
 	if c.DigestCacheTTL == 0 {
-		return c.getRemoteManifestDigest(ctx, image, arch)
+		return c.Runtime.RemoteManifestDigest(ctx, image, arch)
 	}
-	key := c.Runtime + "\x00" + image + "\x00" + arch
+	key := c.Runtime.Name() + "\x00" + image + "\x00" + arch
 	c.mu.Lock()
 	if e, ok := c.digestCache[key]; ok && time.Now().Before(e.expires) {
 		c.mu.Unlock()
 		return e.digest, e.err
 	}
 	c.mu.Unlock()
-	digest, err := c.getRemoteManifestDigest(ctx, image, arch)
+	digest, err := c.Runtime.RemoteManifestDigest(ctx, image, arch)
 	c.mu.Lock()
 	c.digestCache[key] = remoteDigestEntry{digest: digest, err: err, expires: time.Now().Add(c.DigestCacheTTL)}
 	c.mu.Unlock()
@@ -1351,12 +828,12 @@ func (c *Client) invalidateImageBuildCache() {
 func (c *Client) imageBuildNeededSlow(ctx context.Context, imageName, baseImage, platform, contextSHA, activeKey string) bool {
 	c.Logger.Log(ctx, slog.LevelDebug, "checking if image build needed", "image", imageName, "base", baseImage)
 	// Quick check: does the specialized image have labels at all?
-	currentDigest, err := c.dockerInspectFormat(ctx, imageName, `{{index .Config.Labels "md.base_digest"}}`)
+	currentDigest, err := c.Runtime.Run(ctx, "", "image", "inspect", imageName, "--format", `{{index .Config.Labels "md.base_digest"}}`)
 	if err != nil || currentDigest == "" || currentDigest == "<no value>" {
 		c.Logger.Log(ctx, slog.LevelDebug, "build needed: no base_digest label", "image", imageName)
 		return true
 	}
-	currentContext, err := c.dockerInspectFormat(ctx, imageName, `{{index .Config.Labels "md.context_sha"}}`)
+	currentContext, err := c.Runtime.Run(ctx, "", "image", "inspect", imageName, "--format", `{{index .Config.Labels "md.context_sha"}}`)
 	if err != nil || currentContext == "" || currentContext == "<no value>" {
 		c.Logger.Log(ctx, slog.LevelDebug, "build needed: no context_sha label", "image", imageName)
 		return true
@@ -1364,9 +841,9 @@ func (c *Client) imageBuildNeededSlow(ctx context.Context, imageName, baseImage,
 
 	// Get the base image digest.
 	var baseDigest string
-	if d, err := c.dockerInspectFormat(ctx, baseImage, "{{index .RepoDigests 0}}"); err == nil && d != "" {
+	if d, err := c.Runtime.Run(ctx, "", "image", "inspect", baseImage, "--format", "{{index .RepoDigests 0}}"); err == nil && d != "" {
 		baseDigest = d
-	} else if id, err := c.dockerInspectFormat(ctx, baseImage, "{{.Id}}"); err == nil {
+	} else if id, err := c.Runtime.Run(ctx, "", "image", "inspect", baseImage, "--format", "{{.Id}}"); err == nil {
 		baseDigest = id
 	} else {
 		c.Logger.Log(ctx, slog.LevelDebug, "build needed: cannot get base image digest", "base", baseImage)
@@ -1377,7 +854,7 @@ func (c *Client) imageBuildNeededSlow(ctx context.Context, imageName, baseImage,
 		return true
 	}
 
-	currentArch, err := c.imageArchitecture(ctx, imageName)
+	currentArch, err := c.Runtime.ImageArchitecture(ctx, imageName)
 	if err == nil && currentArch != "" {
 		expectedArch, err := Platform(platform).Architecture()
 		if err != nil {
@@ -1396,10 +873,10 @@ func (c *Client) imageBuildNeededSlow(ctx context.Context, imageName, baseImage,
 	// RepoDigests[0] (manifest list digest) against the per-platform entry.
 	// Errors are intentionally ignored: a registry failure is not a reason to rebuild;
 	// the base digest label comparison above already catches locally-pulled updates.
-	isLocal := c.baseImageIsLocal(ctx, baseImage)
+	isLocal := c.Runtime.BaseImageIsLocal(ctx, baseImage)
 	if !isLocal {
 		c.Logger.Log(ctx, slog.LevelDebug, "checking remote manifest digest", "base", baseImage)
-		storedManifest, err := c.dockerInspectFormat(ctx, imageName, `{{index .Config.Labels "md.base_manifest_digest"}}`)
+		storedManifest, err := c.Runtime.Run(ctx, "", "image", "inspect", imageName, "--format", `{{index .Config.Labels "md.base_manifest_digest"}}`)
 		if err == nil && storedManifest != "" && storedManifest != "<no value>" {
 			arch, err := Platform(platform).Architecture()
 			if err != nil {
@@ -1418,7 +895,7 @@ func (c *Client) imageBuildNeededSlow(ctx context.Context, imageName, baseImage,
 		return true
 	}
 
-	currentKey, err := c.dockerInspectFormat(ctx, imageName, `{{index .Config.Labels "md.cache_key"}}`)
+	currentKey, err := c.Runtime.Run(ctx, "", "image", "inspect", imageName, "--format", `{{index .Config.Labels "md.cache_key"}}`)
 	if err != nil || currentKey == "<no value>" {
 		currentKey = ""
 	}
@@ -1429,22 +906,6 @@ func (c *Client) imageBuildNeededSlow(ctx context.Context, imageName, baseImage,
 
 	c.Logger.Log(ctx, slog.LevelDebug, "image is up to date", "image", imageName)
 	return false
-}
-
-func (c *Client) baseImageIsLocal(ctx context.Context, image string) bool {
-	if hasExplicitRegistry(image) {
-		return false
-	}
-	_, err := c.runCmd(ctx, "", []string{c.Runtime, "image", "inspect", "--format", "{{.Id}}", image})
-	return err == nil
-}
-
-func hasExplicitRegistry(image string) bool {
-	first, _, ok := strings.Cut(image, "/")
-	if !ok {
-		return false
-	}
-	return first == "localhost" || strings.ContainsAny(first, ".:")
 }
 
 // resolveCaches determines which caches have existing host directories and
@@ -1626,10 +1087,10 @@ func (c *Client) buildSpecializedImage(ctx context.Context, stdout, stderr io.Wr
 	// References without an explicit registry are ambiguous: they may name a
 	// local image tag or a Docker Hub repository. Prefer an existing local
 	// image; otherwise pull from the default registry.
-	isLocal := c.baseImageIsLocal(ctx, baseImage)
+	isLocal := c.Runtime.BaseImageIsLocal(ctx, baseImage)
 	remoteBasePulled := false
 	if isLocal {
-		if _, err := c.runCmd(ctx, "", []string{c.Runtime, "image", "inspect", "--format", "{{.Id}}", baseImage}); err != nil {
+		if _, err := c.Runtime.Run(ctx, "", "image", "inspect", baseImage, "--format", "{{.Id}}"); err != nil {
 			return fmt.Errorf("local image %s not found; build it first with 'md build-image'", baseImage)
 		}
 		if !quiet {
@@ -1637,17 +1098,17 @@ func (c *Client) buildSpecializedImage(ctx context.Context, stdout, stderr io.Wr
 		}
 	} else {
 		// Compare the local image ID before and after pull to detect changes.
-		idBefore, _ := c.runCmd(ctx, "", []string{c.Runtime, "image", "inspect", "--format", "{{.Id}}", baseImage})
+		idBefore, _ := c.Runtime.Run(ctx, "", "image", "inspect", baseImage, "--format", "{{.Id}}")
 		if !quiet {
 			_, _ = fmt.Fprintf(stdout, "- Pulling base image %s ...\n", baseImage)
 		}
 		var pullErr error
 		if quiet {
-			if _, err := c.runCmd(ctx, "", []string{c.Runtime, "pull", "--platform", platform, baseImage}); err != nil {
+			if _, err := c.Runtime.Run(ctx, "", "pull", "--platform", platform, baseImage); err != nil {
 				pullErr = cmdErrWithStderr("pulling base image", err)
 			}
 		} else {
-			if err := c.runCmdOut(ctx, "", []string{c.Runtime, "pull", "--platform", platform, baseImage}, stdout, stderr); err != nil {
+			if err := c.Runtime.RunOut(ctx, "", stdout, stderr, "pull", "--platform", platform, baseImage); err != nil {
 				pullErr = fmt.Errorf("pulling base image: %w", err)
 			}
 		}
@@ -1661,7 +1122,7 @@ func (c *Client) buildSpecializedImage(ctx context.Context, stdout, stderr io.Wr
 			}
 		} else {
 			remoteBasePulled = true
-			idAfter, _ := c.runCmd(ctx, "", []string{c.Runtime, "image", "inspect", "--format", "{{.Id}}", baseImage})
+			idAfter, _ := c.Runtime.Run(ctx, "", "image", "inspect", baseImage, "--format", "{{.Id}}")
 			if !quiet {
 				if idBefore != "" && idBefore == idAfter {
 					_, _ = fmt.Fprintf(stdout, "  Base image is up to date.\n")
@@ -1674,13 +1135,13 @@ func (c *Client) buildSpecializedImage(ctx context.Context, stdout, stderr io.Wr
 
 	c.Logger.Log(ctx, slog.LevelDebug, "base image ready, fetching base image digest")
 	// Get base image digest for label.
-	baseDigest, err := c.runCmd(ctx, "", []string{c.Runtime, "image", "inspect", "--format", "{{index .RepoDigests 0}}", baseImage})
+	baseDigest, err := c.Runtime.Run(ctx, "", "image", "inspect", baseImage, "--format", "{{index .RepoDigests 0}}")
 	if err != nil || baseDigest == "" {
-		baseDigest, _ = c.runCmd(ctx, "", []string{c.Runtime, "image", "inspect", "--format", "{{.Id}}", baseImage})
+		baseDigest, _ = c.Runtime.Run(ctx, "", "image", "inspect", baseImage, "--format", "{{.Id}}")
 	}
 	var manifestDigest string
 	if remoteBasePulled {
-		manifestDigest, _ = c.getRemoteManifestDigest(ctx, baseImage, arch)
+		manifestDigest, _ = c.Runtime.RemoteManifestDigest(ctx, baseImage, arch)
 	}
 
 	contextSHA, err := keysSHA(c.keysDir)
@@ -1749,20 +1210,20 @@ func (c *Client) buildSpecializedImage(ctx context.Context, stdout, stderr io.Wr
 	// Build the image. --no-cache forces all layers to rebuild (prevents stale
 	// results). We omit --pull so BuildKit won't re-pull the base (we already
 	// pulled above).
-	buildCmd := []string{c.Runtime, "build", "--no-cache", "--platform", platform, "-t", imageName}
+	buildArgs := []string{"build", "--no-cache", "--platform", platform, "-t", imageName}
 	for _, a := range active {
-		buildCmd = append(buildCmd, "--build-context", fmt.Sprintf("cache-%s=%s", a.cm.Name, filepath.ToSlash(a.hostPath)))
+		buildArgs = append(buildArgs, "--build-context", fmt.Sprintf("cache-%s=%s", a.cm.Name, filepath.ToSlash(a.hostPath)))
 	}
-	buildCmd = append(buildCmd, filepath.ToSlash(tmpDir))
+	buildArgs = append(buildArgs, filepath.ToSlash(tmpDir))
 
 	if quiet {
-		if _, err := c.runCmd(ctx, "", buildCmd); err != nil {
+		if _, err := c.Runtime.Run(ctx, "", buildArgs...); err != nil {
 			buildErr := cmdErrWithStderr("building image", err)
 			if isStaleBuilderCacheErr(buildErr) {
-				if _, pruneErr := c.runCmd(ctx, "", []string{c.Runtime, "builder", "prune", "-f"}); pruneErr != nil {
+				if _, pruneErr := c.Runtime.Run(ctx, "", "builder", "prune", "-f"); pruneErr != nil {
 					return buildErr
 				}
-				if _, err2 := c.runCmd(ctx, "", buildCmd); err2 != nil {
+				if _, err2 := c.Runtime.Run(ctx, "", buildArgs...); err2 != nil {
 					return cmdErrWithStderr("building image", err2)
 				}
 				return nil
@@ -1770,14 +1231,14 @@ func (c *Client) buildSpecializedImage(ctx context.Context, stdout, stderr io.Wr
 			return buildErr
 		}
 	} else {
-		if err := c.runCmdOut(ctx, "", buildCmd, stdout, stderr); err != nil {
+		if err := c.Runtime.RunOut(ctx, "", stdout, stderr, buildArgs...); err != nil {
 			buildErr := fmt.Errorf("building image: %w", err)
 			if isStaleBuilderCacheErr(buildErr) {
 				_, _ = fmt.Fprintln(stdout, "- Stale BuildKit cache detected; pruning and retrying ...")
-				if _, pruneErr := c.runCmd(ctx, "", []string{c.Runtime, "builder", "prune", "-f"}); pruneErr != nil {
+				if _, pruneErr := c.Runtime.Run(ctx, "", "builder", "prune", "-f"); pruneErr != nil {
 					return buildErr
 				}
-				if err2 := c.runCmdOut(ctx, "", buildCmd, stdout, stderr); err2 != nil {
+				if err2 := c.Runtime.RunOut(ctx, "", stdout, stderr, buildArgs...); err2 != nil {
 					return fmt.Errorf("building image: %w", err2)
 				}
 				return nil

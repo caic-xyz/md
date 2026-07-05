@@ -23,6 +23,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/caic-xyz/md/containers"
 )
 
 const (
@@ -33,8 +35,35 @@ const (
 	fakeSSHLogEnv           = "MD_TEST_FAKE_SSH_LOG"
 )
 
+var testLogStart = time.Now()
+
 func testLogger(t testing.TB) *slog.Logger {
-	return slog.New(slog.NewTextHandler(testLogWriter{t: t}, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	return slog.New(slog.NewTextHandler(testLogWriter{t: t}, testLoggerOptions()))
+}
+
+func testLoggerOptions() *slog.HandlerOptions {
+	return &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+		ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
+			if a.Key == slog.TimeKey {
+				return slog.Int64("ms", time.Since(testLogStart).Milliseconds())
+			}
+			return a
+		},
+	}
+}
+
+func testRuntime(t testing.TB, name string, logger Logger, env []string) containers.Runtime {
+	r, err := containers.New(name, logger, env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+func testClient(t testing.TB) *Client {
+	logger := testLogger(t)
+	return &Client{Logger: logger, Runtime: testRuntime(t, "docker", logger, nil)}
 }
 
 type testLogWriter struct {
@@ -122,37 +151,6 @@ func TestHarnessMounts(t *testing.T) {
 	}
 }
 
-func TestEnvWithOverrides(t *testing.T) {
-	t.Parallel()
-	got := envWithOverrides(
-		[]string{"HOME=/real", "PATH=/bin", "KEEP=1"},
-		[]string{"HOME=/tmp/md", "XDG_CONFIG_HOME=/tmp/md/.config"},
-	)
-
-	counts := map[string]int{}
-	values := map[string]string{}
-	for _, kv := range got {
-		k, v, ok := strings.Cut(kv, "=")
-		if !ok {
-			continue
-		}
-		counts[k]++
-		values[k] = v
-	}
-	if counts["HOME"] != 1 {
-		t.Fatalf("HOME count = %d, want 1 in %v", counts["HOME"], got)
-	}
-	if values["HOME"] != "/tmp/md" {
-		t.Fatalf("HOME = %q, want /tmp/md", values["HOME"])
-	}
-	if values["PATH"] != "/bin" {
-		t.Fatalf("PATH = %q, want /bin", values["PATH"])
-	}
-	if values["XDG_CONFIG_HOME"] != "/tmp/md/.config" {
-		t.Fatalf("XDG_CONFIG_HOME = %q, want /tmp/md/.config", values["XDG_CONFIG_HOME"])
-	}
-}
-
 func TestWellKnownCaches(t *testing.T) {
 	t.Parallel()
 	if len(WellKnownCaches) == 0 {
@@ -184,8 +182,8 @@ func TestClient(t *testing.T) {
 	t.Run("Logger", func(t *testing.T) {
 		t.Parallel()
 		var buf bytes.Buffer
-		logger := slog.New(slog.NewTextHandler(io.MultiWriter(&buf, testLogWriter{t: t}), &slog.HandlerOptions{Level: slog.LevelDebug}))
-		c := &Client{Logger: logger}
+		logger := slog.New(slog.NewTextHandler(io.MultiWriter(&buf, testLogWriter{t: t}), testLoggerOptions()))
+		c := &Client{Logger: logger, Runtime: testRuntime(t, "docker", logger, nil)}
 		c.Logger.Log(t.Context(), slog.LevelDebug, "client")
 		ct := &Container{Client: c, Name: "md-test"}
 		ct.Logger.Log(t.Context(), slog.LevelDebug, "container")
@@ -204,14 +202,15 @@ func TestClient(t *testing.T) {
 			t.Fatal(err)
 		}
 		var log bytes.Buffer
-		logger := slog.New(slog.NewTextHandler(io.MultiWriter(&log, testLogWriter{t: t}), &slog.HandlerOptions{Level: slog.LevelDebug}))
+		logger := slog.New(slog.NewTextHandler(io.MultiWriter(&log, testLogWriter{t: t}), testLoggerOptions()))
+		env := []string{
+			fakeRuntimeEnv + "=1",
+			fakeRuntimeLogEnv + "=" + filepath.Join(t.TempDir(), "runtime.log"),
+		}
 		c := &Client{
 			Logger:  logger,
-			Runtime: rt,
-			env: []string{
-				fakeRuntimeEnv + "=1",
-				fakeRuntimeLogEnv + "=" + filepath.Join(t.TempDir(), "runtime.log"),
-			},
+			Runtime: testRuntime(t, rt, logger, env),
+			env:     env,
 		}
 		args := []string{
 			rt, "build",
@@ -244,90 +243,14 @@ func TestClient(t *testing.T) {
 			}
 		}
 	})
-	t.Run("WatchDieEvents", func(t *testing.T) {
-		t.Parallel()
-		t.Run("valid", func(t *testing.T) {
-			t.Parallel()
-			tests := []struct {
-				name string
-				in   string
-				want ContainerEvent
-			}{
-				{
-					name: "docker",
-					in:   `{"Actor":{"Attributes":{"name":"md-docker","image":"img"}}}`,
-					want: ContainerEvent{Name: "md-docker", Attributes: map[string]string{"image": "img"}},
-				},
-				{
-					name: "podman",
-					in:   `{"Name":"md-podman","Attributes":{"image":"img"}}`,
-					want: ContainerEvent{Name: "md-podman", Attributes: map[string]string{"image": "img"}},
-				},
-			}
-			for _, tt := range tests {
-				t.Run(tt.name, func(t *testing.T) {
-					t.Parallel()
-					ev, ok := parseContainerEvent([]byte(tt.in))
-					if !ok {
-						t.Fatal("parseContainerEvent returned ok=false")
-					}
-					if ev.Name != tt.want.Name || ev.Attributes["image"] != tt.want.Attributes["image"] {
-						t.Fatalf("event = %+v, want %+v", ev, tt.want)
-					}
-				})
-			}
-		})
-		t.Run("error", func(t *testing.T) {
-			t.Parallel()
-			if _, ok := parseContainerEvent([]byte(`{"Attributes":{"image":"img"}}`)); ok {
-				t.Fatal("parseContainerEvent ok=true, want false")
-			}
-		})
-	})
-	t.Run("WatchStats", func(t *testing.T) {
-		t.Parallel()
-		rt, err := os.Executable()
-		if err != nil {
-			t.Fatal(err)
-		}
-		c := &Client{
-			Logger:  testLogger(t),
-			Runtime: rt,
-			env: []string{
-				fakeRuntimeEnv + "=1",
-				fakeRuntimeLogEnv + "=" + filepath.Join(t.TempDir(), "runtime.log"),
-				fakeRuntimeLocalBaseEnv + "=0",
-			},
-		}
-		stats, err := c.WatchStats(t.Context(), []string{"md-one"})
-		if err != nil {
-			t.Fatal(err)
-		}
-		var got []ContainerStatsSample
-		for s, err := range stats {
-			if err != nil {
-				t.Fatal(err)
-			}
-			got = append(got, s)
-		}
-		if len(got) != 1 {
-			t.Fatalf("stats len = %d, want 1", len(got))
-		}
-		if got[0].Name != "md-one" || got[0].Stats.CPUPerc != 1.5 || got[0].Stats.PIDs != 3 {
-			t.Fatalf("stats = %+v", got[0])
-		}
-		if got[0].Stats.DiskUsed != -1 {
-			t.Fatalf("DiskUsed = %d, want -1", got[0].Stats.DiskUsed)
-		}
-	})
 	t.Run("AgentMounts", func(t *testing.T) {
 		t.Parallel()
 		home := t.TempDir()
-		c, err := newClient(home, "docker", io.Discard)
+		logger := testLogger(t)
+		c, err := newClient(home, logger, testRuntime(t, "docker", logger, nil), io.Discard)
 		if err != nil {
 			t.Fatalf("newClient: %v", err)
 		}
-		c.Logger = testLogger(t)
 		mounts, err := c.AgentMounts(HarnessMounts[HarnessClaude])
 		if err != nil {
 			t.Fatalf("AgentMounts: %v", err)
@@ -366,7 +289,7 @@ func TestClient(t *testing.T) {
 	})
 	t.Run("Container", func(t *testing.T) {
 		t.Parallel()
-		c := &Client{Logger: testLogger(t)}
+		c := testClient(t)
 		tests := []struct {
 			name     string
 			gitRoot  string
@@ -398,47 +321,22 @@ func TestClient(t *testing.T) {
 		t.Run("new_defaults_to_docker", func(t *testing.T) {
 			t.Parallel()
 			tmp := t.TempDir()
-			c, err := newClient(tmp, "", io.Discard)
+			c, err := newClient(tmp, testLogger(t), nil, io.Discard)
 			if err != nil {
 				t.Fatal(err)
 			}
-			c.Logger = testLogger(t)
-			if c.Runtime == "" {
+			if c.Runtime == nil || c.Runtime.Name() == "" {
 				t.Error("New() should set Runtime")
 			}
 		})
 		t.Run("explicit", func(t *testing.T) {
 			t.Parallel()
-			c := &Client{Logger: testLogger(t), Runtime: "podman"}
-			if c.Runtime != "podman" {
-				t.Errorf("Runtime = %q, want %q", c.Runtime, "podman")
+			logger := testLogger(t)
+			c := &Client{Logger: logger, Runtime: testRuntime(t, "podman", logger, nil)}
+			if c.Runtime.Name() != "podman" {
+				t.Errorf("Runtime.Name() = %q, want %q", c.Runtime.Name(), "podman")
 			}
 		})
-	})
-}
-
-func TestDetectRuntime(t *testing.T) {
-	t.Parallel()
-	t.Run("fallback_to_docker", func(t *testing.T) {
-		t.Parallel()
-		lookPath := func(name string) (string, error) {
-			return "", exec.ErrNotFound
-		}
-		if got := detectRuntime(lookPath); got != "docker" {
-			t.Errorf("detectRuntime() = %q, want %q (fallback)", got, "docker")
-		}
-	})
-	t.Run("finds_podman_when_no_docker", func(t *testing.T) {
-		t.Parallel()
-		lookPath := func(name string) (string, error) {
-			if name == "podman" {
-				return "/usr/bin/podman", nil
-			}
-			return "", exec.ErrNotFound
-		}
-		if got := detectRuntime(lookPath); got != "podman" {
-			t.Errorf("detectRuntime() = %q, want %q", got, "podman")
-		}
 	})
 }
 
@@ -495,9 +393,9 @@ func newTestClient(t *testing.T, home, runtimePath string) *Client {
 		XDGStateHome:  filepath.Join(home, ".local", "state"),
 		HostKeyPath:   filepath.Join(home, ".config", "md", "ssh_host_ed25519_key"),
 		UserKeyPath:   filepath.Join(home, ".ssh", "md"),
-		Runtime:       runtimePath,
 		Logger:        testLogger(t),
 	}
+	c.Runtime = testRuntime(t, runtimePath, c.Logger, nil)
 	c.keysDir = filepath.Join(c.XDGConfigHome, "md")
 	if err := c.setupSSH(io.Discard); err != nil {
 		t.Fatal(err)
@@ -719,68 +617,27 @@ func TestBaseImageIsLocal(t *testing.T) {
 			"ubuntu:latest",
 			"myteam/image:latest",
 		} {
-			c := &Client{Logger: testLogger(t), Runtime: "true"}
-			if !c.baseImageIsLocal(t.Context(), image) {
-				t.Errorf("baseImageIsLocal(%q) = false, want true", image)
+			logger := testLogger(t)
+			c := &Client{Logger: logger, Runtime: testRuntime(t, "true", logger, nil)}
+			if !c.Runtime.BaseImageIsLocal(t.Context(), image) {
+				t.Errorf("BaseImageIsLocal(%q) = false, want true", image)
 			}
 		}
 	})
 	t.Run("error", func(t *testing.T) {
 		t.Parallel()
-		c := &Client{Logger: testLogger(t), Runtime: "false"}
+		logger := testLogger(t)
+		c := &Client{Logger: logger, Runtime: testRuntime(t, "false", logger, nil)}
 		for _, image := range []string{"ubuntu:latest", "md-user-local:latest", "myteam/image:latest"} {
-			if c.baseImageIsLocal(t.Context(), image) {
-				t.Errorf("baseImageIsLocal(%q) = true, want false", image)
+			if c.Runtime.BaseImageIsLocal(t.Context(), image) {
+				t.Errorf("BaseImageIsLocal(%q) = true, want false", image)
 			}
 		}
-		c = &Client{Logger: testLogger(t), Runtime: "true"}
+		c = &Client{Logger: logger, Runtime: testRuntime(t, "true", logger, nil)}
 		for _, image := range []string{"docker.io/library/ubuntu:latest", "ghcr.io/caic-xyz/md-user:latest", "localhost:5000/md-user:latest"} {
-			if c.baseImageIsLocal(t.Context(), image) {
-				t.Errorf("baseImageIsLocal(%q) = true, want false", image)
+			if c.Runtime.BaseImageIsLocal(t.Context(), image) {
+				t.Errorf("BaseImageIsLocal(%q) = true, want false", image)
 			}
-		}
-	})
-}
-
-func TestHasExplicitRegistry(t *testing.T) {
-	t.Parallel()
-	t.Run("valid", func(t *testing.T) {
-		t.Parallel()
-		for _, image := range []string{"docker.io/library/ubuntu:latest", "ghcr.io/caic-xyz/md-user:latest", "localhost/md-user:latest", "localhost:5000/md-user:latest"} {
-			if !hasExplicitRegistry(image) {
-				t.Errorf("hasExplicitRegistry(%q) = false, want true", image)
-			}
-		}
-	})
-	t.Run("error", func(t *testing.T) {
-		t.Parallel()
-		for _, image := range []string{"ubuntu:latest", "md-user-local:latest", "myteam/image:latest", "ubuntu@sha256:0123456789abcdef"} {
-			if hasExplicitRegistry(image) {
-				t.Errorf("hasExplicitRegistry(%q) = true, want false", image)
-			}
-		}
-	})
-}
-
-func TestIsRootlessPodman(t *testing.T) {
-	t.Parallel()
-	t.Run("docker", func(t *testing.T) {
-		t.Parallel()
-		if isRootlessPodman("docker") {
-			t.Error("isRootlessPodman(\"docker\") = true, want false")
-		}
-	})
-	t.Run("podman", func(t *testing.T) {
-		t.Parallel()
-		got := isRootlessPodman("podman")
-		if runtime.GOOS == "linux" {
-			// On Linux, result depends on whether tests run as root.
-			want := os.Getuid() != 0
-			if got != want {
-				t.Errorf("isRootlessPodman(\"podman\") = %v, want %v (uid=%d)", got, want, os.Getuid())
-			}
-		} else if got {
-			t.Error("isRootlessPodman(\"podman\") = true on non-Linux, want false")
 		}
 	})
 }

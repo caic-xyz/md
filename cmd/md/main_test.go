@@ -11,12 +11,36 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/caic-xyz/md"
+	"github.com/caic-xyz/md/containers"
 )
 
+var testLogStart = time.Now()
+
 func testLogger(t testing.TB) *slog.Logger {
-	return slog.New(slog.NewTextHandler(testLogWriter{t: t}, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	return slog.New(slog.NewTextHandler(testLogWriter{t: t}, testLoggerOptions()))
+}
+
+func testLoggerOptions() *slog.HandlerOptions {
+	return &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+		ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
+			if a.Key == slog.TimeKey {
+				return slog.Int64("ms", time.Since(testLogStart).Milliseconds())
+			}
+			return a
+		},
+	}
+}
+
+func mustRuntime(t testing.TB, logger md.Logger, name string) containers.Runtime {
+	r, err := containers.New(name, logger, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
 }
 
 type testLogWriter struct {
@@ -55,7 +79,8 @@ func TestContainerFlags(t *testing.T) {
 
 func TestNewRunContainer(t *testing.T) {
 	t.Parallel()
-	client := &md.Client{Logger: testLogger(t)}
+	logger := testLogger(t)
+	client := &md.Client{Logger: logger, Runtime: mustRuntime(t, logger, "docker")}
 	source := &md.Container{
 		Client: client,
 		Repos: []md.Repo{

@@ -20,7 +20,7 @@ func ExampleContainer() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	client, err := md.New(os.Stdout)
+	client, err := md.New(nil, nil, os.Stdout)
 	if err != nil {
 		_, _ = fmt.Fprintln(os.Stderr, err)
 		return
