@@ -303,7 +303,7 @@ func TestClient(t *testing.T) {
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {
 				t.Parallel()
-				ct, err := c.Container(Repo{GitRoot: tt.gitRoot, Branch: "main"})
+				ct, err := c.Container(Repo{GitRoot: tt.gitRoot, Branches: []string{"main"}})
 				if err != nil {
 					t.Fatal(err)
 				}

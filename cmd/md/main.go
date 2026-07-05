@@ -287,8 +287,9 @@ func (a *app) findContainerAndRepo(ctx context.Context, cf *containerFlags) (*md
 	var matched []*md.Container
 	var matchedIdx []int
 	for _, ct := range cts {
-		for i, repo := range ct.Repos {
-			if repo.GitRoot == g.Root && (branch == "" || repo.Branch == branch) {
+		for i := range ct.Repos {
+			repo := &ct.Repos[i]
+			if repo.GitRoot == g.Root && len(repo.Branches) != 0 && (branch == "" || slices.Contains(repo.Branches, branch)) {
 				matched = append(matched, ct)
 				matchedIdx = append(matchedIdx, i)
 				break
@@ -310,8 +311,8 @@ func (a *app) findContainerAndRepo(ctx context.Context, cf *containerFlags) (*md
 }
 
 // newContainer resolves a Container from flags. extraRepoSpecs holds
-// additional "path[:branch]" strings (e.g. from -extra-repo in cmdStart).
-func (a *app) newContainer(ctx context.Context, cf *containerFlags, extraRepoSpecs []string) (*md.Container, error) {
+// additional "path[:branch1[,branch2,...]]" strings (e.g. from -extra-repo in cmdStart).
+func (a *app) newContainer(ctx context.Context, cf *containerFlags, extraRepoSpecs, extraBranches []string) (*md.Container, error) {
 	c, err := a.newClient()
 	if err != nil {
 		return nil, err
@@ -334,16 +335,20 @@ func (a *app) newContainer(ctx context.Context, cf *containerFlags, extraRepoSpe
 		if err := os.Chdir(g.Root); err != nil {
 			return nil, err
 		}
-		var branch string
+		var primary string
 		if cf.branch != nil && *cf.branch != "" {
-			branch = *cf.branch
+			primary = *cf.branch
 		} else {
-			branch, err = g.CurrentBranch(ctx)
+			primary, err = g.CurrentBranch(ctx)
 			if err != nil {
 				return nil, fmt.Errorf("detached HEAD in %s: check out a named branch or use -b to specify one", g.Root)
 			}
 		}
-		repos = append(repos, md.Repo{GitRoot: g.Root, Branch: branch})
+		branches := append([]string{primary}, extraBranches...)
+		if err := validateBranchesExist(ctx, g, branches, "repo "+g.Root); err != nil {
+			return nil, err
+		}
+		repos = append(repos, md.Repo{GitRoot: g.Root, Branches: branches})
 	} else if cf.repo != nil && *cf.repo != "" {
 		// Explicit -repo that isn't a git root is an error.
 		return nil, fmt.Errorf("repo %s: %w", primaryPath, gitErr)
@@ -358,24 +363,62 @@ func (a *app) newContainer(ctx context.Context, cf *containerFlags, extraRepoSpe
 	return c.Container(repos...)
 }
 
-// resolveRepoSpecs resolves "path[:branch]" specs into Repos.
+// resolveRepoSpecs resolves "path[:branch1[,branch2,...]]" specs into Repos.
+// The first branch is the primary; extras are also available in the container.
 func resolveRepoSpecs(ctx context.Context, logger md.Logger, specs []string) ([]md.Repo, error) {
 	repos := make([]md.Repo, 0, len(specs))
 	for _, spec := range specs {
-		path, branch, _ := strings.Cut(spec, ":")
+		path, branches, _ := strings.Cut(spec, ":")
 		g, err := git.RootDir(ctx, path, logger)
 		if err != nil {
 			return nil, fmt.Errorf("extra repo %s: %w", path, err)
 		}
-		if branch == "" {
-			branch, err = g.CurrentBranch(ctx)
+		branchList, err := splitBranches(branches)
+		if err != nil {
+			return nil, fmt.Errorf("extra repo %s: %w", path, err)
+		}
+		if len(branchList) == 0 {
+			b, err := g.CurrentBranch(ctx)
 			if err != nil {
 				return nil, fmt.Errorf("extra repo %s: %w", path, err)
 			}
+			branchList = []string{b}
 		}
-		repos = append(repos, md.Repo{GitRoot: g.Root, Branch: branch})
+		if err := validateBranchesExist(ctx, g, branchList, "extra repo "+g.Root); err != nil {
+			return nil, err
+		}
+		repos = append(repos, md.Repo{GitRoot: g.Root, Branches: branchList})
 	}
 	return repos, nil
+}
+
+// splitBranches splits a comma-separated list of branch names.
+// It returns nil when s is empty.
+func splitBranches(s string) ([]string, error) {
+	if s == "" {
+		return nil, nil
+	}
+	parts := strings.Split(s, ",")
+	branches := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part == "" {
+			return nil, errors.New("branch list contains an empty branch")
+		}
+		if part != strings.TrimSpace(part) {
+			return nil, fmt.Errorf("branch %q has surrounding whitespace", part)
+		}
+		branches = append(branches, part)
+	}
+	return branches, nil
+}
+
+func validateBranchesExist(ctx context.Context, g *git.Checkout, branches []string, label string) error {
+	for _, branch := range branches {
+		if _, err := g.RevParse(ctx, "refs/heads/"+branch+"^{commit}"); err != nil {
+			return fmt.Errorf("%s: branch %q does not exist: %w", label, branch, err)
+		}
+	}
+	return nil
 }
 
 // ensureGithubToken populates c.GithubToken from `gh auth token` if
@@ -413,8 +456,10 @@ func (a *app) cmdStart(ctx context.Context, args []string) error {
 	sudoFlag := fs.Bool("sudo", false, "Enable root access via sudo (random per-container password)")
 	cf := addContainerFlags(fs, true)
 	extraRepos := &stringSlice{}
-	fs.Var(extraRepos, "extra-repo", "Additional git repository path[:branch] to map; may be repeated")
-	fs.Var(extraRepos, "e", "Additional git repository path[:branch] to map; may be repeated")
+	fs.Var(extraRepos, "extra-repo", "Additional git repository path[:branch1[,branch2...]] to map; may be repeated")
+	fs.Var(extraRepos, "e", "Additional git repository path[:branch1[,branch2...]] to map; may be repeated")
+	extraBranches := &stringSlice{}
+	fs.Var(extraBranches, "extra-branch", "Additional git branch to map in the container; may be repeated")
 	noSSH := fs.Bool("no-ssh", false, "Don't SSH into the container after starting")
 	quiet := fs.Bool("q", false, "Suppress informational messages")
 	labels := &stringSlice{}
@@ -440,7 +485,7 @@ func (a *app) cmdStart(ctx context.Context, args []string) error {
 		return err
 	}
 
-	ct, err := a.newContainer(ctx, cf, extraRepos.values)
+	ct, err := a.newContainer(ctx, cf, extraRepos.values, extraBranches.values)
 	if err != nil {
 		return err
 	}
@@ -543,12 +588,22 @@ func printContainerSummary(ctx context.Context, ct *md.Container, r *md.StartRes
 		}
 	}
 	if len(ct.Repos) > 0 {
+		hasExtraBranches := false
 		for _, r := range ct.Repos {
-			fmt.Printf("  > Repo %s on branch '%s'\n", filepath.Base(r.MountedPath), r.Branch)
+			if len(r.Branches) > 1 {
+				hasExtraBranches = true
+				fmt.Printf("  > Repo %s on branch '%s' (+%s)\n", filepath.Base(r.MountedPath), r.Branches[0], strings.Join(r.Branches[1:], ", "))
+			} else {
+				fmt.Printf("  > Repo %s on branch '%s'\n", filepath.Base(r.MountedPath), r.Branches[0])
+			}
 		}
 		fmt.Println("  > Host state is mapped to the branch upstream")
 		fmt.Println("  > See changes (in container): git diff @{upstream}")
-		fmt.Println("  > See changes (on host)     : md diff")
+		if hasExtraBranches {
+			fmt.Println("  > See changes (on host)     : md diff (primary branch only)")
+		} else {
+			fmt.Println("  > See changes (on host)     : md diff")
+		}
 	}
 	fmt.Println("  > Stop container            : md stop")
 	fmt.Println("  > Purge container           : md purge")
@@ -578,8 +633,8 @@ func (a *app) cmdRun(ctx context.Context, args []string) error {
 	fs.Var(noCacheSpecs, "no-cache", "Exclude a default well-known cache by name; may be repeated")
 	noCaches := fs.Bool("no-caches", false, "Disable all default caches")
 	extraRepos := &stringSlice{}
-	fs.Var(extraRepos, "extra-repo", "Additional git repository path[:branch] to map; may be repeated")
-	fs.Var(extraRepos, "e", "Additional git repository path[:branch] to map; may be repeated")
+	fs.Var(extraRepos, "extra-repo", "Additional git repository path[:branch1[,branch2...]] to map; may be repeated")
+	fs.Var(extraRepos, "e", "Additional git repository path[:branch1[,branch2...]] to map; may be repeated")
 	github := fs.Bool("github", false, "Inject GitHub token into container")
 	envSpecs := &stringSlice{}
 	fs.Var(envSpecs, "env", "Set environment in container: NAME copies host, NAME=value sets, NAME= unsets; may be repeated")
@@ -596,7 +651,7 @@ func (a *app) cmdRun(ctx context.Context, args []string) error {
 	if len(extra) == 0 {
 		return errors.New("no command specified")
 	}
-	ct, err := a.newContainer(ctx, cf, extraRepos.values)
+	ct, err := a.newContainer(ctx, cf, extraRepos.values, nil)
 	if err != nil {
 		return err
 	}
@@ -880,7 +935,7 @@ func (a *app) cmdList(ctx context.Context, args []string) error {
 		nameWidth = max(nameWidth, len(rows[i].name))
 		var parts []string
 		for _, r := range ct.Repos {
-			parts = append(parts, filepath.Base(r.MountedPath)+":"+r.Branch)
+			parts = append(parts, filepath.Base(r.MountedPath)+":"+strings.Join(r.Branches, ","))
 		}
 		rows[i].repos = strings.Join(parts, ", ")
 		repoWidth = max(repoWidth, len(rows[i].repos))
@@ -1171,8 +1226,8 @@ func (a *app) cmdFork(ctx context.Context, args []string) error {
 	dockerFlags := &shellSplitSlice{}
 	fs.Var(dockerFlags, "docker-flag", "Extra flag passed verbatim to docker/podman run; may be repeated")
 	extraRepos := &stringSlice{}
-	fs.Var(extraRepos, "extra-repo", "Additional git repository path[:branch] to map; may be repeated")
-	fs.Var(extraRepos, "e", "Additional git repository path[:branch] to map; may be repeated")
+	fs.Var(extraRepos, "extra-repo", "Additional git repository path[:branch1[,branch2...]] to map; may be repeated")
+	fs.Var(extraRepos, "e", "Additional git repository path[:branch1[,branch2...]] to map; may be repeated")
 	labels := &stringSlice{}
 	fs.Var(labels, "label", "Set Docker container label (key=value); can be repeated")
 	fs.Var(labels, "l", "Set Docker container label (key=value); can be repeated")

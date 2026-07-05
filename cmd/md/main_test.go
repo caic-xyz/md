@@ -7,7 +7,12 @@
 package main
 
 import (
+	"bytes"
 	"log/slog"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -15,6 +20,7 @@ import (
 
 	"github.com/caic-xyz/md"
 	"github.com/caic-xyz/md/containers"
+	"github.com/caic-xyz/md/git"
 )
 
 var testLogStart = time.Now()
@@ -84,8 +90,8 @@ func TestNewRunContainer(t *testing.T) {
 	source := &md.Container{
 		Client: client,
 		Repos: []md.Repo{
-			{GitRoot: "/src/one", Branch: "main", MountedPath: "/home/user/src/one"},
-			{GitRoot: "/src/two", Branch: "feature", MountedPath: "/home/user/src/two"},
+			{GitRoot: "/src/one", Branches: []string{"main"}, MountedPath: "/home/user/src/one"},
+			{GitRoot: "/src/two", Branches: []string{"feature"}, MountedPath: "/home/user/src/two"},
 		},
 	}
 	got, err := newRunContainer(source)
@@ -98,11 +104,11 @@ func TestNewRunContainer(t *testing.T) {
 	if !strings.HasPrefix(got.Name, "md-one-run-") {
 		t.Fatalf("Name = %q, want md-one-run-*", got.Name)
 	}
-	if !slices.Equal(got.Repos, source.Repos) {
+	if !reflect.DeepEqual(got.Repos, source.Repos) {
 		t.Fatalf("Repos = %+v, want %+v", got.Repos, source.Repos)
 	}
-	got.Repos[0].Branch = "changed"
-	if source.Repos[0].Branch == "changed" {
+	got.Repos[0].GitRoot = "changed"
+	if source.Repos[0].GitRoot == "changed" {
 		t.Fatal("Repos aliases source slice")
 	}
 }
@@ -164,6 +170,71 @@ func TestResolveForkCapability(t *testing.T) {
 				t.Fatalf("resolveForkCapability = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func runMainTestGit(t *testing.T, wd string, args ...string) {
+	cmd := exec.CommandContext(t.Context(), "git", args...) //nolint:gosec // args are from test code.
+	cmd.Dir = wd
+	cmd.Env = append(os.Environ(), "LANG=C")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("git %s: %v: %s", strings.Join(args, " "), err, stderr.String())
+	}
+}
+
+func TestSplitBranches(t *testing.T) {
+	t.Parallel()
+	t.Run("valid", func(t *testing.T) {
+		t.Parallel()
+		got, err := splitBranches("main,feature")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Equal(got, []string{"main", "feature"}) {
+			t.Fatalf("splitBranches = %v, want [main feature]", got)
+		}
+		got, err = splitBranches("")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != nil {
+			t.Fatalf("splitBranches empty = %v, want nil", got)
+		}
+	})
+	t.Run("error", func(t *testing.T) {
+		t.Parallel()
+		for _, in := range []string{"main,", ",main", "main,,feature", "main, feature", "main ,feature"} {
+			if _, err := splitBranches(in); err == nil {
+				t.Fatalf("splitBranches(%q) error = nil, want error", in)
+			}
+		}
+	})
+}
+
+func TestValidateBranchesExist(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	dir := t.TempDir()
+	runMainTestGit(t, dir, "init", "-q", "--initial-branch=main")
+	runMainTestGit(t, dir, "config", "user.name", "Test")
+	runMainTestGit(t, dir, "config", "user.email", "test@test")
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("main\n"), 0o644); err != nil { //nolint:gosec // test data, world-readable is fine.
+		t.Fatal(err)
+	}
+	runMainTestGit(t, dir, "add", ".")
+	runMainTestGit(t, dir, "commit", "-q", "-m", "main")
+	runMainTestGit(t, dir, "checkout", "-q", "-b", "feature")
+	g, err := git.RootDir(ctx, dir, testLogger(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateBranchesExist(ctx, g, []string{"main", "feature"}, "repo "+dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateBranchesExist(ctx, g, []string{"missing"}, "repo "+dir); err == nil {
+		t.Fatal("validateBranchesExist error = nil, want missing branch error")
 	}
 }
 

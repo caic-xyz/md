@@ -25,7 +25,7 @@ func ExampleContainer() {
 		_, _ = fmt.Fprintln(os.Stderr, err)
 		return
 	}
-	base, err := client.Container(md.Repo{GitRoot: ".", Branch: "main"})
+	base, err := client.Container(md.Repo{GitRoot: ".", Branches: []string{"main"}})
 	if err != nil {
 		_, _ = fmt.Fprintln(os.Stderr, err)
 		return

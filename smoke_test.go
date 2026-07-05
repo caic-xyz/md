@@ -577,7 +577,7 @@ func TestSmoke(t *testing.T) {
 				mountedPath := "/home/user/src/smoke-" + rt + "-repo"
 				ct := launchSmokeRepoContainer(t, t.Context(), client, baseImage, &Repo{
 					GitRoot:     repo,
-					Branch:      "main",
+					Branches:    []string{"main"},
 					MountedPath: mountedPath,
 				})
 
@@ -692,8 +692,8 @@ func TestSmoke(t *testing.T) {
 					if len(fork.Repos) != 1 {
 						t.Fatalf("fork repos = %d, want 1", len(fork.Repos))
 					}
-					if fork.Repos[0].Branch != "main-0" {
-						t.Fatalf("fork branch = %q, want main-0", fork.Repos[0].Branch)
+					if fork.Repos[0].Branches[0] != "main-0" {
+						t.Fatalf("fork branch = %q, want main-0", fork.Repos[0].Branches[0])
 					}
 					out, err := fork.runCmd(t.Context(), "", fork.SSHCommand(nil, "cat /tmp/fork-marker && printf '\n' && git -C "+shellQuote(mountedPath)+" branch --show-current && cat "+shellQuote(mountedPath+"/README.md")))
 					if err != nil {
@@ -735,7 +735,7 @@ func TestSmoke(t *testing.T) {
 				mountedPath := "/home/user/src/smoke-" + rt + "-rebase"
 				ct := launchSmokeRepoContainer(t, t.Context(), client, baseImage, &Repo{
 					GitRoot:     repo,
-					Branch:      "main",
+					Branches:    []string{"main"},
 					MountedPath: mountedPath,
 				})
 
@@ -772,7 +772,7 @@ func TestSmoke(t *testing.T) {
 				mountedPath := "/home/user/src/smoke-" + rt + "-non-default-base"
 				ct := launchSmokeRepoContainer(t, t.Context(), client, baseImage, &Repo{
 					GitRoot:     repo,
-					Branch:      "feature",
+					Branches:    []string{"feature"},
 					MountedPath: mountedPath,
 				})
 

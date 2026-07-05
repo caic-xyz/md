@@ -41,6 +41,12 @@ md diff
 md pull
 ```
 
+### Multiple mapped branches
+
+`md start --extra-branch <branch>` maps additional branches into the same container. The first branch (`Branches[0]`: current branch or `-b`) remains the primary branch.
+
+For now, `md diff` reports changes for the primary branch only. Extra mapped branches are available for `push`, `pull`, and `fork`, but they are not diffed by `md diff`; inspect them inside the container with Git directly.
+
 ## Documentation
 
 🔥 Full documentation is at [docs.caic.xyz](https://docs.caic.xyz/md/) 🔥
