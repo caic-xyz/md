@@ -733,6 +733,7 @@ func TestGenerateDockerfile(t *testing.T) {
 		t.Parallel()
 		got := generateDockerfile("img", nil, nil, "dig", "ctx", "ckey", "mdig")
 		for _, want := range []string{
+			`LABEL md.image_type="specialized"`,
 			`LABEL md.base_digest="dig"`,
 			`LABEL md.context_sha="ctx"`,
 			`LABEL md.cache_key="ckey"`,

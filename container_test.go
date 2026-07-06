@@ -890,7 +890,7 @@ func TestFork(t *testing.T) {
 
 	t.Run("valid_snapshot_clears_runtime_state", func(t *testing.T) {
 		t.Parallel()
-		changes := forkSnapshotConfigChanges("md.sudo md.sudo-password custom.label")
+		changes := forkSnapshotConfigChanges("md.sudo md.sudo-password md.image_type custom.label")
 		for _, want := range []string{
 			"LABEL md.sudo=",
 			"LABEL md.sudo-password=",
@@ -898,10 +898,18 @@ func TestFork(t *testing.T) {
 			"ENV MD_SUDO_PASSWORD=",
 			"ENV MD_TAILSCALE=",
 			"ENV TAILSCALE_AUTHKEY=",
+			"LABEL md.image_type=fork-snapshot",
 		} {
 			if !slices.Contains(changes, want) {
 				t.Fatalf("fork snapshot changes missing %q in %v", want, changes)
 			}
+		}
+		// The fork-snapshot stamp must come after the inherited md.image_type is
+		// cleared, otherwise the specialized value would win.
+		cleared := slices.Index(changes, "LABEL md.image_type=")
+		stamp := slices.Index(changes, "LABEL md.image_type=fork-snapshot")
+		if cleared == -1 || stamp <= cleared {
+			t.Fatalf("fork-snapshot stamp (%d) must follow the clearing change (%d): %v", stamp, cleared, changes)
 		}
 	})
 

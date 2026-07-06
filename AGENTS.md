@@ -75,6 +75,7 @@ The test requires a container runtime (docker or podman) in PATH. Nested podman 
 
 | Label | Value |
 |---|---|
+| `md.image_type` | Role of the image: `specialized` (per-user build) or `fork-snapshot` (transient fork commit). Used by `PruneImages` to find md-built images, including untagged fork snapshots. |
 | `md.base_image` | Base image reference used at build time |
 | `md.base_digest` | Digest (or image ID for local images) of the base |
 | `md.context_sha` | SHA-256 of SSH keys |

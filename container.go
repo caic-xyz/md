@@ -42,6 +42,18 @@ import (
 // DefaultBaseImage is the base image used when none is specified.
 const DefaultBaseImage = "ghcr.io/caic-xyz/md-user"
 
+// Values for the "md.image_type" label, which tags md-built images with their
+// role so they can be found for pruning, including after they are untagged.
+const (
+	// imageTypeSpecialized marks a per-user specialized image built on top of a
+	// base image with SSH keys and caches baked in (md-specialized-<hash>).
+	imageTypeSpecialized = "specialized"
+	// imageTypeForkSnapshot marks a transient snapshot committed from a running
+	// container to launch a fork. It is untagged once the fork starts, leaving a
+	// dangling image discoverable only by this label.
+	imageTypeForkSnapshot = "fork-snapshot"
+)
+
 const (
 	tailscaleDeviceIDPath = "/var/lib/md/tailscale_device_id"
 
@@ -1384,16 +1396,21 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 // forkSnapshotConfigChanges returns docker commit --change entries for a fork snapshot.
 //
 // It clears labels and runtime ENV inherited from the source container image so
-// launchContainer can apply the fork's requested metadata and capabilities.
+// launchContainer can apply the fork's requested metadata and capabilities, then
+// stamps imageTypeLabelKey so the snapshot stays discoverable for pruning even
+// after it is untagged.
 func forkSnapshotConfigChanges(labelCSV string) []string {
 	labels := strings.Fields(labelCSV)
-	changes := make([]string, 0, len(labels)+len(forkSnapshotEnvKeys))
+	changes := make([]string, 0, len(labels)+len(forkSnapshotEnvKeys)+1)
 	for _, key := range labels {
 		changes = append(changes, "LABEL "+key+"=")
 	}
 	for _, key := range forkSnapshotEnvKeys {
 		changes = append(changes, "ENV "+key+"=")
 	}
+	// Applied after the clearing pass above so it wins over an inherited
+	// md.image_type (the source runs on a specialized image).
+	changes = append(changes, "LABEL md.image_type="+imageTypeForkSnapshot)
 	return changes
 }
 

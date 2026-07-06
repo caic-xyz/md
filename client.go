@@ -361,51 +361,67 @@ func (c *Client) Warmup(ctx context.Context, stdout, stderr io.Writer, opts *War
 	return true, nil
 }
 
-// PruneImages removes md-specialized-* and md-fork-* images that are not used by any container.
-// Returns the list of removed image names.
+// PruneImages removes md-built images (specialized builds and fork snapshots)
+// that are not used by any container. Returns the list of removed image names.
 func (c *Client) PruneImages(ctx context.Context, stdout, stderr io.Writer) ([]string, error) {
-	// List all md-specialized-* and md-fork-* images.
-	allImages := make(map[string]struct{})
-	for _, prefix := range []string{"md-specialized-*", "md-fork-*"} {
-		out, err := c.Runtime.Run(ctx, "", "images", "--format", "{{.Repository}}", "--filter", "reference="+prefix)
-		if err != nil {
-			return nil, fmt.Errorf("listing images: %w", err)
-		}
-		for name := range strings.SplitSeq(out, "\n") {
-			if name != "" {
-				allImages[name] = struct{}{}
-			}
-		}
+	// Select images by the md.image_type label rather than by name prefix so
+	// untagged (dangling) fork snapshots, left behind after their container is
+	// removed, are still discovered.
+	out, err := c.Runtime.Run(ctx, "", "images", "--format", "{{.ID}}\t{{.Repository}}", "--filter", "label=md.image_type")
+	if err != nil {
+		return nil, fmt.Errorf("listing images: %w", err)
 	}
-	if len(allImages) == 0 {
+	type candidate struct{ id, name string }
+	var candidates []candidate
+	for line := range strings.SplitSeq(out, "\n") {
+		id, name, ok := strings.Cut(line, "\t")
+		id, name = strings.TrimSpace(id), strings.TrimSpace(name)
+		if !ok || id == "" {
+			continue
+		}
+		if name == "<none>" {
+			name = ""
+		}
+		candidates = append(candidates, candidate{id: id, name: name})
+	}
+	if len(candidates) == 0 {
 		return nil, nil
 	}
 
-	// Find images used by running md containers.
+	// Collect image references used by md containers. Docker/Podman report the
+	// image name when tagged, or the image ID once the tag is gone (e.g. an
+	// untagged fork snapshot still backing its container).
 	containerOut, err := c.Runtime.Run(ctx, "", "ps", "-a", "--filter", "name=^md-", "--format", "{{.Image}}")
 	if err != nil {
 		return nil, fmt.Errorf("listing containers: %w", err)
 	}
 	inUse := make(map[string]struct{})
-	if containerOut != "" {
-		for img := range strings.SplitSeq(containerOut, "\n") {
-			if img != "" {
-				inUse[img] = struct{}{}
-			}
+	for img := range strings.SplitSeq(containerOut, "\n") {
+		if img = strings.TrimSpace(img); img != "" {
+			inUse[img] = struct{}{}
 		}
 	}
 
-	// Remove unused images.
+	// Remove images referenced by no md container.
 	var removed []string
-	for img := range allImages {
-		if _, used := inUse[img]; used {
+	for _, cand := range candidates {
+		if _, used := inUse[cand.id]; used {
 			continue
 		}
-		if _, err := c.Runtime.Run(ctx, "", "rmi", img); err != nil {
-			_, _ = fmt.Fprintf(stdout, "- Warning: failed to remove %s: %v\n", img, err)
+		if cand.name != "" {
+			if _, used := inUse[cand.name]; used {
+				continue
+			}
+		}
+		target := cand.name
+		if target == "" {
+			target = cand.id
+		}
+		if _, err := c.Runtime.Run(ctx, "", "rmi", target); err != nil {
+			_, _ = fmt.Fprintf(stdout, "- Warning: failed to remove %s: %v\n", target, err)
 			continue
 		}
-		removed = append(removed, img)
+		removed = append(removed, target)
 	}
 	sort.Strings(removed)
 
@@ -1014,6 +1030,7 @@ func generateDockerfile(baseImage string, active []activeCM, dirs []string, base
 		fmt.Fprintf(&run, " && chown -R root:root %s && chmod -R a-w %s", joined, joined)
 	}
 	fmt.Fprintf(&df, "RUN %s\n", run.String())
+	fmt.Fprintf(&df, "LABEL md.image_type=%q\n", imageTypeSpecialized)
 	fmt.Fprintf(&df, "LABEL md.base_image=%q\n", baseImage)
 	fmt.Fprintf(&df, "LABEL md.base_digest=%q\n", baseDigest)
 	fmt.Fprintf(&df, "LABEL md.context_sha=%q\n", contextSHA)
