@@ -888,6 +888,97 @@ func TestFork(t *testing.T) {
 		}
 	})
 
+	t.Run("valid_primary_branch_setup_renames_branch", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		dir := t.TempDir()
+		runTestGit(t, ctx, dir, "init", "-q", "--initial-branch=main")
+		runTestGit(t, ctx, dir, "config", "user.name", "Test")
+		runTestGit(t, ctx, dir, "config", "user.email", "test@test")
+		writeTestFile(t, filepath.Join(dir, "tracked.txt"), "base\n")
+		runTestGit(t, ctx, dir, "add", ".")
+		runTestGit(t, ctx, dir, "commit", "-q", "-m", "base")
+		runTestGit(t, ctx, dir, "checkout", "-q", "-b", "caic-23")
+
+		setup := exec.CommandContext(ctx, "bash", "-c", forkPrimaryBranchSetupCommand("caic-23", "caic-23-0")) //nolint:gosec // command is generated from test branch names
+		setup.Dir = dir
+		setup.Env = append(os.Environ(), "LANG=C")
+		if out, err := setup.CombinedOutput(); err != nil {
+			t.Fatalf("fork primary branch setup: %v\n%s", err, out)
+		}
+		if got := runTestGit(t, ctx, dir, "branch", "--show-current"); got != "caic-23-0" {
+			t.Fatalf("current branch = %q, want caic-23-0", got)
+		}
+	})
+
+	t.Run("valid_primary_branch_setup_preserves_rebase", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		dir := t.TempDir()
+		runTestGit(t, ctx, dir, "init", "-q", "--initial-branch=main")
+		runTestGit(t, ctx, dir, "config", "user.name", "Test")
+		runTestGit(t, ctx, dir, "config", "user.email", "test@test")
+		writeTestFile(t, filepath.Join(dir, "tracked.txt"), "base\n")
+		runTestGit(t, ctx, dir, "add", ".")
+		runTestGit(t, ctx, dir, "commit", "-q", "-m", "base")
+		runTestGit(t, ctx, dir, "checkout", "-q", "-b", "caic-23")
+		writeTestFile(t, filepath.Join(dir, "tracked.txt"), "source\n")
+		runTestGit(t, ctx, dir, "commit", "-q", "-am", "source")
+		sourceTip := runTestGit(t, ctx, dir, "rev-parse", "refs/heads/caic-23")
+		runTestGit(t, ctx, dir, "checkout", "-q", "main")
+		writeTestFile(t, filepath.Join(dir, "tracked.txt"), "target\n")
+		runTestGit(t, ctx, dir, "commit", "-q", "-am", "target")
+		runTestGit(t, ctx, dir, "checkout", "-q", "caic-23")
+
+		rebase := exec.CommandContext(ctx, "git", "rebase", "main")
+		rebase.Dir = dir
+		rebase.Env = append(os.Environ(), "LANG=C")
+		if out, err := rebase.CombinedOutput(); err == nil {
+			t.Fatalf("git rebase unexpectedly succeeded:\n%s", out)
+		}
+
+		rename := exec.CommandContext(ctx, "git", "branch", "-m", "caic-23", "caic-23-0")
+		rename.Dir = dir
+		rename.Env = append(os.Environ(), "LANG=C")
+		if out, err := rename.CombinedOutput(); err == nil {
+			t.Fatalf("git branch -m unexpectedly succeeded:\n%s", out)
+		}
+
+		setup := exec.CommandContext(ctx, "bash", "-c", forkPrimaryBranchSetupCommand("caic-23", "caic-23-0")) //nolint:gosec // command is generated from test branch names
+		setup.Dir = dir
+		setup.Env = append(os.Environ(), "LANG=C")
+		if out, err := setup.CombinedOutput(); err != nil {
+			t.Fatalf("fork primary branch setup: %v\n%s", err, out)
+		}
+		if got := runTestGit(t, ctx, dir, "rev-parse", "refs/heads/caic-23-0"); got != sourceTip {
+			t.Fatalf("new branch tip = %q, want %q", got, sourceTip)
+		}
+		verifyOld := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", "--verify", "refs/heads/caic-23") //nolint:gosec // dir is a test temp repo
+		verifyOld.Env = append(os.Environ(), "LANG=C")
+		if out, err := verifyOld.CombinedOutput(); err == nil {
+			t.Fatalf("old branch still exists:\n%s", out)
+		}
+		headName, err := os.ReadFile(filepath.Join(dir, ".git", "rebase-merge", "head-name")) //nolint:gosec // test temp repo metadata
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.TrimSpace(string(headName)); got != "refs/heads/caic-23-0" {
+			t.Fatalf("rebase head-name = %q, want refs/heads/caic-23-0", got)
+		}
+
+		writeTestFile(t, filepath.Join(dir, "tracked.txt"), "resolved\n")
+		runTestGit(t, ctx, dir, "add", ".")
+		cont := exec.CommandContext(ctx, "git", "rebase", "--continue")
+		cont.Dir = dir
+		cont.Env = append(os.Environ(), "LANG=C", "GIT_EDITOR=true")
+		if out, err := cont.CombinedOutput(); err != nil {
+			t.Fatalf("git rebase --continue: %v\n%s", err, out)
+		}
+		if got := runTestGit(t, ctx, dir, "branch", "--show-current"); got != "caic-23-0" {
+			t.Fatalf("current branch after rebase = %q, want caic-23-0", got)
+		}
+	})
+
 	t.Run("valid_snapshot_clears_runtime_state", func(t *testing.T) {
 		t.Parallel()
 		changes := forkSnapshotConfigChanges("md.sudo md.sudo-password md.image_type custom.label")

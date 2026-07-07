@@ -1342,7 +1342,7 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 		newPrimary := fork.Repos[i].Branches[0]
 		refspecs[0] = newPrimary + ":refs/remotes/host/" + newPrimary
 		setupCommands = append(setupCommands,
-			"git branch -m "+shellQuote(oldPrimary)+" "+shellQuote(newPrimary),
+			forkPrimaryBranchSetupCommand(oldPrimary, newPrimary),
 			"git branch -q --set-upstream-to="+shellQuote("host/"+newPrimary)+" "+shellQuote(newPrimary),
 		)
 		for j, branch := range r.Branches[1:] {
@@ -1391,6 +1391,20 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 
 	fork.State = "running"
 	return fork, nil
+}
+
+// forkPrimaryBranchSetupCommand returns a shell command that renames the forked
+// primary branch, including when the source branch is mid-rebase.
+func forkPrimaryBranchSetupCommand(oldBranch, newBranch string) string {
+	oldRef := "refs/heads/" + oldBranch
+	newRef := "refs/heads/" + newBranch
+	return strings.Join([]string{
+		"old_ref=" + shellQuote(oldRef),
+		"new_ref=" + shellQuote(newRef),
+		"rebase_head=",
+		`for candidate in "$(git rev-parse --git-path rebase-merge/head-name)" "$(git rev-parse --git-path rebase-apply/head-name)"; do if [ -s "$candidate" ] && [ "$(cat "$candidate")" = "$old_ref" ]; then rebase_head=$candidate; break; fi; done`,
+		`if [ -n "$rebase_head" ]; then git update-ref "$new_ref" "$old_ref" "" && printf '%s\n' "$new_ref" > "$rebase_head" && git branch -q -D ` + shellQuote(oldBranch) + `; else git branch -m ` + shellQuote(oldBranch) + ` ` + shellQuote(newBranch) + `; fi`,
+	}, " && ")
 }
 
 // forkSnapshotConfigChanges returns docker commit --change entries for a fork snapshot.
