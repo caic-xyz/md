@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"iter"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -340,7 +341,7 @@ func TestClient(t *testing.T) {
 	})
 }
 
-func TestBuildSpecializedImage(t *testing.T) { //nolint:paralleltest // fakeRuntime uses t.Setenv, which cannot run in parallel tests.
+func TestBuildSpecializedImage(t *testing.T) { //nolint:tparallel // fakeRuntime uses t.Setenv, which cannot run in parallel tests.
 	t.Run("uses_local_remote_base_when_pull_fails", func(t *testing.T) { //nolint:paralleltest // fakeRuntime uses t.Setenv, which cannot run in parallel tests.
 		home := t.TempDir()
 		logPath := filepath.Join(home, "runtime.log")
@@ -348,8 +349,12 @@ func TestBuildSpecializedImage(t *testing.T) { //nolint:paralleltest // fakeRunt
 		var stdout strings.Builder
 		var stderr strings.Builder
 
-		if err := c.buildSpecializedImage(t.Context(), &stdout, &stderr, "md-specialized-test", "ghcr.io/caic-xyz/md-user:latest", PlatformLinuxAMD64.String(), nil, nil, false); err != nil {
+		imageID, err := c.buildSpecializedImage(t.Context(), &stdout, &stderr, "md-specialized-test", "ghcr.io/caic-xyz/md-user:latest", PlatformLinuxAMD64.String(), nil, nil, false)
+		if err != nil {
 			t.Fatalf("buildSpecializedImage: %v", err)
+		}
+		if imageID != "sha256:specialized" {
+			t.Fatalf("imageID = %q, want sha256:specialized", imageID)
 		}
 		if !strings.Contains(stdout.String(), "using local copy") {
 			t.Fatalf("stdout = %q, want offline fallback warning", stdout.String())
@@ -375,7 +380,7 @@ func TestBuildSpecializedImage(t *testing.T) { //nolint:paralleltest // fakeRunt
 		logPath := filepath.Join(home, "runtime.log")
 		c := newTestClient(t, home, fakeRuntime(t, logPath, false))
 
-		err := c.buildSpecializedImage(t.Context(), io.Discard, io.Discard, "md-specialized-test", "ghcr.io/caic-xyz/md-user:latest", PlatformLinuxAMD64.String(), nil, nil, false)
+		_, err := c.buildSpecializedImage(t.Context(), io.Discard, io.Discard, "md-specialized-test", "ghcr.io/caic-xyz/md-user:latest", PlatformLinuxAMD64.String(), nil, nil, false)
 		if err == nil {
 			t.Fatal("buildSpecializedImage succeeded, want pull failure")
 		}
@@ -383,6 +388,305 @@ func TestBuildSpecializedImage(t *testing.T) { //nolint:paralleltest // fakeRunt
 			t.Fatalf("err = %v, want pull failure", err)
 		}
 	})
+
+	t.Run("untags_stale_specialized_image_after_base_pull_changes", func(t *testing.T) {
+		t.Parallel()
+		const (
+			imageName = "md-specialized-test"
+			baseImage = "ghcr.io/caic-xyz/md-user:latest"
+		)
+		c, rt := newImageDecisionTestClient(t, imageName, baseImage)
+		rt.baseID = "sha256:old-base"
+		rt.baseDigest = "ghcr.io/caic-xyz/md-user@sha256:old-base"
+		rt.pulledBaseID = "sha256:new-base"
+		rt.pulledBaseDigest = "ghcr.io/caic-xyz/md-user@sha256:new-base"
+		rt.remoteManifest = "sha256:new-manifest"
+
+		imageID, err := c.buildSpecializedImage(t.Context(), io.Discard, io.Discard, imageName, baseImage, PlatformLinuxAMD64.String(), nil, nil, true)
+		if err != nil {
+			t.Fatalf("buildSpecializedImage: %v", err)
+		}
+		if imageID != "sha256:specialized" {
+			t.Fatalf("imageID = %q, want sha256:specialized", imageID)
+		}
+		if !slices.Equal(rt.untagged, []string{imageName}) {
+			t.Fatalf("untagged = %v, want [%s]", rt.untagged, imageName)
+		}
+		if rt.builds != 1 {
+			t.Fatalf("builds = %d, want 1", rt.builds)
+		}
+	})
+}
+
+func TestImageBuildNeeded(t *testing.T) {
+	t.Parallel()
+	const (
+		imageName = "md-specialized-test"
+		baseImage = "ghcr.io/caic-xyz/md-user:latest"
+	)
+	tests := []struct {
+		name            string
+		localBase       bool
+		storedManifest  string
+		remoteManifest  string
+		wantNeeded      bool
+		wantUntagged    bool
+		wantRemoteCalls int
+	}{
+		{
+			name:            "remote_manifest_stale_reports_needed_without_untag",
+			storedManifest:  "sha256:old",
+			remoteManifest:  "sha256:new",
+			wantNeeded:      true,
+			wantRemoteCalls: 1,
+		},
+		{
+			name:            "local_base_skips_remote_staleness",
+			localBase:       true,
+			storedManifest:  "sha256:old",
+			remoteManifest:  "sha256:new",
+			wantRemoteCalls: 0,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			c, rt := newImageDecisionTestClient(t, imageName, baseImage)
+			rt.localBase = tt.localBase
+			rt.storedManifest = tt.storedManifest
+			rt.remoteManifest = tt.remoteManifest
+
+			got := c.imageBuildNeeded(t.Context(), imageName, baseImage, PlatformLinuxAMD64.String(), nil)
+			if got != tt.wantNeeded {
+				t.Fatalf("imageBuildNeeded() = %t, want %t", got, tt.wantNeeded)
+			}
+			if got := len(rt.untagged) > 0; got != tt.wantUntagged {
+				t.Fatalf("untagged = %v, want untagged %t", rt.untagged, tt.wantUntagged)
+			}
+			if rt.remoteManifestCalls != tt.wantRemoteCalls {
+				t.Fatalf("remote manifest calls = %d, want %d", rt.remoteManifestCalls, tt.wantRemoteCalls)
+			}
+		})
+	}
+}
+
+func TestEnsureImage(t *testing.T) {
+	t.Parallel()
+	const baseImage = "ghcr.io/caic-xyz/md-user:latest"
+	c, rt := newImageDecisionTestClient(t, "", baseImage)
+	rt.storedManifest = "sha256:remote"
+	rt.remoteManifest = "sha256:remote"
+	ct := &Container{Client: c}
+
+	got, err := ct.ensureImage(t.Context(), io.Discard, io.Discard, baseImage, PlatformLinuxAMD64.String(), nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != rt.imageID {
+		t.Fatalf("ensureImage() = %q, want immutable image ID %q", got, rt.imageID)
+	}
+	if rt.builds != 0 {
+		t.Fatalf("builds = %d, want 0", rt.builds)
+	}
+}
+
+func newImageDecisionTestClient(t *testing.T, imageName, baseImage string) (*Client, *imageDecisionRuntime) {
+	home := t.TempDir()
+	rt := &imageDecisionRuntime{
+		imageName:  imageName,
+		baseImage:  baseImage,
+		imageID:    "sha256:specialized",
+		baseID:     "sha256:base",
+		baseDigest: "ghcr.io/caic-xyz/md-user@sha256:base",
+		arch:       "amd64",
+	}
+	c := &Client{
+		Home:          home,
+		XDGConfigHome: filepath.Join(home, ".config"),
+		XDGDataHome:   filepath.Join(home, ".local", "share"),
+		XDGStateHome:  filepath.Join(home, ".local", "state"),
+		HostKeyPath:   filepath.Join(home, ".config", "md", "ssh_host_ed25519_key"),
+		UserKeyPath:   filepath.Join(home, ".ssh", "md"),
+		Logger:        testLogger(t),
+		Runtime:       rt,
+	}
+	c.keysDir = filepath.Join(c.XDGConfigHome, "md")
+	if err := c.setupSSH(io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	contextSHA, err := keysSHA(c.keysDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt.contextSHA = contextSHA
+	return c, rt
+}
+
+type imageDecisionRuntime struct {
+	imageName           string
+	baseImage           string
+	imageID             string
+	baseID              string
+	baseDigest          string
+	contextSHA          string
+	storedManifest      string
+	remoteManifest      string
+	arch                string
+	localBase           bool
+	pulled              bool
+	pulledBaseID        string
+	pulledBaseDigest    string
+	builds              int
+	remoteManifestCalls int
+	untagged            []string
+}
+
+func (r *imageDecisionRuntime) Name() string {
+	return "docker"
+}
+
+func (r *imageDecisionRuntime) Executable() string {
+	return "docker"
+}
+
+func (r *imageDecisionRuntime) Run(_ context.Context, _ string, args ...string) (string, error) {
+	if len(args) > 0 && args[0] == "pull" {
+		r.pulled = true
+		return "", nil
+	}
+	if len(args) > 0 && args[0] == "build" {
+		r.builds++
+		if err := writeFakeIIDFile(args, r.imageID); err != nil {
+			return "", err
+		}
+		return "", nil
+	}
+	if len(args) >= 2 && args[0] == "image" && args[1] == "inspect" {
+		image, format, ok := testImageInspectArgs(args)
+		if !ok {
+			return "", fmt.Errorf("unsupported image inspect args: %s", strings.Join(args, " "))
+		}
+		if image == r.baseImage {
+			return r.inspectBaseImage(format)
+		}
+		if r.imageName == "" || image == r.imageName {
+			return r.inspectSpecializedImage(format)
+		}
+	}
+	return "", fmt.Errorf("unexpected runtime command: %s", strings.Join(args, " "))
+}
+
+func (r *imageDecisionRuntime) RunOut(_ context.Context, _ string, _, _ io.Writer, args ...string) error {
+	if len(args) > 0 && args[0] == "build" {
+		r.builds++
+		return writeFakeIIDFile(args, r.imageID)
+	}
+	return fmt.Errorf("unexpected runtime command: %s", strings.Join(args, " "))
+}
+
+func (r *imageDecisionRuntime) List(context.Context) ([]containers.Container, error) {
+	return nil, nil
+}
+
+func (r *imageDecisionRuntime) InspectContainer(context.Context, string) (*containers.Container, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (r *imageDecisionRuntime) InspectInfo(context.Context, string) (*containers.InspectInfo, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (r *imageDecisionRuntime) HostPort(context.Context, string, string) (int32, error) {
+	return 0, errors.New("not implemented")
+}
+
+func (r *imageDecisionRuntime) ImageArchitecture(context.Context, string) (string, error) {
+	return r.arch, nil
+}
+
+func (r *imageDecisionRuntime) RemoteManifestDigest(context.Context, string, string) (string, error) {
+	r.remoteManifestCalls++
+	return r.remoteManifest, nil
+}
+
+func (r *imageDecisionRuntime) BaseImageIsLocal(context.Context, string) bool {
+	return r.localBase
+}
+
+func (r *imageDecisionRuntime) UntagImage(_ context.Context, image string) error {
+	r.untagged = append(r.untagged, image)
+	return nil
+}
+
+func (r *imageDecisionRuntime) Stats(context.Context, string) (*containers.Stats, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (r *imageDecisionRuntime) DiskUsage(context.Context, string) (int64, error) {
+	return 0, errors.New("not implemented")
+}
+
+func (r *imageDecisionRuntime) StatsAll(context.Context, []string) (map[string]*containers.Stats, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (r *imageDecisionRuntime) WatchStats(context.Context, []string) (iter.Seq2[containers.StatsSample, error], error) {
+	return nil, errors.New("not implemented")
+}
+
+func (r *imageDecisionRuntime) WatchDieEvents(context.Context, string) (iter.Seq2[containers.Event, error], error) {
+	return nil, errors.New("not implemented")
+}
+
+func (r *imageDecisionRuntime) IsRootless() bool {
+	return false
+}
+
+func (r *imageDecisionRuntime) inspectSpecializedImage(format string) (string, error) {
+	switch format {
+	case "{{.Id}}":
+		return r.imageID, nil
+	case `{{index .Config.Labels "md.base_digest"}}`:
+		return r.baseDigest, nil
+	case `{{index .Config.Labels "md.context_sha"}}`:
+		return r.contextSHA, nil
+	case `{{index .Config.Labels "md.base_manifest_digest"}}`:
+		return r.storedManifest, nil
+	case `{{index .Config.Labels "md.cache_key"}}`:
+		return "", nil
+	default:
+		return "", fmt.Errorf("unexpected specialized image format: %s", format)
+	}
+}
+
+func (r *imageDecisionRuntime) inspectBaseImage(format string) (string, error) {
+	switch format {
+	case "{{index .RepoDigests 0}}":
+		if r.pulled && r.pulledBaseDigest != "" {
+			return r.pulledBaseDigest, nil
+		}
+		return r.baseDigest, nil
+	case "{{.Id}}":
+		if r.pulled && r.pulledBaseID != "" {
+			return r.pulledBaseID, nil
+		}
+		return r.baseID, nil
+	default:
+		return "", fmt.Errorf("unexpected base image format: %s", format)
+	}
+}
+
+func testImageInspectArgs(args []string) (image, format string, ok bool) {
+	if len(args) != 5 {
+		return "", "", false
+	}
+	if args[2] == "--format" {
+		return args[4], args[3], true
+	}
+	if args[3] == "--format" {
+		return args[2], args[4], true
+	}
+	return "", "", false
 }
 
 func newTestClient(t *testing.T, home, runtimePath string) *Client {
@@ -536,6 +840,10 @@ func runFakeRuntime(args []string, logPath string, localBase bool) int {
 		return 1
 	}
 	if len(args) >= 1 && args[0] == "build" {
+		if err := writeFakeIIDFile(args, "sha256:specialized"); err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "writing fake iidfile: %v\n", err)
+			return 1
+		}
 		return 0
 	}
 	if len(args) >= 1 && args[0] == "rmi" {
@@ -554,6 +862,18 @@ func runFakeRuntime(args []string, logPath string, localBase bool) int {
 	}
 	_, _ = fmt.Fprintf(os.Stderr, "unexpected command: %s\n", strings.Join(args, " "))
 	return 1
+}
+
+func writeFakeIIDFile(args []string, imageID string) error {
+	for i, arg := range args {
+		if arg == "--iidfile" && i+1 < len(args) {
+			return os.WriteFile(args[i+1], []byte(imageID+"\n"), 0o600) //nolint:gosec // test path comes from private temp dir.
+		}
+		if path, ok := strings.CutPrefix(arg, "--iidfile="); ok {
+			return os.WriteFile(path, []byte(imageID+"\n"), 0o600) //nolint:gosec // test path comes from private temp dir.
+		}
+	}
+	return nil
 }
 
 func fakeRuntimeContainerInspect(args []string) int {
@@ -585,6 +905,10 @@ func appendFakeCommandLog(logPath string, args []string) error {
 
 func fakeRuntimeInspect(args []string, localBase bool) int {
 	argLine := strings.Join(args, " ")
+	if strings.Contains(argLine, "md-specialized-test") && strings.Contains(argLine, "{{.Id}}") {
+		_, _ = fmt.Fprintln(os.Stdout, "sha256:specialized")
+		return 0
+	}
 	if strings.Contains(argLine, "{{.Id}}") {
 		if localBase {
 			_, _ = fmt.Fprintln(os.Stdout, "sha256:local")

@@ -1933,8 +1933,8 @@ func (c *Container) refreshRuntimeFields(ctx context.Context) error {
 }
 
 // ensureImage checks whether the user image needs rebuilding and, if so,
-// builds it. Returns the computed image name (keyed by base image and active
-// caches). The build is serialized via Client.buildMu.
+// builds it. Returns the immutable image ID so concurrent tag updates do not
+// affect the container launch. The build is serialized via Client.buildMu.
 func (c *Container) ensureImage(ctx context.Context, stdout, stderr io.Writer, baseImage, platform string, caches []CacheMount, quiet bool) (string, error) {
 	c.buildMu.Lock()
 	defer c.buildMu.Unlock()
@@ -1951,13 +1951,14 @@ func (c *Container) ensureImage(ctx context.Context, stdout, stderr io.Writer, b
 		if !quiet {
 			_, _ = fmt.Fprintf(stdout, "- Docker image %s is up to date, skipping build.\n", imageName)
 		}
-		return imageName, nil
+		return c.imageID(ctx, imageName)
 	}
-	if err := c.buildSpecializedImage(ctx, stdout, stderr, imageName, baseImage, platform, caches, agentContainerPaths(), quiet); err != nil {
+	imageID, err := c.buildSpecializedImage(ctx, stdout, stderr, imageName, baseImage, platform, caches, agentContainerPaths(), quiet)
+	if err != nil {
 		return "", err
 	}
 	c.invalidateImageBuildCache()
-	return imageName, nil
+	return imageID, nil
 }
 
 // pushSubmodules transfers submodule bare repos from hostGitRoot into the

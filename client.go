@@ -30,6 +30,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -354,7 +355,7 @@ func (c *Client) Warmup(ctx context.Context, stdout, stderr io.Writer, opts *War
 		}
 		return false, nil
 	}
-	if err := c.buildSpecializedImage(ctx, stdout, stderr, imageName, baseImage, platform, opts.Caches, agentContainerPaths(), opts.Quiet); err != nil {
+	if _, err := c.buildSpecializedImage(ctx, stdout, stderr, imageName, baseImage, platform, opts.Caches, agentContainerPaths(), opts.Quiet); err != nil {
 		return false, err
 	}
 	c.invalidateImageBuildCache()
@@ -840,6 +841,33 @@ func (c *Client) invalidateImageBuildCache() {
 	c.mu.Unlock()
 }
 
+// imageID returns the immutable ID for image.
+func (c *Client) imageID(ctx context.Context, image string) (string, error) {
+	id, err := c.Runtime.Run(ctx, "", "image", "inspect", image, "--format", "{{.Id}}")
+	if err != nil {
+		return "", fmt.Errorf("inspecting image %s ID: %w", image, err)
+	}
+	if id == "" {
+		return "", fmt.Errorf("image %s has empty ID", image)
+	}
+	return id, nil
+}
+
+// baseImageDigest returns a stable digest label value for baseImage.
+//
+// It prefers the pulled repository digest because that records the registry
+// artifact used as the base. Local-only images have no RepoDigests entry, so it
+// falls back to the local image ID.
+func (c *Client) baseImageDigest(ctx context.Context, baseImage string) (string, error) {
+	if d, err := c.Runtime.Run(ctx, "", "image", "inspect", baseImage, "--format", "{{index .RepoDigests 0}}"); err == nil && d != "" && d != "<no value>" {
+		return d, nil
+	}
+	if id, err := c.Runtime.Run(ctx, "", "image", "inspect", baseImage, "--format", "{{.Id}}"); err == nil && id != "" {
+		return id, nil
+	}
+	return "", fmt.Errorf("cannot get base image digest for %s", baseImage)
+}
+
 // imageBuildNeededSlow performs the full check with docker inspect calls.
 func (c *Client) imageBuildNeededSlow(ctx context.Context, imageName, baseImage, platform, contextSHA, activeKey string) bool {
 	c.Logger.Log(ctx, slog.LevelDebug, "checking if image build needed", "image", imageName, "base", baseImage)
@@ -855,13 +883,8 @@ func (c *Client) imageBuildNeededSlow(ctx context.Context, imageName, baseImage,
 		return true
 	}
 
-	// Get the base image digest.
-	var baseDigest string
-	if d, err := c.Runtime.Run(ctx, "", "image", "inspect", baseImage, "--format", "{{index .RepoDigests 0}}"); err == nil && d != "" {
-		baseDigest = d
-	} else if id, err := c.Runtime.Run(ctx, "", "image", "inspect", baseImage, "--format", "{{.Id}}"); err == nil {
-		baseDigest = id
-	} else {
+	baseDigest, err := c.baseImageDigest(ctx, baseImage)
+	if err != nil {
 		c.Logger.Log(ctx, slog.LevelDebug, "build needed: cannot get base image digest", "base", baseImage)
 		return true
 	}
@@ -922,6 +945,29 @@ func (c *Client) imageBuildNeededSlow(ctx context.Context, imageName, baseImage,
 
 	c.Logger.Log(ctx, slog.LevelDebug, "image is up to date", "image", imageName)
 	return false
+}
+
+// untagSpecializedImageIfBasedOn removes imageName when it still points at a
+// specialized image built from staleBaseDigest.
+//
+// This is not needed for launch correctness: ensureImage returns the built image
+// ID, so container startup does not race with later tag changes. It is only a
+// cleanup/policy step for the moment a remote base pull changes the local base:
+// the old specialized tag stops advertising an image built from the previous
+// base, even if the rebuild is interrupted before the new tag is written.
+func (c *Client) untagSpecializedImageIfBasedOn(ctx context.Context, imageName, staleBaseDigest string) {
+	// Another md process may have rebuilt this tag after the base pull. Re-read
+	// the base digest label just before untagging so a fresh specialized image
+	// keeps its tag.
+	storedBaseDigest, err := c.Runtime.Run(ctx, "", "image", "inspect", imageName, "--format", `{{index .Config.Labels "md.base_digest"}}`)
+	if err != nil || storedBaseDigest == "" || storedBaseDigest == "<no value>" || storedBaseDigest != staleBaseDigest {
+		return
+	}
+	if err := c.Runtime.UntagImage(ctx, imageName); err != nil {
+		c.Logger.Log(ctx, slog.LevelWarn, "failed to untag stale specialized image", "image", imageName, "err", err)
+		return
+	}
+	c.Logger.Log(ctx, slog.LevelDebug, "untagged stale specialized image", "image", imageName, "base_digest", staleBaseDigest)
 }
 
 // resolveCaches determines which caches have existing host directories and
@@ -1057,7 +1103,8 @@ func readOnlyCachePaths(active []activeCM) []string {
 }
 
 // buildSpecializedImage builds the per-user Docker image by generating a
-// Dockerfile and running the default runtime builder.
+// Dockerfile and running the default runtime builder. It returns the immutable
+// image ID for the built image.
 //
 // Specialized image build trade-offs:
 //
@@ -1101,19 +1148,19 @@ func readOnlyCachePaths(active []activeCM) []string {
 // keysDir contains SSH host keys and authorized_keys. home resolves "~/" in
 // cache HostPaths. mountPaths lists container-side -v mount targets to
 // pre-create with user ownership.
-func (c *Client) buildSpecializedImage(ctx context.Context, stdout, stderr io.Writer, imageName, baseImage, platform string, caches []CacheMount, mountPaths []string, quiet bool) error {
+func (c *Client) buildSpecializedImage(ctx context.Context, stdout, stderr io.Writer, imageName, baseImage, platform string, caches []CacheMount, mountPaths []string, quiet bool) (string, error) {
 	c.Logger.Log(ctx, slog.LevelDebug, "building specialized image", "image", imageName, "base", baseImage)
 	p := Platform(platform).Resolve()
 	if err := p.Validate(); err != nil {
-		return err
+		return "", err
 	}
 	if err := validateCacheMounts(caches); err != nil {
-		return err
+		return "", err
 	}
 	platform = p.String()
 	arch, err := Platform(platform).Architecture()
 	if err != nil {
-		return err
+		return "", err
 	}
 	// References without an explicit registry are ambiguous: they may name a
 	// local image tag or a Docker Hub repository. Prefer an existing local
@@ -1122,7 +1169,7 @@ func (c *Client) buildSpecializedImage(ctx context.Context, stdout, stderr io.Wr
 	remoteBasePulled := false
 	if isLocal {
 		if _, err := c.Runtime.Run(ctx, "", "image", "inspect", baseImage, "--format", "{{.Id}}"); err != nil {
-			return fmt.Errorf("local image %s not found; build it first with 'md build-image'", baseImage)
+			return "", fmt.Errorf("local image %s not found; build it first with 'md build-image'", baseImage)
 		}
 		if !quiet {
 			_, _ = fmt.Fprintf(stdout, "- Using local base image %s.\n", baseImage)
@@ -1130,6 +1177,7 @@ func (c *Client) buildSpecializedImage(ctx context.Context, stdout, stderr io.Wr
 	} else {
 		// Compare the local image ID before and after pull to detect changes.
 		idBefore, _ := c.Runtime.Run(ctx, "", "image", "inspect", baseImage, "--format", "{{.Id}}")
+		baseDigestBefore, _ := c.baseImageDigest(ctx, baseImage)
 		if !quiet {
 			_, _ = fmt.Fprintf(stdout, "- Pulling base image %s ...\n", baseImage)
 		}
@@ -1145,7 +1193,7 @@ func (c *Client) buildSpecializedImage(ctx context.Context, stdout, stderr io.Wr
 		}
 		if pullErr != nil {
 			if idBefore == "" {
-				return pullErr
+				return "", pullErr
 			}
 			c.Logger.Log(ctx, slog.LevelWarn, "failed to pull base image; using local copy", "image", baseImage, "err", pullErr)
 			if !quiet {
@@ -1154,6 +1202,9 @@ func (c *Client) buildSpecializedImage(ctx context.Context, stdout, stderr io.Wr
 		} else {
 			remoteBasePulled = true
 			idAfter, _ := c.Runtime.Run(ctx, "", "image", "inspect", baseImage, "--format", "{{.Id}}")
+			if idBefore != "" && idAfter != "" && idBefore != idAfter {
+				c.untagSpecializedImageIfBasedOn(ctx, imageName, baseDigestBefore)
+			}
 			if !quiet {
 				if idBefore != "" && idBefore == idAfter {
 					_, _ = fmt.Fprintf(stdout, "  Base image is up to date.\n")
@@ -1166,9 +1217,9 @@ func (c *Client) buildSpecializedImage(ctx context.Context, stdout, stderr io.Wr
 
 	c.Logger.Log(ctx, slog.LevelDebug, "base image ready, fetching base image digest")
 	// Get base image digest for label.
-	baseDigest, err := c.Runtime.Run(ctx, "", "image", "inspect", baseImage, "--format", "{{index .RepoDigests 0}}")
-	if err != nil || baseDigest == "" {
-		baseDigest, _ = c.Runtime.Run(ctx, "", "image", "inspect", baseImage, "--format", "{{.Id}}")
+	baseDigest, err := c.baseImageDigest(ctx, baseImage)
+	if err != nil {
+		return "", err
 	}
 	var manifestDigest string
 	if remoteBasePulled {
@@ -1177,7 +1228,7 @@ func (c *Client) buildSpecializedImage(ctx context.Context, stdout, stderr io.Wr
 
 	contextSHA, err := keysSHA(c.keysDir)
 	if err != nil {
-		return fmt.Errorf("computing keys SHA: %w", err)
+		return "", fmt.Errorf("computing keys SHA: %w", err)
 	}
 
 	active, dirs, activeKey := resolveCaches(caches, c.Home, mountPaths)
@@ -1185,12 +1236,12 @@ func (c *Client) buildSpecializedImage(ctx context.Context, stdout, stderr io.Wr
 	if !quiet {
 		_, _ = fmt.Fprintf(stdout, "- Building container image %s from %s ...\n", imageName, baseImage)
 		// Report skipped caches (host dir does not exist).
-		activeNames := make(map[string]bool, len(active))
+		activeNames := make([]string, 0, len(active))
 		for _, a := range active {
-			activeNames[a.cm.Name] = true
+			activeNames = append(activeNames, a.cm.Name)
 		}
 		for _, cm := range caches {
-			if !activeNames[cm.Name] {
+			if !slices.Contains(activeNames, cm.Name) {
 				_, _ = fmt.Fprintf(stdout, "  Cache %s: %s not found, skipping\n", cm.Name, resolveHostPath(cm.HostPath, c.Home))
 			}
 		}
@@ -1217,49 +1268,54 @@ func (c *Client) buildSpecializedImage(ctx context.Context, stdout, stderr io.Wr
 	// read directly from the host without copying into the context dir.
 	tmpDir, err := os.MkdirTemp("", "md-specialized-*")
 	if err != nil {
-		return fmt.Errorf("creating build context: %w", err)
+		return "", fmt.Errorf("creating build temp dir: %w", err)
 	}
 	defer func() { _ = os.RemoveAll(tmpDir) }()
+	contextDir := filepath.Join(tmpDir, "context")
+	if err := os.Mkdir(contextDir, 0o700); err != nil {
+		return "", fmt.Errorf("creating build context: %w", err)
+	}
 
 	for _, name := range []string{"ssh_host_ed25519_key", "ssh_host_ed25519_key.pub", "authorized_keys"} {
 		data, err := os.ReadFile(filepath.Join(c.keysDir, name)) //nolint:gosec // name is from a hardcoded list
 		if err != nil {
-			return fmt.Errorf("reading %s: %w", name, err)
+			return "", fmt.Errorf("reading %s: %w", name, err)
 		}
-		if err := os.WriteFile(filepath.Join(tmpDir, filepath.Base(name)), data, 0o600); err != nil { //nolint:gosec // name is from a hardcoded list
-			return fmt.Errorf("staging %s: %w", name, err)
+		if err := os.WriteFile(filepath.Join(contextDir, filepath.Base(name)), data, 0o600); err != nil { //nolint:gosec // name is from a hardcoded list
+			return "", fmt.Errorf("staging %s: %w", name, err)
 		}
 	}
 
 	df := generateDockerfile(baseImage, active, dirs, baseDigest, contextSHA, activeKey, manifestDigest)
 	c.Logger.Log(ctx, slog.LevelDebug, "generated Dockerfile", "content", df)
 
-	if err := os.WriteFile(filepath.Join(tmpDir, "Dockerfile"), []byte(df), 0o644); err != nil { //nolint:gosec // Dockerfile is ephemeral, world-readable is fine
-		return fmt.Errorf("writing Dockerfile: %w", err)
+	if err := os.WriteFile(filepath.Join(contextDir, "Dockerfile"), []byte(df), 0o644); err != nil { //nolint:gosec // Dockerfile is ephemeral, world-readable is fine
+		return "", fmt.Errorf("writing Dockerfile: %w", err)
 	}
 
 	// Build the image. --no-cache forces all layers to rebuild (prevents stale
 	// results). We omit --pull so BuildKit won't re-pull the base (we already
 	// pulled above).
-	buildArgs := []string{"build", "--no-cache", "--platform", platform, "-t", imageName}
+	iidFile := filepath.Join(tmpDir, "iid")
+	buildArgs := []string{"build", "--no-cache", "--platform", platform, "-t", imageName, "--iidfile", filepath.ToSlash(iidFile)}
 	for _, a := range active {
 		buildArgs = append(buildArgs, "--build-context", fmt.Sprintf("cache-%s=%s", a.cm.Name, filepath.ToSlash(a.hostPath)))
 	}
-	buildArgs = append(buildArgs, filepath.ToSlash(tmpDir))
+	buildArgs = append(buildArgs, filepath.ToSlash(contextDir))
 
 	if quiet {
 		if _, err := c.Runtime.Run(ctx, "", buildArgs...); err != nil {
 			buildErr := cmdErrWithStderr("building image", err)
 			if isStaleBuilderCacheErr(buildErr) {
 				if _, pruneErr := c.Runtime.Run(ctx, "", "builder", "prune", "-f"); pruneErr != nil {
-					return buildErr
+					return "", buildErr
 				}
 				if _, err2 := c.Runtime.Run(ctx, "", buildArgs...); err2 != nil {
-					return cmdErrWithStderr("building image", err2)
+					return "", cmdErrWithStderr("building image", err2)
 				}
-				return nil
+			} else {
+				return "", buildErr
 			}
-			return buildErr
 		}
 	} else {
 		if err := c.Runtime.RunOut(ctx, "", stdout, stderr, buildArgs...); err != nil {
@@ -1267,17 +1323,24 @@ func (c *Client) buildSpecializedImage(ctx context.Context, stdout, stderr io.Wr
 			if isStaleBuilderCacheErr(buildErr) {
 				_, _ = fmt.Fprintln(stdout, "- Stale BuildKit cache detected; pruning and retrying ...")
 				if _, pruneErr := c.Runtime.Run(ctx, "", "builder", "prune", "-f"); pruneErr != nil {
-					return buildErr
+					return "", buildErr
 				}
 				if err2 := c.Runtime.RunOut(ctx, "", stdout, stderr, buildArgs...); err2 != nil {
-					return fmt.Errorf("building image: %w", err2)
+					return "", fmt.Errorf("building image: %w", err2)
 				}
-				return nil
+			} else {
+				return "", buildErr
 			}
-			return buildErr
 		}
 	}
-	return nil
+	imageID, err := os.ReadFile(iidFile) //nolint:gosec // iidFile is created under our private temporary build context.
+	if err != nil {
+		return "", fmt.Errorf("reading built image ID: %w", err)
+	}
+	if id := strings.TrimSpace(string(imageID)); id != "" {
+		return id, nil
+	}
+	return "", errors.New("reading built image ID: empty iidfile")
 }
 
 // setupSSH ensures SSH keys, authorized_keys, and ~/.ssh/config.d exist.
