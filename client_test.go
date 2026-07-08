@@ -36,24 +36,6 @@ const (
 	fakeSSHLogEnv           = "MD_TEST_FAKE_SSH_LOG"
 )
 
-var testLogStart = time.Now()
-
-func testLogger(t testing.TB) *slog.Logger {
-	return slog.New(slog.NewTextHandler(testLogWriter{t: t}, testLoggerOptions()))
-}
-
-func testLoggerOptions() *slog.HandlerOptions {
-	return &slog.HandlerOptions{
-		Level: slog.LevelDebug,
-		ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
-			if a.Key == slog.TimeKey {
-				return slog.Int64("ms", time.Since(testLogStart).Milliseconds())
-			}
-			return a
-		},
-	}
-}
-
 func testRuntime(t testing.TB, name string, logger Logger, env []string) containers.Runtime {
 	r, err := containers.New(name, logger, env)
 	if err != nil {
@@ -65,15 +47,6 @@ func testRuntime(t testing.TB, name string, logger Logger, env []string) contain
 func testClient(t testing.TB) *Client {
 	logger := testLogger(t)
 	return &Client{Logger: logger, Runtime: testRuntime(t, "docker", logger, nil)}
-}
-
-type testLogWriter struct {
-	t testing.TB
-}
-
-func (w testLogWriter) Write(p []byte) (int, error) {
-	w.t.Log(strings.TrimSuffix(string(p), "\n"))
-	return len(p), nil
 }
 
 func TestMain(m *testing.M) {
@@ -980,4 +953,33 @@ func TestRscFS(t *testing.T) {
 			t.Fatalf("embedded rsc/user/Dockerfile not found: %v", err)
 		}
 	})
+}
+
+//
+
+var testLogStart = time.Now()
+
+func testLogger(t testing.TB) *slog.Logger {
+	return slog.New(slog.NewTextHandler(testLogWriter{t: t}, testLoggerOptions()))
+}
+
+func testLoggerOptions() *slog.HandlerOptions {
+	return &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+		ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
+			if a.Key == slog.TimeKey {
+				return slog.Int64("ms", time.Since(testLogStart).Milliseconds())
+			}
+			return a
+		},
+	}
+}
+
+type testLogWriter struct {
+	t testing.TB
+}
+
+func (w testLogWriter) Write(p []byte) (int, error) {
+	w.t.Log(strings.TrimSuffix(string(p), "\n"))
+	return len(p), nil
 }
