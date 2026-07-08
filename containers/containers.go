@@ -113,17 +113,6 @@ func runtimeName(executable string) string {
 	return strings.TrimSuffix(filepath.Base(executable), ".exe")
 }
 
-// Detect returns the preferred container runtime name.
-func Detect(lookPath func(string) (string, error)) string {
-	if _, err := lookPath("docker"); err == nil {
-		return "docker"
-	}
-	if _, err := lookPath("podman"); err == nil {
-		return "podman"
-	}
-	return "docker"
-}
-
 // parseEvent parses Docker and Podman event JSON.
 func parseEvent(data []byte) (Event, bool) {
 	var ev eventJSON

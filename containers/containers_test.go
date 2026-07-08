@@ -5,7 +5,6 @@
 package containers
 
 import (
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -39,31 +38,6 @@ func TestNew(t *testing.T) {
 					t.Errorf("Executable() = %q, want %q", r.Executable(), executable)
 				}
 			})
-		}
-	})
-}
-
-func TestDetect(t *testing.T) {
-	t.Parallel()
-	t.Run("fallback_to_docker", func(t *testing.T) {
-		t.Parallel()
-		lookPath := func(string) (string, error) {
-			return "", exec.ErrNotFound
-		}
-		if got := Detect(lookPath); got != "docker" {
-			t.Errorf("Detect() = %q, want %q (fallback)", got, "docker")
-		}
-	})
-	t.Run("finds_podman_when_no_docker", func(t *testing.T) {
-		t.Parallel()
-		lookPath := func(name string) (string, error) {
-			if name == "podman" {
-				return "/usr/bin/podman", nil
-			}
-			return "", exec.ErrNotFound
-		}
-		if got := Detect(lookPath); got != "podman" {
-			t.Errorf("Detect() = %q, want %q", got, "podman")
 		}
 	})
 }

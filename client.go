@@ -142,7 +142,7 @@ func newClient(home string, logger Logger, rt containers.Runtime, stdout io.Writ
 	}
 	if rt == nil {
 		var err error
-		rt, err = containers.New(containers.Detect(exec.LookPath), logger, nil)
+		rt, err = containers.New(defaultRuntimeExecutable(), logger, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -164,6 +164,16 @@ func newClient(home string, logger Logger, rt containers.Runtime, stdout io.Writ
 		return nil, err
 	}
 	return c, nil
+}
+
+func defaultRuntimeExecutable() string {
+	if _, err := exec.LookPath("docker"); err == nil {
+		return "docker"
+	}
+	if _, err := exec.LookPath("podman"); err == nil {
+		return "podman"
+	}
+	return "docker"
 }
 
 // Close implements io.Closer.
