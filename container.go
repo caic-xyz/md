@@ -57,6 +57,9 @@ const (
 const (
 	tailscaleDeviceIDPath = "/var/lib/md/tailscale_device_id"
 
+	// containerHomeDir is the container user's home directory.
+	containerHomeDir = "/home/user"
+
 	// Runtime images can contain large repos/caches under /home/user/src;
 	// start.sh may need to repair ownership before SSH is ready.
 	containerSSHReadyTimeout        = 2 * time.Minute
@@ -1330,6 +1333,25 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 		time.Sleep(10 * time.Millisecond)
 	}
 
+	// Restore ownership before pushing. Under rootless podman, `commit` does
+	// not round-trip the keep-id uid mapping, so every file the source
+	// container owned as `user` re-appears root-owned in the fork. For the
+	// repos that breaks git with "detected dubious ownership" and leaves them
+	// unwritable during git-receive-pack; elsewhere in the home it would break
+	// a forked agent's writes. A fresh home has no legitimately root-owned
+	// files, so restoring every root-owned file to `user` (as root, which
+	// start.sh runs as) is both safe and complete. See docs/ROOTLESS.md.
+	//
+	// `find -xdev` stays on the container's own filesystem, so it never
+	// descends into a bind-mounted host directory (which keep-id presents as
+	// user-owned anyway) — host ownership is never rewritten, the reason `:U`
+	// was rejected. `-uid 0` restores only the collapsed files.
+	if c.Runtime.IsRootless() {
+		if _, err := c.Runtime.Run(ctx, "", "exec", "--user", "0:0", fork.Name, "find", containerHomeDir, "-xdev", "-uid", "0", "-exec", "chown", "user:user", "{}", "+"); err != nil {
+			return nil, fmt.Errorf("restoring ownership on forked container: %w", err)
+		}
+	}
+
 	// Inside the forked container: rename source repo branches and push extra
 	// repos as new.
 	if !opts.Quiet {
@@ -2153,6 +2175,9 @@ func (c *Container) launchContainer(ctx context.Context, stdout, stderr io.Write
 	// start.sh running as root for privileged setup (groupmod, sshd, dbus).
 	// Rootless Docker is handled inside start.sh via /proc/self/uid_map
 	// detection since Docker lacks --userns=keep-id.
+	//
+	// Trade-off: keep-id ownership does not round-trip through `podman
+	// commit`, so Fork must re-chown snapshotted repos. See docs/ROOTLESS.md.
 	if c.Runtime.IsRootless() {
 		runArgs = append(runArgs, "--userns=keep-id", "--user", "0:0")
 	}

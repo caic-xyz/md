@@ -454,6 +454,109 @@ func TestSmoke(t *testing.T) {
 					})
 				})
 
+				t.Run("mounts", func(t *testing.T) {
+					// Bind-mount two host directories: one writable, one
+					// read-only. This guards the runtime -v mount contract,
+					// which is distinct from cache injection (caches are
+					// COPYed into the image at build time, not mounted). The
+					// unprivileged "user" account must read and write a
+					// writable mount while the host keeps ownership of the
+					// files, and a read-only mount must be readable but reject
+					// writes. Under rootless podman this depends on
+					// --userns=keep-id mapping the host user to "user".
+					//
+					// The mount directories are left host-user-owned at 0700,
+					// mirroring how AgentMounts exposes the host's real config
+					// dirs (e.g. ~/.claude), so the test exercises the actual
+					// invariant rather than a permissive world-writable dir.
+					hostRW := t.TempDir()
+					hostRO := t.TempDir()
+					if err := os.WriteFile(filepath.Join(hostRW, "seed.txt"), []byte("rw-seed\n"), 0o600); err != nil {
+						t.Fatalf("seed writable mount: %v", err)
+					}
+					if err := os.WriteFile(filepath.Join(hostRO, "seed.txt"), []byte("ro-seed\n"), 0o600); err != nil {
+						t.Fatalf("seed read-only mount: %v", err)
+					}
+
+					ct, err := client.Container()
+					if err != nil {
+						t.Fatalf("Container: %v", err)
+					}
+					ct.Name = "md-smoke-" + rt + "-mounts"
+					removeSmokeContainerIfPresent(t, t.Context(), client, ct.Name)
+					opts := &StartOpts{
+						BaseImage: baseImage,
+						Quiet:     true,
+						Mounts: []Mount{
+							{HostPath: hostRW, ContainerPath: "/home/user/mnt-rw"},
+							{HostPath: hostRO, ContainerPath: "/home/user/mnt-ro", ReadOnly: true},
+						},
+					}
+					if err := ct.Launch(t.Context(), os.Stdout, os.Stderr, opts); err != nil {
+						t.Fatalf("Launch: %v", err)
+					}
+					t.Cleanup(func() {
+						cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 30*time.Second)
+						defer cancel()
+						if err := ct.Purge(cleanupCtx, io.Discard, io.Discard); err != nil {
+							t.Logf("cleanup %s: %v", ct.Name, err)
+						}
+					})
+					if _, err := ct.Connect(t.Context(), io.Discard, io.Discard, opts); err != nil {
+						t.Fatalf("Connect: %v", err)
+					}
+
+					t.Run("writable", func(t *testing.T) {
+						// Read the host-seeded file and write a new one, all as
+						// the unprivileged "user" account.
+						writeCmd := `test "$(id -un)" = user || { echo "unexpected user: $(id -un)"; exit 1; }` +
+							` && cat /home/user/mnt-rw/seed.txt` +
+							` && printf 'from-container\n' > /home/user/mnt-rw/written.txt`
+						out, err := ct.runCmd(t.Context(), "", ct.SSHCommand(nil, writeCmd))
+						if err != nil {
+							t.Fatalf("read+write writable mount: %v\n%s", err, out)
+						}
+						if !strings.Contains(out, "rw-seed") {
+							t.Fatalf("writable mount read = %q, want to contain %q", out, "rw-seed")
+						}
+						// The container's write must be visible back on the
+						// host with the expected content.
+						data, err := os.ReadFile(filepath.Join(hostRW, "written.txt")) //nolint:gosec // hostRW is a test temp dir.
+						if err != nil {
+							t.Fatalf("read container-written file on host: %v", err)
+						}
+						if strings.TrimSpace(string(data)) != "from-container" {
+							t.Fatalf("host content = %q, want %q", strings.TrimSpace(string(data)), "from-container")
+						}
+						// The host user must retain ownership: it can still
+						// overwrite the file the container created. A mount mode
+						// that chowned the tree to a subuid (e.g. dropping
+						// keep-id in favor of ":U") would make this fail with
+						// EACCES.
+						if err := os.WriteFile(filepath.Join(hostRW, "written.txt"), []byte("from-host\n"), 0o600); err != nil {
+							t.Fatalf("host cannot overwrite container-created file (mount lost host ownership): %v", err)
+						}
+					})
+
+					t.Run("readonly", func(t *testing.T) {
+						out, err := ct.runCmd(t.Context(), "", ct.SSHCommand(nil, "cat /home/user/mnt-ro/seed.txt"))
+						if err != nil {
+							t.Fatalf("read read-only mount: %v\n%s", err, out)
+						}
+						if !strings.Contains(out, "ro-seed") {
+							t.Fatalf("read-only mount read = %q, want to contain %q", out, "ro-seed")
+						}
+						// A write must be rejected by the read-only mount and
+						// must not leak to the host.
+						if _, err := ct.runCmd(t.Context(), "", ct.SSHCommand(nil, "printf x > /home/user/mnt-ro/blocked.txt")); err == nil {
+							t.Fatal("write to read-only mount succeeded, want failure")
+						}
+						if _, err := os.Stat(filepath.Join(hostRO, "blocked.txt")); !os.IsNotExist(err) {
+							t.Fatalf("read-only mount leaked a write to the host: err=%v", err)
+						}
+					})
+				})
+
 				t.Run("nested", func(t *testing.T) {
 					if !nestedOK {
 						t.Skip("skipping: nested newuidmap fails with rootless podman (user namespace stacking)")

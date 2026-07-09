@@ -35,6 +35,9 @@ func (p *podman) UntagImage(ctx context.Context, image string) error {
 // container UID 0, so bind-mounted host directories appear root-owned inside
 // the container. Callers use this to inject --userns=keep-id so the host UID
 // maps to the same UID inside the container.
+//
+// Caveat: keep-id ownership does not survive `podman commit`, so callers that
+// snapshot containers (fork) must repair ownership. See docs/ROOTLESS.md.
 func (p *podman) IsRootless() bool {
 	return isRootlessPodman()
 }
