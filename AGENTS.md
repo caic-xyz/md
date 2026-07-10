@@ -42,14 +42,14 @@ The test requires a container runtime (docker or podman) in PATH. Nested podman 
 - **`md-user-local`** — user image built locally from `rsc/user/Dockerfile` on top of `md-root-local` via `md build-image` (second step). Used as base when `-image md-user-local` is passed. `md build-image --platform` can build it for `linux/amd64` or `linux/arm64`; the local tag is overwritten by the requested platform build.
 - **`ghcr.io/caic-xyz/md-root:latest`** — remote root image with system packages. Rebuilt infrequently (when root setup scripts change). Built by `docker-build-root.yml`.
 - **`ghcr.io/caic-xyz/md-user:latest`** (default) or any `-image`/`-tag` variant — remote user image with Go, Node, Rust, etc. Rebuilt weekly. Built by `docker-build-user.yml` on top of `md-root`.
-- **`md-specialized-<hash>`** — specialized per-user image built on top of the chosen base via a generated Dockerfile + `docker build`. A Dockerfile is created at runtime with `COPY --chown` for SSH keys and `COPY --from=<named-context> --chown` for cache directories, then built with `--no-cache --pull=never --build-context cache-<name>=<hostpath>`. This approach was chosen over `docker create`/`cp`/`commit` (slower: `docker cp` uses API round-trips vs COPY's storage-driver-level tar streaming, and requires starting the container for permission fixes) and over a static Dockerfile (cannot adapt to dynamic cache sets). Built automatically by `md start` and `md run` when needed. The image name includes a 32-hex-char hash of (base image, active cache key, platform) so that different base images, cache sets, or CPU architectures get distinct images without clobbering each other. Computed by `userImageName()` in `client.go`.
+- **`md-specialized-<hash>`** — specialized per-user image built on top of the chosen base via a generated Dockerfile + `docker build`. A Dockerfile is created at runtime with `COPY --chown` for SSH keys, a recursive copy of the embedded `rsc/specialized/` seed, and `COPY --from=<named-context> --chown` for cache directories. User-owned image content is chowned to the numeric host UID/GID so it still matches `user` after `start.sh` rewrites the container account. Images are built with `--no-cache --pull=never --build-context cache-<name>=<hostpath>`. This approach was chosen over `docker create`/`cp`/`commit` (slower: `docker cp` uses API round-trips vs COPY's storage-driver-level tar streaming, and requires starting the container for permission fixes) and over a static Dockerfile (cannot adapt to dynamic cache sets). Built automatically by `md start` and `md run` when needed. The image name includes a 32-hex-char hash of (base image, active cache key, platform) so that different base images, cache sets, or CPU architectures get distinct images without clobbering each other. Computed by `userImageName()` in `client.go`.
 
 ### When the user image is rebuilt
 
-`imageBuildNeeded` (`docker.go`) returns `true` (triggering a rebuild) when any of the following change:
+`imageBuildNeeded` (`client.go`) returns `true` (triggering a rebuild) when any of the following change:
 1. `md.base_digest` label missing/empty, or differs from the current base image digest.
 2. For remote base images: registry has a newer version than the local copy.
-3. `md.context_sha` label differs from the SHA of the SSH keys.
+3. `md.context_sha` label differs from the SHA of the SSH keys, embedded `rsc/specialized/` seed, or target user owner.
 4. `md.cache_key` label differs from `cacheSpecKey` of the **active** caches (those whose host directories currently exist). The key includes the cache name, resolved host path, container path, read-only flag, and shallow flag. `md.cache_spec` stores the same active cache specs as base64-encoded JSON for inspection; it is informational and not used for rebuild decisions.
 5. When Docker exposes `ImageManifestDescriptor.platform.architecture`, the inspected architecture differs from the requested normalized platform (`linux/amd64` or `linux/arm64`).
 
@@ -78,7 +78,7 @@ The test requires a container runtime (docker or podman) in PATH. Nested podman 
 | `md.image_type` | Role of the image: `specialized` (per-user build) or `fork-snapshot` (transient fork commit). Used by `PruneImages` to find md-built images, including untagged fork snapshots. |
 | `md.base_image` | Base image reference used at build time |
 | `md.base_digest` | Digest (or image ID for local images) of the base |
-| `md.context_sha` | SHA-256 of SSH keys |
+| `md.context_sha` | SHA-256 of SSH keys, embedded `rsc/specialized/` seed, and target user owner |
 | `md.cache_key` | 8-byte hex hash of the **active** (injected) cache names, resolved host paths, container paths, read-only flags, and shallow flags |
 | `md.cache_spec` | Base64-encoded JSON array of the **active** cache specs baked into the image: name, description, resolved host path, container path, read-only flag, and shallow flag |
 | `md.base_manifest_digest` | Per-platform manifest digest from the registry (remote bases only) |
@@ -145,7 +145,7 @@ The container runs Xvnc (TigerVNC) + XFCE4 on port 5901 accessible via any VNC c
 
 ## Directory Layout (rsc/)
 
-The `rsc/` directory is split into three build contexts, one per image layer:
+The `rsc/` directory is split into build contexts:
 
 - `rsc/root/` — Build context for `md-root` (root image with system packages)
   - `rsc/root/Dockerfile` - Root image build file (FROM debian:stable)
@@ -155,8 +155,16 @@ The `rsc/` directory is split into three build contexts, one per image layer:
     - `rsc/root/etc/profile.d/00-bash-env.sh` - Login Bash hook for the shared environment
   - `rsc/root/root/` - Root-context setup and utilities
     - `rsc/root/root/setup/` - Root-level installation scripts (numbered 1+)
-    - `rsc/root/root/start.sh` - Container entrypoint
+    - `rsc/root/root/start.sh` - Legacy root-image copy of the container entrypoint; keep in sync with `rsc/specialized/root/start.sh` until old md clients no longer depend on the base image copy
+    - `rsc/root/root/vnc-start.sh` - Legacy root-image copy of the VNC/XFCE startup helper
+    - `rsc/root/root/xfce-monitor.sh` - Legacy root-image copy of the XFCE monitor
+    - `rsc/root/root/xvnc-monitor.sh` - Legacy root-image copy of the Xvnc monitor
   - `rsc/root/usr/` - Custom executables (measure_exec.sh)
+- `rsc/specialized/` — Static seed recursively copied into generated specialized images
+  - `rsc/specialized/root/start.sh` - Container entrypoint
+  - `rsc/specialized/root/vnc-start.sh` - VNC/XFCE startup helper
+  - `rsc/specialized/root/xfce-monitor.sh` - XFCE monitor
+  - `rsc/specialized/root/xvnc-monitor.sh` - Xvnc monitor
 - `rsc/user/` — Build context for `md-user` (user image with Go, Node, Rust, etc.)
   - `rsc/user/Dockerfile` - User image build file (FROM md-root)
   - `rsc/user/home/user/` - User-context setup (copied as user to `/home/user/`)
@@ -211,6 +219,10 @@ Autogenerated from first-line comments. Run scripts/update_agents_file_index.py 
 - `rsc/root/root/xfce-monitor.sh`: Monitor XFCE session, restart if it dies
 - `rsc/root/root/xvnc-monitor.sh`: Monitor Xvnc, restart if it dies
 - `rsc/root/usr/local/bin/measure_exec.sh`: Wrapper script to measure execution time of a command and log it to a markdown table.
+- `rsc/specialized/root/start.sh`: Intentionally fail-fast: any startup failure should be visible immediately
+- `rsc/specialized/root/vnc-start.sh`: Start Xvnc and XFCE - runs synchronously during container startup
+- `rsc/specialized/root/xfce-monitor.sh`: Monitor XFCE session, restart if it dies
+- `rsc/specialized/root/xvnc-monitor.sh`: Monitor Xvnc, restart if it dies
 - `rsc/user/Dockerfile`: syntax=docker/dockerfile:1.6
 - `rsc/user/home/user/.config/agents/skills/md-container-environment/SKILL.md`: Development environment and tool integration guide for the md container.
 - `rsc/user/home/user/.config/bash.d/10-env.sh`: User environment files (API keys).

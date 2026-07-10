@@ -986,6 +986,8 @@ func TestFork(t *testing.T) {
 			"LABEL md.sudo=",
 			"LABEL md.sudo-password=",
 			"LABEL custom.label=",
+			"ENV MD_HOST_GID=",
+			"ENV MD_HOST_UID=",
 			"ENV MD_SUDO_PASSWORD=",
 			"ENV MD_TAILSCALE=",
 			"ENV TAILSCALE_AUTHKEY=",

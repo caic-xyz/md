@@ -18,6 +18,8 @@ import (
 	"testing"
 )
 
+const testUserOwner = "1001:1001"
+
 func TestFormatBytes(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -214,11 +216,11 @@ func TestKeysSHA(t *testing.T) {
 	t.Run("deterministic", func(t *testing.T) {
 		t.Parallel()
 		keysDir := writeTestKeys(t)
-		got1, err := keysSHA(keysDir)
+		got1, err := keysSHA(keysDir, testUserOwner)
 		if err != nil {
 			t.Fatal(err)
 		}
-		got2, err := keysSHA(keysDir)
+		got2, err := keysSHA(keysDir, testUserOwner)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -230,19 +232,35 @@ func TestKeysSHA(t *testing.T) {
 	t.Run("changes_with_keys", func(t *testing.T) {
 		t.Parallel()
 		keysDir := writeTestKeys(t)
-		sha1, err := keysSHA(keysDir)
+		sha1, err := keysSHA(keysDir, testUserOwner)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if err := os.WriteFile(filepath.Join(keysDir, "authorized_keys"), []byte("different"), 0o644); err != nil { //nolint:gosec // test data
 			t.Fatal(err)
 		}
-		sha2, err := keysSHA(keysDir)
+		sha2, err := keysSHA(keysDir, testUserOwner)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if sha1 == sha2 {
 			t.Error("keysSHA should change when key content changes")
+		}
+	})
+
+	t.Run("owner_change", func(t *testing.T) {
+		t.Parallel()
+		keysDir := writeTestKeys(t)
+		sha1, err := keysSHA(keysDir, "1001:1001")
+		if err != nil {
+			t.Fatal(err)
+		}
+		sha2, err := keysSHA(keysDir, "1002:1002")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if sha1 == sha2 {
+			t.Error("keysSHA should change when user owner changes")
 		}
 	})
 }
@@ -498,7 +516,7 @@ func TestResolveCaches(t *testing.T) {
 
 	t.Run("mount_paths_included", func(t *testing.T) {
 		t.Parallel()
-		mountPaths := []string{"/home/user/.amp", "/home/user/.claude"}
+		mountPaths := []string{"/home/user/.amp", "/home/user/.local/share/amp"}
 		_, dirs, activeKey := resolveCaches(nil, "/home/user", mountPaths)
 
 		if activeKey != "" {
@@ -507,6 +525,11 @@ func TestResolveCaches(t *testing.T) {
 		for _, want := range mountPaths {
 			if !slices.Contains(dirs, want) {
 				t.Errorf("dirs = %v, want to contain %s", dirs, want)
+			}
+		}
+		for _, want := range []string{"/home/user/.local", "/home/user/.local/share"} {
+			if !slices.Contains(dirs, want) {
+				t.Errorf("dirs = %v, want to contain parent %s", dirs, want)
 			}
 		}
 	})
@@ -631,12 +654,15 @@ func TestGenerateDockerfile(t *testing.T) {
 	t.Parallel()
 	t.Run("no_caches_no_dirs", func(t *testing.T) {
 		t.Parallel()
-		got := generateDockerfile("mybase:latest", nil, nil, "sha256:abc", "ctxsha", "", "")
+		got := generateDockerfile("mybase:latest", nil, nil, testUserOwner, "sha256:abc", "ctxsha", "", "")
 		if !strings.Contains(got, "FROM mybase:latest\n") {
 			t.Error("missing FROM line")
 		}
 		if !strings.Contains(got, "COPY --chown=root:root ssh_host_ed25519_key") {
 			t.Error("missing SSH key COPY")
+		}
+		if !strings.Contains(got, "COPY --chown=root:root --chmod=755 root/ /root/") {
+			t.Error("missing specialized root COPY")
 		}
 		if !strings.Contains(got, `LABEL md.base_digest="sha256:abc"`) {
 			t.Errorf("missing base_digest label in:\n%s", got)
@@ -654,8 +680,8 @@ func TestGenerateDockerfile(t *testing.T) {
 		active := []activeCM{{
 			cm: CacheMount{Name: "go-mod", ContainerPath: "/home/user/go/pkg/mod"},
 		}}
-		got := generateDockerfile("base:v1", active, []string{"/home/user/go/pkg/mod"}, "", "", "cachekey", "")
-		if !strings.Contains(got, `COPY --from=cache-go-mod --chown=user:user [".", "/home/user/go/pkg/mod/"]`) {
+		got := generateDockerfile("base:v1", active, []string{"/home/user/go/pkg/mod"}, testUserOwner, "", "", "cachekey", "")
+		if !strings.Contains(got, `COPY --from=cache-go-mod --chown=1001:1001 [".", "/home/user/go/pkg/mod/"]`) {
 			t.Errorf("missing recursive COPY in:\n%s", got)
 		}
 		if !strings.Contains(got, "mkdir -p /home/user/go/pkg/mod") {
@@ -668,7 +694,7 @@ func TestGenerateDockerfile(t *testing.T) {
 		active := []activeCM{{
 			cm: CacheMount{Name: "go-mod", ContainerPath: "/home/user/go/pkg/mod", ReadOnly: true},
 		}}
-		got := generateDockerfile("base:v1", active, []string{"/home/user/go/pkg/mod"}, "", "", "cachekey", "")
+		got := generateDockerfile("base:v1", active, []string{"/home/user/go/pkg/mod"}, testUserOwner, "", "", "cachekey", "")
 		if !strings.Contains(got, `COPY --from=cache-go-mod --chown=root:root [".", "/home/user/go/pkg/mod/"]`) {
 			t.Errorf("missing read-only recursive COPY in:\n%s", got)
 		}
@@ -683,11 +709,11 @@ func TestGenerateDockerfile(t *testing.T) {
 			cm:    CacheMount{Name: "android-keys", ContainerPath: "/home/user/.android"},
 			files: []string{"debug.keystore", "adbkey"},
 		}}
-		got := generateDockerfile("base:v1", active, nil, "", "", "", "")
-		if !strings.Contains(got, `COPY --from=cache-android-keys --chown=user:user ["debug.keystore", "/home/user/.android/"]`) {
+		got := generateDockerfile("base:v1", active, nil, testUserOwner, "", "", "", "")
+		if !strings.Contains(got, `COPY --from=cache-android-keys --chown=1001:1001 ["debug.keystore", "/home/user/.android/"]`) {
 			t.Errorf("missing shallow COPY for debug.keystore in:\n%s", got)
 		}
-		if !strings.Contains(got, `COPY --from=cache-android-keys --chown=user:user ["adbkey", "/home/user/.android/"]`) {
+		if !strings.Contains(got, `COPY --from=cache-android-keys --chown=1001:1001 ["adbkey", "/home/user/.android/"]`) {
 			t.Errorf("missing shallow COPY for adbkey in:\n%s", got)
 		}
 	})
@@ -698,7 +724,7 @@ func TestGenerateDockerfile(t *testing.T) {
 			cm:    CacheMount{Name: "android-keys", ContainerPath: "/home/user/.android", ReadOnly: true},
 			files: []string{"debug.keystore"},
 		}}
-		got := generateDockerfile("base:v1", active, []string{"/home/user/.android"}, "", "", "", "")
+		got := generateDockerfile("base:v1", active, []string{"/home/user/.android"}, testUserOwner, "", "", "", "")
 		if !strings.Contains(got, `COPY --from=cache-android-keys --chown=root:root ["debug.keystore", "/home/user/.android/"]`) {
 			t.Errorf("missing read-only shallow COPY in:\n%s", got)
 		}
@@ -713,7 +739,7 @@ func TestGenerateDockerfile(t *testing.T) {
 			cm:    CacheMount{Name: "keys", ContainerPath: "/home/user/.keys"},
 			files: []string{"my key.pem"},
 		}}
-		got := generateDockerfile("base:v1", active, nil, "", "", "", "")
+		got := generateDockerfile("base:v1", active, nil, testUserOwner, "", "", "", "")
 		// JSON form should properly quote the filename.
 		if !strings.Contains(got, `"my key.pem"`) {
 			t.Errorf("filename with spaces not properly quoted in:\n%s", got)
@@ -723,7 +749,7 @@ func TestGenerateDockerfile(t *testing.T) {
 	t.Run("dir_with_spaces", func(t *testing.T) {
 		t.Parallel()
 		dirs := []string{"/home/user/my cache"}
-		got := generateDockerfile("base:v1", nil, dirs, "", "", "", "")
+		got := generateDockerfile("base:v1", nil, dirs, testUserOwner, "", "", "", "")
 		if !strings.Contains(got, "'/home/user/my cache'") {
 			t.Errorf("dir with spaces not shell-quoted in:\n%s", got)
 		}
@@ -731,7 +757,7 @@ func TestGenerateDockerfile(t *testing.T) {
 
 	t.Run("labels_set", func(t *testing.T) {
 		t.Parallel()
-		got := generateDockerfile("img", nil, nil, "dig", "ctx", "ckey", "mdig")
+		got := generateDockerfile("img", nil, nil, testUserOwner, "dig", "ctx", "ckey", "mdig")
 		for _, want := range []string{
 			`LABEL md.image_type="specialized"`,
 			`LABEL md.base_digest="dig"`,
@@ -745,6 +771,27 @@ func TestGenerateDockerfile(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestStageStartupScripts(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if err := stageStartupScripts(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, name := range []string{"start.sh", "vnc-start.sh", "xfce-monitor.sh", "xvnc-monitor.sh"} {
+		info, err := os.Stat(filepath.Join(dir, "root", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if runtime.GOOS == "windows" {
+			continue
+		}
+		if info.Mode().Perm() != 0o755 {
+			t.Errorf("%s mode = %v, want 0755", name, info.Mode().Perm())
+		}
+	}
 }
 
 func TestIsExecutable(t *testing.T) {
@@ -784,6 +831,10 @@ func TestIsExecutable(t *testing.T) {
 		"rsc/root/root/vnc-start.sh",
 		"rsc/root/root/xfce-monitor.sh",
 		"rsc/root/root/xvnc-monitor.sh",
+		"rsc/specialized/root/start.sh",
+		"rsc/specialized/root/vnc-start.sh",
+		"rsc/specialized/root/xfce-monitor.sh",
+		"rsc/specialized/root/xvnc-monitor.sh",
 		"rsc/root/usr/local/bin/git-credential-github",
 		"rsc/root/usr/local/bin/google-chrome-stable",
 		"rsc/root/usr/local/bin/measure_exec.sh",

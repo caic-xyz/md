@@ -125,6 +125,14 @@ func TestHarnessMounts(t *testing.T) {
 	}
 }
 
+func TestAgentContainerPaths(t *testing.T) {
+	t.Parallel()
+	paths := agentContainerPaths()
+	if !slices.Contains(paths, "/home/user/src") {
+		t.Errorf("agentContainerPaths() = %v, want /home/user/src", paths)
+	}
+}
+
 func TestWellKnownCaches(t *testing.T) {
 	t.Parallel()
 	if len(WellKnownCaches) == 0 {
@@ -487,7 +495,7 @@ func newImageDecisionTestClient(t *testing.T, imageName, baseImage string) (*Cli
 	if err := c.setupSSH(io.Discard); err != nil {
 		t.Fatal(err)
 	}
-	contextSHA, err := keysSHA(c.keysDir)
+	contextSHA, err := keysSHA(c.keysDir, hostUserOwner())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -951,6 +959,9 @@ func TestRscFS(t *testing.T) {
 		t.Parallel()
 		if _, err := rscFS.ReadFile("rsc/user/Dockerfile"); err != nil {
 			t.Fatalf("embedded rsc/user/Dockerfile not found: %v", err)
+		}
+		if _, err := rscFS.ReadFile("rsc/specialized/root/start.sh"); err != nil {
+			t.Fatalf("embedded rsc/specialized/root/start.sh not found: %v", err)
 		}
 	})
 }

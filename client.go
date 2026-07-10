@@ -107,6 +107,8 @@ type Client struct {
 	imageBuildCache *imageBuildCacheEntry
 }
 
+const specializedBuildContextPrefix = "rsc/specialized"
+
 // New creates a Client with global MD tool config and initialises SSH
 // infrastructure (keys, authorized_keys, config.d include).
 //
@@ -599,7 +601,14 @@ func extractEmbeddedTree(prefix, tmpPattern string) (dir string, retErr error) {
 			retErr = errors.Join(retErr, os.RemoveAll(tmp))
 		}
 	}()
-	err = fs.WalkDir(rscFS, prefix, func(path string, d fs.DirEntry, err error) error {
+	if err := extractEmbeddedTreeTo(prefix, tmp); err != nil {
+		return "", err
+	}
+	return tmp, nil
+}
+
+func extractEmbeddedTreeTo(prefix, dir string) error {
+	err := fs.WalkDir(rscFS, prefix, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -607,7 +616,7 @@ func extractEmbeddedTree(prefix, tmpPattern string) (dir string, retErr error) {
 		if rel == "" || rel == path {
 			return nil
 		}
-		target := filepath.Join(tmp, rel)
+		target := filepath.Join(dir, rel)
 		if d.IsDir() {
 			return os.MkdirAll(target, 0o755) //nolint:gosec // matches embedded filesystem permissions
 		}
@@ -623,9 +632,9 @@ func extractEmbeddedTree(prefix, tmpPattern string) (dir string, retErr error) {
 		return os.WriteFile(target, data, mode)
 	})
 	if err != nil {
-		return "", fmt.Errorf("extracting %s: %w", prefix, err)
+		return fmt.Errorf("extracting %s: %w", prefix, err)
 	}
-	return tmp, nil
+	return nil
 }
 
 // isExecutable reports whether a file from the embedded rsc filesystem should
@@ -649,11 +658,13 @@ func prepareRootBuildContext() (string, error) {
 	return extractEmbeddedTree("rsc/root", "md-build-root-*")
 }
 
-// keysSHA computes a deterministic SHA-256 hash over the SSH key files in
-// keysDir. This is used to detect when SSH keys change and trigger an image
-// rebuild.
-func keysSHA(keysDir string) (string, error) {
+// keysSHA computes a deterministic SHA-256 hash over files copied into the
+// specialized image build context. This is used to detect when SSH keys,
+// startup scripts, or the target user owner change and trigger an image rebuild.
+func keysSHA(keysDir, userOwner string) (string, error) {
 	h := sha256.New()
+	_, _ = io.WriteString(h, "user_owner")
+	_, _ = io.WriteString(h, userOwner)
 	for _, name := range []string{"ssh_host_ed25519_key", "ssh_host_ed25519_key.pub", "authorized_keys"} {
 		data, err := os.ReadFile(filepath.Join(keysDir, name)) //nolint:gosec // name is from a hardcoded list
 		if err != nil {
@@ -662,7 +673,46 @@ func keysSHA(keysDir string) (string, error) {
 		_, _ = io.WriteString(h, name)
 		_, _ = h.Write(data)
 	}
+	if err := hashEmbeddedTree(h, specializedBuildContextPrefix); err != nil {
+		return "", err
+	}
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func hashEmbeddedTree(w io.Writer, prefix string) error {
+	return fs.WalkDir(rscFS, prefix, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if p == prefix {
+			return nil
+		}
+		if _, err := fmt.Fprintf(w, "%d:%s\x00", len(p), p); err != nil {
+			return err
+		}
+		if d.IsDir() {
+			_, err := io.WriteString(w, "dir\x00")
+			return err
+		}
+		data, err := rscFS.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		if _, err := io.WriteString(w, "file\x00"); err != nil {
+			return err
+		}
+		_, err = w.Write(data)
+		return err
+	})
+}
+
+func hostUserOwner() string {
+	uid := os.Getuid()
+	gid := os.Getgid()
+	if uid == 0 || gid == 0 {
+		return "user:user"
+	}
+	return fmt.Sprintf("%d:%d", uid, gid)
 }
 
 func (c *Client) getImageVersionLabel(ctx context.Context, imageName string) string {
@@ -814,7 +864,8 @@ func (c *Client) imageBuildNeeded(ctx context.Context, imageName, baseImage, pla
 	}
 	platform = p.String()
 	// Compute cheap inputs first so we can check the cache.
-	contextSHA, err := keysSHA(c.keysDir)
+	userOwner := hostUserOwner()
+	contextSHA, err := keysSHA(c.keysDir, userOwner)
 	if err != nil {
 		return true
 	}
@@ -1020,17 +1071,20 @@ func resolveCaches(caches []CacheMount, home string, mountPaths []string) (activ
 
 	// Collect directories to pre-create:
 	// - For cache destinations: intermediaries and the leaf itself.
-	// - For runtime -v mount targets: the full path (leaf included).
+	// - For runtime -v mount targets: intermediaries and the leaf itself.
 	const base = "/home/user"
 	seen := map[string]bool{}
-	for _, a := range active {
-		seen[a.cm.ContainerPath] = true
-		for dir := path.Dir(a.cm.ContainerPath); dir != base && dir != "." && dir != "/"; dir = path.Dir(dir) {
+	addDirWithParents := func(p string) {
+		seen[p] = true
+		for dir := path.Dir(p); dir != base && dir != "." && dir != "/"; dir = path.Dir(dir) {
 			seen[dir] = true
 		}
 	}
+	for _, a := range active {
+		addDirWithParents(a.cm.ContainerPath)
+	}
 	for _, p := range mountPaths {
-		seen[p] = true
+		addDirWithParents(p)
 	}
 	dirs = make([]string, 0, len(seen))
 	for d := range seen {
@@ -1041,14 +1095,15 @@ func resolveCaches(caches []CacheMount, home string, mountPaths []string) (activ
 }
 
 // generateDockerfile produces the Dockerfile content for a specialized image.
-func generateDockerfile(baseImage string, active []activeCM, dirs []string, baseDigest, contextSHA, activeKey, manifestDigest string) string {
+func generateDockerfile(baseImage string, active []activeCM, dirs []string, userOwner, baseDigest, contextSHA, activeKey, manifestDigest string) string {
 	var df strings.Builder
 	fmt.Fprintf(&df, "FROM %s\n", baseImage)
+	df.WriteString("COPY --chown=root:root --chmod=755 root/ /root/\n")
 	df.WriteString("COPY --chown=root:root ssh_host_ed25519_key /etc/ssh/ssh_host_ed25519_key\n")
 	df.WriteString("COPY --chown=root:root ssh_host_ed25519_key.pub /etc/ssh/ssh_host_ed25519_key.pub\n")
-	df.WriteString("COPY --chown=user:user authorized_keys /home/user/.ssh/authorized_keys\n")
+	fmt.Fprintf(&df, "COPY --chown=%s authorized_keys /home/user/.ssh/authorized_keys\n", userOwner)
 	for _, a := range active {
-		owner := "user:user"
+		owner := userOwner
 		if a.cm.ReadOnly {
 			owner = "root:root"
 		}
@@ -1074,7 +1129,7 @@ func generateDockerfile(baseImage string, active []activeCM, dirs []string, base
 			quoted[i] = shellQuote(d)
 		}
 		joined := strings.Join(quoted, " ")
-		fmt.Fprintf(&run, " && mkdir -p %s && chown user:user %s", joined, joined)
+		fmt.Fprintf(&run, " && mkdir -p %s && chown %s %s", joined, userOwner, joined)
 	}
 	readOnlyPaths := readOnlyCachePaths(active)
 	if len(readOnlyPaths) > 0 {
@@ -1236,7 +1291,8 @@ func (c *Client) buildSpecializedImage(ctx context.Context, stdout, stderr io.Wr
 		manifestDigest, _ = c.Runtime.RemoteManifestDigest(ctx, baseImage, arch)
 	}
 
-	contextSHA, err := keysSHA(c.keysDir)
+	userOwner := hostUserOwner()
+	contextSHA, err := keysSHA(c.keysDir, userOwner)
 	if err != nil {
 		return "", fmt.Errorf("computing keys SHA: %w", err)
 	}
@@ -1295,8 +1351,11 @@ func (c *Client) buildSpecializedImage(ctx context.Context, stdout, stderr io.Wr
 			return "", fmt.Errorf("staging %s: %w", name, err)
 		}
 	}
+	if err := stageStartupScripts(contextDir); err != nil {
+		return "", err
+	}
 
-	df := generateDockerfile(baseImage, active, dirs, baseDigest, contextSHA, activeKey, manifestDigest)
+	df := generateDockerfile(baseImage, active, dirs, userOwner, baseDigest, contextSHA, activeKey, manifestDigest)
 	c.Logger.Log(ctx, slog.LevelDebug, "generated Dockerfile", "content", df)
 
 	if err := os.WriteFile(filepath.Join(contextDir, "Dockerfile"), []byte(df), 0o644); err != nil { //nolint:gosec // Dockerfile is ephemeral, world-readable is fine
@@ -1351,6 +1410,10 @@ func (c *Client) buildSpecializedImage(ctx context.Context, stdout, stderr io.Wr
 		return id, nil
 	}
 	return "", errors.New("reading built image ID: empty iidfile")
+}
+
+func stageStartupScripts(contextDir string) error {
+	return extractEmbeddedTreeTo(specializedBuildContextPrefix, contextDir)
 }
 
 // setupSSH ensures SSH keys, authorized_keys, and ~/.ssh/config.d exist.
@@ -1677,7 +1740,8 @@ func agentContainerPaths() []string {
 		all.LocalSharePaths = append(all.LocalSharePaths, p.LocalSharePaths...)
 		all.LocalStatePaths = append(all.LocalStatePaths, p.LocalStatePaths...)
 	}
-	paths := make([]string, 0, len(all.HomePaths)+len(all.XDGConfigPaths)+len(all.LocalSharePaths)+len(all.LocalStatePaths))
+	paths := make([]string, 0, 1+len(all.HomePaths)+len(all.XDGConfigPaths)+len(all.LocalSharePaths)+len(all.LocalStatePaths))
+	paths = append(paths, "/home/user/src")
 	for _, p := range all.HomePaths {
 		paths = append(paths, "/home/user/"+p)
 	}

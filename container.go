@@ -106,6 +106,8 @@ fi`
 
 var forkSnapshotEnvKeys = [...]string{
 	"MD_DISPLAY",
+	"MD_HOST_GID",
+	"MD_HOST_UID",
 	"MD_SUDO_PASSWORD",
 	"MD_TAILSCALE",
 	"MD_TAILSCALE_EPHEMERAL",
@@ -2170,9 +2172,13 @@ func (c *Container) launchContainer(ctx context.Context, stdout, stderr io.Write
 		runArgs = append(runArgs, "--security-opt", "apparmor=unconfined")
 	}
 
+	hostIDs := hostUserEnv()
+	runArgs = append(runArgs, hostIDs...)
+
 	// Rootless podman: --userns=keep-id maps host UID to same UID inside the
-	// container so bind-mounted configs are writable. --user 0:0 keeps
-	// start.sh running as root for privileged setup (groupmod, sshd, dbus).
+	// container so bind-mounted configs are writable. start.sh moves the image
+	// "user" account to that UID/GID using MD_HOST_UID/MD_HOST_GID above.
+	// --user 0:0 keeps start.sh running as root for privileged setup.
 	// Rootless Docker is handled inside start.sh via /proc/self/uid_map
 	// detection since Docker lacks --userns=keep-id.
 	//
@@ -2355,6 +2361,15 @@ func (c *Container) launchContainer(ctx context.Context, stdout, stderr io.Write
 		}
 	}
 	return nil
+}
+
+func hostUserEnv() []string {
+	uid := os.Getuid()
+	gid := os.Getgid()
+	if uid <= 0 || gid <= 0 {
+		return nil
+	}
+	return []string{"-e", "MD_HOST_UID=" + strconv.Itoa(uid), "-e", "MD_HOST_GID=" + strconv.Itoa(gid)}
 }
 
 // waitForTCP polls until a TCP connection to addr succeeds or the deadline is

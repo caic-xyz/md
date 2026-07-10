@@ -37,10 +37,12 @@ runs unmodified in a VM, where the container-only blocks simply don't trigger. S
 
 ## Current coupling (where we are)
 
-- `start.sh` reaches the image via `COPY root/ /root/` in `rsc/root/Dockerfile`, and three
-  Dockerfiles carry `CMD ["/root/start.sh"]` (`rsc/root/Dockerfile`, `rsc/user/Dockerfile`,
-  and the generated specialized Dockerfile in `generateDockerfile`, `client.go`).
-- The `rsc/` tree is embedded in the binary (`//go:embed all:rsc`, `docker.go`), so the script
+- `start.sh` and the VNC/XFCE monitor scripts are being migrated to `rsc/specialized/root/`.
+  For compatibility, `rsc/root/root/` still carries a legacy copy for old md clients and existing
+  root/user image builds. New md binaries copy the `rsc/specialized/` seed into generated
+  specialized images, so runtime script changes do not have to wait for the remote base image to be
+  rebuilt.
+- The `rsc/` tree is embedded in the binary (`//go:embed all:rsc`, `build.go`), so the script
   bytes are already available host-side at runtime — this is the lever for moving them.
 - md connects by SSH as `user` to a published `127.0.0.1::22` (`launchContainer`,
   `container.go`; `ssh.go` hardcodes `User user`). `start.sh` is also pid-1 keep-alive
@@ -54,17 +56,17 @@ Go/Rust/node tooling and the `service`/`/etc/init.d` assumptions regardless of t
 
 ## Layer A — script delivery (mechanical, low risk)
 
-Stop relying on the base to carry the scripts. Extract `start.sh`, `vnc-start.sh`,
-`xfce-monitor.sh`, `xvnc-monitor.sh` from the embedded FS into the specialized build context
-and `COPY` them into the specialized image, setting `CMD` there. Remove the `COPY root/` +
-`CMD` reliance from the base.
+Stop relying on the base to carry stale script bytes. Keep startup files under
+`rsc/specialized/`, then recursively copy that seed into generated specialized images, setting
+`CMD` there. Keep the old `rsc/root/root/` copies during the migration window, and remove them only
+after deployed md clients no longer rely on scripts baked into the base image.
 
 Tasks:
-- [ ] In `generateDockerfile`, emit `COPY` for the four scripts and `CMD ["/root/start.sh"]`
-      (already emits the CMD; add the COPYs + ship the files in the build context dir).
-- [ ] In `buildSpecializedImage`, write the four scripts into `tmpDir` alongside the SSH keys.
-- [ ] Update `docker_test.go` assertions (currently pins `CMD ["/root/start.sh"]` and the four
-      scripts being executable in the embedded FS).
+- [x] In `generateDockerfile`, emit a recursive `COPY` for the specialized seed and
+      `CMD ["/root/start.sh"]`.
+- [x] In `buildSpecializedImage`, write the `rsc/specialized/` tree into `tmpDir` alongside the
+      SSH keys.
+- [x] Update Dockerfile and staging assertions for the recursive seed copy.
 
 Trade-offs:
 - COPY-into-specialized: a `start.sh` edit now invalidates every specialized image instead of
@@ -255,10 +257,11 @@ moves:
   base errors out, it does not silently come up GUI-less.
 - **Detect-and-provision for the mandatory few.** The `user` account and `/home/user`,
   `/home/user/.ssh`, `/run/md` dirs can be created at boot if absent (`getent passwd user ||
-  useradd -m -u 1000 -s /bin/bash user`). Must be idempotent (re-runs on every revive) and pin
-  UID 1000 so injected caches keep matching ownership. `sshd` itself is **not** boot-provisioned
-  — installing a package on every boot is too slow and needs network; that stays a build-time
-  (B1) or contract (B2) concern.
+  useradd -m -u 1000 -s /bin/bash user`). Must be idempotent (re-runs on every revive). The
+  specialized build uses numeric host ownership for injected writable content; boot still needs a
+  `user` account that can be rewritten to that UID/GID. `sshd` itself is **not** boot-provisioned —
+  installing a package on every boot is too slow and needs network; that stays a build-time (B1) or
+  contract (B2) concern.
 
 Tasks (B3):
 - [ ] Add a `have()` guard and wrap dbus, tailscale, kvm-GID, USB, sudo/`proc` blocks; replace
@@ -270,13 +273,11 @@ Tasks (B3):
 
 Pitfalls specific to B3:
 - **Build-time COPY vs runtime user creation (chicken-and-egg).** The specialized Dockerfile
-  does `COPY --chown=user:user authorized_keys /home/user/.ssh/...` (`generateDockerfile`,
-  `client.go`). That `--chown` fails if `user` doesn't exist at *build* time. So either (a)
-  provision the user in a specialized-build `RUN useradd` *before* the COPY (build-time, not
-  start.sh), or (b) COPY `authorized_keys` to a root-owned staging path and have start.sh create
-  the user and move/chown it at boot. (a) keeps a stable identity and the COPY semantics; (b)
-  is purer "any image" but adds a runtime placement step. Note this is the same tension that
-  makes build-time provisioning often cleaner than start.sh provisioning.
+  copies user-owned files with numeric `--chown=<host-uid>:<host-gid>` (`generateDockerfile`,
+  `client.go`). Numeric `--chown` avoids a build-time name lookup, but `start.sh` still needs a
+  `user` account before SSH starts so it can rewrite that account to the same UID/GID and repair
+  critical paths. A root-owned staging path plus a boot-time move remains the purer "any image"
+  route, but adds a runtime placement step.
 - **UID collision.** If the foreign image already uses UID 1000 for a different account,
   `useradd -u 1000` fails and cache ownership (chowned to 1000 at build) is wrong. Detect and
   fail loudly, or pick/echo a UID and feed it back into the chown — but a dynamic UID undermines
@@ -309,9 +310,9 @@ supplies keep-alive + sshd independently of the base — out of scope here.
 
 ## Cross-cutting pitfalls
 
-- **UID/ownership**: the generated Dockerfile `chown user:user`s caches and dirs; rootless
-  podman uses `--user 0:0 --userns=keep-id`. Both assume `user`/1000 exists on the base. A
-  foreign image with UID 1000 already taken, or no `user`, breaks cache injection silently.
+- **UID/ownership**: the generated Dockerfile `chown user:user`s caches and dirs. At startup,
+  md moves `user` to the host UID/GID and repairs `/home/user` ownership without crossing bind
+  mounts. A foreign image still needs a `user` account and a Debian-compatible user/group toolchain.
 - **Debian-isms in start.sh**: `service ssh start`, `/etc/init.d/dbus`, apt layout. Porting to
   non-Debian means rewriting these, not just installing packages.
 - **Privileged first boot**: `groupmod` (kvm/plugdev GID match), `/proc` remount (nested
@@ -388,9 +389,8 @@ lands first, and container-only conveniences stay leaves:
 
 These are not introduced by this work but bear on it; fix independently.
 
-- **UID 1000 is an unenforced invariant.** `4_create_user.sh` runs `useradd -ms /bin/bash user`
-  with no `-u`, so `user` only gets UID 1000 by virtue of being the first account on fresh
-  Debian. The entire cache-injection model (`COPY --chown=user:user`, the boot-time provisioning
-  in B3, the B2 probe) depends on UID 1000. If a future root setup script ever creates an account
-  first, the UID drifts silently and cache ownership breaks. Pin it: `useradd -u 1000 -ms
-  /bin/bash user`. Doing this now de-risks every Layer-B path.
+- **UID 1000 is an unenforced base-image invariant.** `4_create_user.sh` runs
+  `useradd -ms /bin/bash user` with no `-u`, so `user` only gets UID 1000 by virtue of being the
+  first account on fresh Debian. Runtime startup now rewrites `user` to the host UID/GID and
+  specialized image content is chowned numerically, but the base image should still pin the initial
+  account for predictable BYO-image behavior: `useradd -u 1000 -ms /bin/bash user`.
