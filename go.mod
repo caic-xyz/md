@@ -4,7 +4,7 @@ go 1.26.4
 
 require (
 	github.com/maruel/genai v0.6.3
-	golang.org/x/crypto v0.51.0
+	golang.org/x/crypto v0.52.0
 	golang.org/x/sync v0.20.0
 	golang.org/x/term v0.43.0
 )
