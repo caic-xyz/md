@@ -128,8 +128,10 @@ func TestHarnessMounts(t *testing.T) {
 func TestAgentContainerPaths(t *testing.T) {
 	t.Parallel()
 	paths := agentContainerPaths()
-	if !slices.Contains(paths, "/home/user/src") {
-		t.Errorf("agentContainerPaths() = %v, want /home/user/src", paths)
+	for _, want := range []string{"/home/user/src", "/home/user/.agents"} {
+		if !slices.Contains(paths, want) {
+			t.Errorf("agentContainerPaths() = %v, want %s", paths, want)
+		}
 	}
 }
 
@@ -238,6 +240,7 @@ func TestClient(t *testing.T) {
 			t.Fatalf("AgentMounts: %v", err)
 		}
 		wantDirs := []string{
+			filepath.Join(home, ".agents"),
 			filepath.Join(home, ".claude"),
 			filepath.Join(home, ".config", "agents"),
 			filepath.Join(home, ".config", "md"),
@@ -250,6 +253,11 @@ func TestClient(t *testing.T) {
 			if !info.IsDir() {
 				t.Fatalf("%s is not a directory", d)
 			}
+		}
+		if !slices.ContainsFunc(mounts, func(m Mount) bool {
+			return m.HostPath == filepath.Join(home, ".agents") && m.ContainerPath == "/home/user/.agents"
+		}) {
+			t.Fatalf("AgentMounts missing shared agent skills mount: %+v", mounts)
 		}
 		if !slices.ContainsFunc(mounts, func(m Mount) bool {
 			return m.HostPath == filepath.Join(home, ".claude") && m.ContainerPath == "/home/user/.claude"

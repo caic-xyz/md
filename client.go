@@ -1714,6 +1714,7 @@ var (
 // alwaysPaths are merged into every container's mount set automatically.
 // Callers do not need to include these; Client methods add them internally.
 var alwaysPaths = AgentPaths{
+	HomePaths:      []string{".agents"},
 	XDGConfigPaths: []string{"agents", "md"},
 }
 
