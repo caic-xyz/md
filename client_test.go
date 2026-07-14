@@ -235,15 +235,18 @@ func TestClient(t *testing.T) {
 		if err != nil {
 			t.Fatalf("newClient: %v", err)
 		}
-		mounts, err := c.AgentMounts(HarnessMounts[HarnessClaude])
+		mounts, err := c.AgentMounts(
+			HarnessMounts[HarnessClaude],
+			AgentPaths{HomePaths: []string{"custom-ro"}, ReadOnly: true},
+		)
 		if err != nil {
 			t.Fatalf("AgentMounts: %v", err)
 		}
 		wantDirs := []string{
 			filepath.Join(home, ".agents"),
 			filepath.Join(home, ".claude"),
-			filepath.Join(home, ".config", "agents"),
 			filepath.Join(home, ".config", "md"),
+			filepath.Join(home, "custom-ro"),
 		}
 		for _, d := range wantDirs {
 			info, err := os.Stat(d)
@@ -259,6 +262,11 @@ func TestClient(t *testing.T) {
 		}) {
 			t.Fatalf("AgentMounts missing shared agent skills mount: %+v", mounts)
 		}
+		if slices.ContainsFunc(mounts, func(m Mount) bool {
+			return m.HostPath == filepath.Join(home, ".config", "agents") || m.ContainerPath == "/home/user/.config/agents"
+		}) {
+			t.Fatalf("AgentMounts contains non-standard agents config mount: %+v", mounts)
+		}
 		if !slices.ContainsFunc(mounts, func(m Mount) bool {
 			return m.HostPath == filepath.Join(home, ".claude") && m.ContainerPath == "/home/user/.claude"
 		}) {
@@ -269,12 +277,67 @@ func TestClient(t *testing.T) {
 		}) {
 			t.Fatalf("AgentMounts missing read-only md mount: %+v", mounts)
 		}
+		if !slices.ContainsFunc(mounts, func(m Mount) bool {
+			return m.HostPath == filepath.Join(home, "custom-ro") && m.ContainerPath == "/home/user/custom-ro" && m.ReadOnly
+		}) {
+			t.Fatalf("AgentMounts missing custom read-only mount: %+v", mounts)
+		}
 		target, err := os.Readlink(filepath.Join(home, ".claude.json"))
 		if err != nil {
 			t.Fatalf("Readlink .claude.json: %v", err)
 		}
 		if target != filepath.Join(home, ".claude", "claude.json") {
 			t.Fatalf(".claude.json target = %q, want %q", target, filepath.Join(home, ".claude", "claude.json"))
+		}
+	})
+	t.Run("AgentMountsSymlinkTargets", func(t *testing.T) {
+		t.Parallel()
+		home := t.TempDir()
+		logger := testLogger(t)
+		c, err := newClient(home, logger, testRuntime(t, "docker", logger, nil), io.Discard)
+		if err != nil {
+			t.Fatalf("newClient: %v", err)
+		}
+		fooSkills := filepath.Join(home, "foo_skills")
+		barSkills := filepath.Join(home, "bar_skills")
+		if err := os.MkdirAll(barSkills, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("bar_skills", fooSkills); err != nil {
+			t.Fatal(err)
+		}
+		piDir := filepath.Join(home, ".pi")
+		if err := os.MkdirAll(piDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("../foo_skills", filepath.Join(piDir, "skills")); err != nil {
+			t.Fatal(err)
+		}
+		sharedSkill := filepath.Join(home, "shared_skill")
+		if err := os.MkdirAll(sharedSkill, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		agentSkills := filepath.Join(home, ".agents", "skills")
+		if err := os.MkdirAll(agentSkills, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("../../shared_skill", filepath.Join(agentSkills, "shared")); err != nil {
+			t.Fatal(err)
+		}
+
+		mounts, err := c.AgentMounts(HarnessMounts[HarnessPi])
+		if err != nil {
+			t.Fatalf("AgentMounts: %v", err)
+		}
+		for _, want := range []Mount{
+			{HostPath: barSkills, ContainerPath: "/home/user/foo_skills"},
+			{HostPath: sharedSkill, ContainerPath: "/home/user/shared_skill"},
+		} {
+			if !slices.ContainsFunc(mounts, func(m Mount) bool {
+				return m.HostPath == want.HostPath && m.ContainerPath == want.ContainerPath
+			}) {
+				t.Fatalf("AgentMounts missing symlink target mount %+v: %+v", want, mounts)
+			}
 		}
 	})
 	t.Run("Container", func(t *testing.T) {

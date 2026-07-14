@@ -1200,42 +1200,43 @@ func TestUnmarshalContainer(t *testing.T) {
 	})
 }
 
-func TestMergePaths(t *testing.T) {
+func TestAllAgentPaths(t *testing.T) {
 	t.Parallel()
 	t.Run("empty", func(t *testing.T) {
 		t.Parallel()
-		got := mergePaths(nil)
-		// Should return alwaysPaths base.
-		if len(got.XDGConfigPaths) < 2 {
-			t.Errorf("expected at least 2 XDGConfigPaths from alwaysPaths, got %d", len(got.XDGConfigPaths))
+		got := allAgentPaths(nil)
+		if !slices.ContainsFunc(got, func(p AgentPaths) bool {
+			return slices.Contains(p.XDGConfigPaths, "md") && p.ReadOnly
+		}) {
+			t.Errorf("allAgentPaths(nil) = %+v, want read-only md path", got)
 		}
 	})
 
-	t.Run("merge", func(t *testing.T) {
+	t.Run("prepend", func(t *testing.T) {
 		t.Parallel()
 		input := []AgentPaths{
 			{HomePaths: []string{".foo"}, XDGConfigPaths: []string{"bar"}},
-			{HomePaths: []string{".baz"}, LocalSharePaths: []string{"qux"}},
+			{HomePaths: []string{".baz"}, LocalSharePaths: []string{"qux"}, ReadOnly: true},
 		}
-		got := mergePaths(input)
-		if !slices.Contains(got.HomePaths, ".foo") || !slices.Contains(got.HomePaths, ".baz") {
-			t.Errorf("HomePaths = %v, want .foo and .baz", got.HomePaths)
+		got := allAgentPaths(input)
+		if len(got) != len(alwaysPaths)+len(input) {
+			t.Fatalf("len(allAgentPaths(input)) = %d, want %d", len(got), len(alwaysPaths)+len(input))
 		}
-		if !slices.Contains(got.XDGConfigPaths, "bar") {
-			t.Errorf("XDGConfigPaths = %v, want bar", got.XDGConfigPaths)
+		if !slices.Equal(got[len(alwaysPaths)].HomePaths, []string{".foo"}) || !slices.Equal(got[len(alwaysPaths)+1].LocalSharePaths, []string{"qux"}) {
+			t.Errorf("allAgentPaths(input) = %+v, want input groups preserved after alwaysPaths", got)
 		}
-		if !slices.Contains(got.LocalSharePaths, "qux") {
-			t.Errorf("LocalSharePaths = %v, want qux", got.LocalSharePaths)
+		if !got[len(alwaysPaths)+1].ReadOnly {
+			t.Errorf("allAgentPaths(input) = %+v, want input ReadOnly preserved", got)
 		}
 	})
 
 	t.Run("does_not_mutate_global", func(t *testing.T) {
 		t.Parallel()
-		before := len(alwaysPaths.XDGConfigPaths)
-		_ = mergePaths([]AgentPaths{{XDGConfigPaths: []string{"extra1", "extra2"}}})
-		after := len(alwaysPaths.XDGConfigPaths)
+		before := len(alwaysPaths)
+		_ = allAgentPaths([]AgentPaths{{XDGConfigPaths: []string{"extra1", "extra2"}}})
+		after := len(alwaysPaths)
 		if before != after {
-			t.Errorf("alwaysPaths.XDGConfigPaths mutated: was %d, now %d", before, after)
+			t.Errorf("alwaysPaths mutated: was %d, now %d", before, after)
 		}
 	})
 }

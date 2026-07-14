@@ -451,42 +451,65 @@ func (c *Client) PruneImages(ctx context.Context, stdout, stderr io.Writer) ([]s
 // directories are always included; pass values from [HarnessMounts] to include
 // harness-specific directories.
 func (c *Client) AgentMounts(paths ...AgentPaths) ([]Mount, error) {
-	combined := mergePaths(paths)
-	mounts := make([]Mount, 0, len(combined.HomePaths)+len(combined.XDGConfigPaths)+len(combined.LocalSharePaths)+len(combined.LocalStatePaths))
-	for _, p := range combined.HomePaths {
-		hostPath := filepath.Join(c.Home, p)
-		if err := os.MkdirAll(hostPath, 0o700); err != nil {
-			return nil, err
+	groups := allAgentPaths(paths)
+	mounts := make([]Mount, 0, agentPathCount(groups))
+	roots := make([]agentMountRoot, 0, cap(mounts))
+	for _, group := range groups {
+		for _, p := range group.HomePaths {
+			hostPath := filepath.Join(c.Home, p)
+			containerPath := "/home/user/" + p
+			if err := os.MkdirAll(hostPath, 0o700); err != nil {
+				return nil, err
+			}
+			mounts = append(mounts, Mount{HostPath: hostPath, ContainerPath: containerPath, ReadOnly: group.ReadOnly})
+			roots = append(roots, agentMountRoot{hostPath: hostPath, containerPath: containerPath, readOnly: group.ReadOnly})
 		}
-		mounts = append(mounts, Mount{HostPath: hostPath, ContainerPath: "/home/user/" + p})
-	}
-	for _, p := range combined.XDGConfigPaths {
-		hostPath := filepath.Join(c.XDGConfigHome, p)
-		if err := os.MkdirAll(hostPath, 0o700); err != nil {
-			return nil, err
+		for _, p := range group.XDGConfigPaths {
+			hostPath := filepath.Join(c.XDGConfigHome, p)
+			containerPath := "/home/user/.config/" + p
+			if err := os.MkdirAll(hostPath, 0o700); err != nil {
+				return nil, err
+			}
+			mounts = append(mounts, Mount{HostPath: hostPath, ContainerPath: containerPath, ReadOnly: group.ReadOnly})
+			roots = append(roots, agentMountRoot{hostPath: hostPath, containerPath: containerPath, readOnly: group.ReadOnly})
 		}
-		mounts = append(mounts, Mount{
-			HostPath:      hostPath,
-			ContainerPath: "/home/user/.config/" + p,
-			ReadOnly:      p == "md",
-		})
-	}
-	for _, p := range combined.LocalSharePaths {
-		hostPath := filepath.Join(c.XDGDataHome, p)
-		if err := os.MkdirAll(hostPath, 0o700); err != nil {
-			return nil, err
+		for _, p := range group.LocalSharePaths {
+			hostPath := filepath.Join(c.XDGDataHome, p)
+			containerPath := "/home/user/.local/share/" + p
+			if err := os.MkdirAll(hostPath, 0o700); err != nil {
+				return nil, err
+			}
+			mounts = append(mounts, Mount{HostPath: hostPath, ContainerPath: containerPath, ReadOnly: group.ReadOnly})
+			roots = append(roots, agentMountRoot{hostPath: hostPath, containerPath: containerPath, readOnly: group.ReadOnly})
 		}
-		mounts = append(mounts, Mount{HostPath: hostPath, ContainerPath: "/home/user/.local/share/" + p})
-	}
-	for _, p := range combined.LocalStatePaths {
-		hostPath := filepath.Join(c.XDGStateHome, p)
-		if err := os.MkdirAll(hostPath, 0o700); err != nil {
-			return nil, err
+		for _, p := range group.LocalStatePaths {
+			hostPath := filepath.Join(c.XDGStateHome, p)
+			containerPath := "/home/user/.local/state/" + p
+			if err := os.MkdirAll(hostPath, 0o700); err != nil {
+				return nil, err
+			}
+			mounts = append(mounts, Mount{HostPath: hostPath, ContainerPath: containerPath, ReadOnly: group.ReadOnly})
+			roots = append(roots, agentMountRoot{hostPath: hostPath, containerPath: containerPath, readOnly: group.ReadOnly})
 		}
-		mounts = append(mounts, Mount{HostPath: hostPath, ContainerPath: "/home/user/.local/state/" + p})
 	}
-	for _, p := range combined.HomePaths {
-		if p != ".claude" {
+	seenMounts := make(map[string]struct{}, len(mounts))
+	for _, m := range mounts {
+		seenMounts[m.mountKey()] = struct{}{}
+	}
+	symlinkMounts, err := agentSymlinkTargetMounts(roots)
+	if err != nil {
+		return nil, err
+	}
+	for _, m := range symlinkMounts {
+		key := m.mountKey()
+		if _, ok := seenMounts[key]; ok {
+			continue
+		}
+		mounts = append(mounts, m)
+		seenMounts[key] = struct{}{}
+	}
+	for _, group := range groups {
+		if !slices.Contains(group.HomePaths, ".claude") {
 			continue
 		}
 		claudeJSON := filepath.Join(c.Home, ".claude.json")
@@ -504,6 +527,97 @@ func (c *Client) AgentMounts(paths ...AgentPaths) ([]Mount, error) {
 		break
 	}
 	return mounts, nil
+}
+
+func agentSymlinkTargetMounts(roots []agentMountRoot) ([]Mount, error) {
+	const maxDepth = 3
+	mounts := []Mount{}
+	for _, root := range roots {
+		scanRoot, err := filepath.EvalSymlinks(root.hostPath)
+		if err != nil {
+			return nil, err
+		}
+		err = filepath.WalkDir(scanRoot, func(p string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if p == scanRoot {
+				return nil
+			}
+			rel, err := filepath.Rel(scanRoot, p)
+			if err != nil {
+				return err
+			}
+			if d.Type()&fs.ModeSymlink != 0 {
+				m, ok, err := agentSymlinkTargetMount(root, p, rel)
+				if err != nil {
+					return err
+				}
+				if ok {
+					mounts = append(mounts, m)
+				}
+				return nil
+			}
+			if !d.IsDir() {
+				return nil
+			}
+			// Skip .git and node_modules when searching for symlinks, and stop at maxDepth subdirectories depth.
+			switch d.Name() {
+			case ".git", "node_modules":
+				return filepath.SkipDir
+			default:
+				if (strings.Count(filepath.ToSlash(rel), "/") + 1) >= maxDepth {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+		})
+		if err != nil {
+			return nil, fmt.Errorf("scan agent symlinks under %s: %w", root.hostPath, err)
+		}
+	}
+	return mounts, nil
+}
+
+func agentSymlinkTargetMount(root agentMountRoot, linkHostPath, rel string) (Mount, bool, error) {
+	info, err := os.Stat(linkHostPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return Mount{}, false, nil
+		}
+		return Mount{}, false, err
+	}
+	if !info.IsDir() {
+		return Mount{}, false, nil
+	}
+	resolvedHostPath, err := filepath.EvalSymlinks(linkHostPath)
+	if err != nil {
+		return Mount{}, false, err
+	}
+	containerPath, err := agentSymlinkContainerPath(root, linkHostPath, rel)
+	if err != nil {
+		return Mount{}, false, err
+	}
+	if containerPath == "" {
+		return Mount{}, false, nil
+	}
+	return Mount{HostPath: resolvedHostPath, ContainerPath: containerPath, ReadOnly: root.readOnly}, true, nil
+}
+
+func agentSymlinkContainerPath(root agentMountRoot, linkHostPath, rel string) (string, error) {
+	target, err := os.Readlink(linkHostPath)
+	if err != nil {
+		return "", err
+	}
+	if filepath.VolumeName(target) != "" {
+		return "", nil
+	}
+	target = filepath.ToSlash(target)
+	if path.IsAbs(target) {
+		return path.Clean(target), nil
+	}
+	linkContainerPath := path.Join(root.containerPath, filepath.ToSlash(rel))
+	return path.Clean(path.Join(path.Dir(linkContainerPath), target)), nil
 }
 
 func (c *Client) containerFromRuntime(ctx context.Context, raw containers.Container) (*Container, error) {
@@ -1558,11 +1672,20 @@ const (
 type AgentPaths struct {
 	// Description is a short human-readable label for the harness (e.g.
 	// "Claude Code"). Displayed in settings UI.
-	Description     string
+	Description string
+	// ReadOnly mounts all paths in this group read-only.
+	ReadOnly bool
+
 	HomePaths       []string
 	XDGConfigPaths  []string
 	LocalSharePaths []string
 	LocalStatePaths []string
+}
+
+type agentMountRoot struct {
+	hostPath      string
+	containerPath string
+	readOnly      bool
 }
 
 // HarnessMounts maps each known harness to its path configuration.
@@ -1590,6 +1713,10 @@ type Mount struct {
 	ContainerPath string
 	// ReadOnly mounts the host path read-only.
 	ReadOnly bool
+}
+
+func (m *Mount) mountKey() string {
+	return m.HostPath + "\x00" + m.ContainerPath + "\x00" + strconv.FormatBool(m.ReadOnly)
 }
 
 func (m *Mount) dockerArg(home string) (string, error) {
@@ -1713,47 +1840,47 @@ var (
 
 // alwaysPaths are merged into every container's mount set automatically.
 // Callers do not need to include these; Client methods add them internally.
-var alwaysPaths = AgentPaths{
-	HomePaths:      []string{".agents"},
-	XDGConfigPaths: []string{"agents", "md"},
+var alwaysPaths = []AgentPaths{
+	{HomePaths: []string{".agents"}},
+	{XDGConfigPaths: []string{"md"}, ReadOnly: true},
 }
 
-// mergePaths concatenates a slice of AgentPaths into one, prepending alwaysPaths.
-func mergePaths(paths []AgentPaths) AgentPaths {
-	result := alwaysPaths
-	for _, p := range paths {
-		result.HomePaths = append(result.HomePaths, p.HomePaths...)
-		result.XDGConfigPaths = append(result.XDGConfigPaths, p.XDGConfigPaths...)
-		result.LocalSharePaths = append(result.LocalSharePaths, p.LocalSharePaths...)
-		result.LocalStatePaths = append(result.LocalStatePaths, p.LocalStatePaths...)
-	}
+// allAgentPaths returns paths with alwaysPaths prepended.
+func allAgentPaths(paths []AgentPaths) []AgentPaths {
+	result := make([]AgentPaths, 0, len(alwaysPaths)+len(paths))
+	result = append(result, alwaysPaths...)
+	result = append(result, paths...)
 	return result
+}
+
+func agentPathCount(groups []AgentPaths) int {
+	n := 0
+	for _, group := range groups {
+		n += len(group.HomePaths) + len(group.XDGConfigPaths) + len(group.LocalSharePaths) + len(group.LocalStatePaths)
+	}
+	return n
 }
 
 // agentContainerPaths returns the container-side mount target paths for all
 // agent config mounts. These are the -v targets that must be pre-created with
 // user ownership in the Docker image before docker run creates them as root.
 func agentContainerPaths() []string {
-	all := alwaysPaths
-	for _, p := range HarnessMounts {
-		all.HomePaths = append(all.HomePaths, p.HomePaths...)
-		all.XDGConfigPaths = append(all.XDGConfigPaths, p.XDGConfigPaths...)
-		all.LocalSharePaths = append(all.LocalSharePaths, p.LocalSharePaths...)
-		all.LocalStatePaths = append(all.LocalStatePaths, p.LocalStatePaths...)
-	}
-	paths := make([]string, 0, 1+len(all.HomePaths)+len(all.XDGConfigPaths)+len(all.LocalSharePaths)+len(all.LocalStatePaths))
+	groups := allAgentPaths(slices.Collect(maps.Values(HarnessMounts)))
+	paths := make([]string, 0, 1+agentPathCount(groups))
 	paths = append(paths, "/home/user/src")
-	for _, p := range all.HomePaths {
-		paths = append(paths, "/home/user/"+p)
-	}
-	for _, p := range all.XDGConfigPaths {
-		paths = append(paths, "/home/user/.config/"+p)
-	}
-	for _, p := range all.LocalSharePaths {
-		paths = append(paths, "/home/user/.local/share/"+p)
-	}
-	for _, p := range all.LocalStatePaths {
-		paths = append(paths, "/home/user/.local/state/"+p)
+	for _, group := range groups {
+		for _, p := range group.HomePaths {
+			paths = append(paths, "/home/user/"+p)
+		}
+		for _, p := range group.XDGConfigPaths {
+			paths = append(paths, "/home/user/.config/"+p)
+		}
+		for _, p := range group.LocalSharePaths {
+			paths = append(paths, "/home/user/.local/share/"+p)
+		}
+		for _, p := range group.LocalStatePaths {
+			paths = append(paths, "/home/user/.local/state/"+p)
+		}
 	}
 	return paths
 }
