@@ -19,6 +19,31 @@ write_tailscale_device_id() {
 	fi
 }
 
+write_environment_var() {
+	local key="$1"
+	local value="$2"
+	local tmp
+	tmp=$(mktemp)
+	if [ -f /etc/environment ]; then
+		grep -v "^${key}=" /etc/environment >"$tmp" || true
+	fi
+	printf '%s=%s\n' "$key" "$value" >>"$tmp"
+	cat "$tmp" >/etc/environment
+	rm -f "$tmp"
+}
+
+remove_environment_var() {
+	local key="$1"
+	local tmp
+	if [ ! -f /etc/environment ]; then
+		return
+	fi
+	tmp=$(mktemp)
+	grep -v "^${key}=" /etc/environment >"$tmp" || true
+	cat "$tmp" >/etc/environment
+	rm -f "$tmp"
+}
+
 rewrite_user_identity() {
 	local target_uid="$1"
 	local target_gid="$2"
@@ -147,6 +172,9 @@ rm -f "$session_file" /etc/profile.d/50-dbus-session.sh
 if su user -s /bin/bash -c "env -u DBUS_SESSION_BUS_ADDRESS dbus-launch --sh-syntax" >"$session_file"; then
 	chown user:user "$session_file"
 	chmod 600 "$session_file"
+	# shellcheck disable=SC1090
+	. "$session_file"
+	write_environment_var DBUS_SESSION_BUS_ADDRESS "$DBUS_SESSION_BUS_ADDRESS"
 	cat <<EOF >/etc/profile.d/50-dbus-session.sh
 if [ -f "$session_file" ]; then
     . "$session_file"
@@ -156,6 +184,7 @@ EOF
 else
 	echo "[start.sh] WARNING: DBus session setup failed, continuing without DBUS_SESSION_BUS_ADDRESS"
 	rm -f "$session_file"
+	remove_environment_var DBUS_SESSION_BUS_ADDRESS
 fi
 
 # Start XFCE4 and VNC
