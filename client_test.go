@@ -329,9 +329,17 @@ func TestClient(t *testing.T) {
 		if err != nil {
 			t.Fatalf("AgentMounts: %v", err)
 		}
+		resolvedBarSkills, err := filepath.EvalSymlinks(barSkills)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resolvedSharedSkill, err := filepath.EvalSymlinks(sharedSkill)
+		if err != nil {
+			t.Fatal(err)
+		}
 		for _, want := range []Mount{
-			{HostPath: barSkills, ContainerPath: "/home/user/foo_skills"},
-			{HostPath: sharedSkill, ContainerPath: "/home/user/shared_skill"},
+			{HostPath: resolvedBarSkills, ContainerPath: "/home/user/foo_skills"},
+			{HostPath: resolvedSharedSkill, ContainerPath: "/home/user/shared_skill"},
 		} {
 			if !slices.ContainsFunc(mounts, func(m Mount) bool {
 				return m.HostPath == want.HostPath && m.ContainerPath == want.ContainerPath
