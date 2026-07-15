@@ -41,7 +41,7 @@ func testLoggerOptions() *slog.HandlerOptions {
 	}
 }
 
-func mustRuntime(t testing.TB, logger md.Logger, name string) containers.Runtime {
+func mustRuntime(t testing.TB, logger *slog.Logger, name string) containers.Runtime {
 	r, err := containers.New(name, logger, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -89,6 +89,7 @@ func TestNewRunContainer(t *testing.T) {
 	client := &md.Client{Logger: logger, Runtime: mustRuntime(t, logger, "docker")}
 	source := &md.Container{
 		Client: client,
+		Logger: logger.With(slog.String("cntr", "source")),
 		Repos: []md.Repo{
 			{GitRoot: "/src/one", Branches: []string{"main"}, MountedPath: "/home/user/src/one"},
 			{GitRoot: "/src/two", Branches: []string{"feature"}, MountedPath: "/home/user/src/two"},
@@ -100,6 +101,9 @@ func TestNewRunContainer(t *testing.T) {
 	}
 	if got.Client != client {
 		t.Fatal("Client was not preserved")
+	}
+	if got.Logger == nil {
+		t.Fatal("Logger was not initialized")
 	}
 	if !strings.HasPrefix(got.Name, "md-one-run-") {
 		t.Fatalf("Name = %q, want md-one-run-*", got.Name)

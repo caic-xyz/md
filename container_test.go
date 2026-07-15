@@ -309,6 +309,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 
 			ct := &Container{
 				Client: testClient(t),
+				Logger: testLogger(t),
 				Name:   remoteDir,
 				Repos: []Repo{{
 					GitRoot:       dir,
@@ -347,6 +348,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 
 			ct := &Container{
 				Client: testClient(t),
+				Logger: testLogger(t),
 				Name:   remoteDir,
 				Repos: []Repo{{
 					GitRoot:       dir,
@@ -390,6 +392,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 
 			ct := &Container{
 				Client: testClient(t),
+				Logger: testLogger(t),
 				Name:   remoteDir,
 				Repos: []Repo{{
 					GitRoot:       dir,
@@ -430,6 +433,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 
 			ct := &Container{
 				Client: testClient(t),
+				Logger: testLogger(t),
 				Name:   remoteDir,
 				Repos: []Repo{{
 					GitRoot:       dir,
@@ -517,6 +521,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 
 			ct := &Container{
 				Client: &Client{Home: home, Logger: testLogger(t), Runtime: testRuntime(t, "true", testLogger(t), nil)},
+				Logger: testLogger(t),
 				Name:   "md-test",
 				Repos: []Repo{{
 					GitRoot:       hostDir,
@@ -593,6 +598,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 
 			ct := &Container{
 				Client: &Client{Home: home, Logger: testLogger(t), Runtime: testRuntime(t, "true", testLogger(t), nil)},
+				Logger: testLogger(t),
 				Name:   "md-test",
 				Repos: []Repo{{
 					GitRoot:       hostDir,
@@ -723,6 +729,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 
 			ct := &Container{
 				Client: &Client{Home: home, Logger: testLogger(t), Runtime: testRuntime(t, "true", testLogger(t), nil)},
+				Logger: testLogger(t),
 				Name:   "md-test",
 				Repos: []Repo{{
 					GitRoot:       hostDir,
@@ -1448,7 +1455,7 @@ func TestFillFromInspect(t *testing.T) {
 	legacyReposData := []byte(`[{"git_root":"/home/user/repo","branch":"main"}]`)
 	legacyReposB64 := base64.StdEncoding.EncodeToString(legacyReposData)
 	legacyInspect := `[{"Name":"/md-legacy","State":{"Status":"running"},"Created":"2025-06-15T10:30:00Z","Config":{"Labels":{"md.repos":"` + legacyReposB64 + `"}}}]`
-	ctLegacy := &Container{Client: &Client{Logger: testLogger(t)}}
+	ctLegacy := &Container{Client: &Client{Logger: testLogger(t)}, Logger: testLogger(t)}
 	if err := ctLegacy.fillFromInspect(t.Context(), []byte(legacyInspect)); err != nil {
 		t.Fatalf("legacy inspect: %v", err)
 	}

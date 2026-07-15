@@ -6,6 +6,7 @@ package containers
 
 import (
 	"context"
+	"log/slog"
 	"os"
 	"runtime"
 )
@@ -16,7 +17,7 @@ type podman struct {
 }
 
 // newPodman returns a Podman runtime wrapper.
-func newPodman(executable string, logger Logger, env []string) *podman {
+func newPodman(executable string, logger *slog.Logger, env []string) *podman {
 	if executable == "" {
 		executable = "podman"
 	}

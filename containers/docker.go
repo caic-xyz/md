@@ -4,7 +4,10 @@
 
 package containers
 
-import "context"
+import (
+	"context"
+	"log/slog"
+)
 
 // docker wraps the docker CLI.
 type docker struct {
@@ -12,7 +15,7 @@ type docker struct {
 }
 
 // newDocker returns a Docker runtime wrapper.
-func newDocker(executable string, logger Logger, env []string) *docker {
+func newDocker(executable string, logger *slog.Logger, env []string) *docker {
 	if executable == "" {
 		executable = "docker"
 	}

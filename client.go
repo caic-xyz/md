@@ -40,11 +40,6 @@ import (
 	"github.com/caic-xyz/md/containers"
 )
 
-// Logger receives structured log records. It is an alias of containers.Logger so
-// that a single Logger value can be shared by md, containers, and git without
-// conversion.
-type Logger = containers.Logger
-
 // Client holds global MD tool state (paths, image config, SSH keys).
 type Client struct {
 	// Paths.
@@ -61,7 +56,7 @@ type Client struct {
 	Runtime containers.Runtime
 
 	// Logger receives md package logs. It must be non-nil.
-	Logger Logger
+	Logger *slog.Logger
 
 	// ControlMaster enables SSH ControlMaster connection multiplexing.
 	// When true, SSH connections are shared via a persistent socket,
@@ -114,7 +109,7 @@ const specializedBuildContextPrefix = "rsc/specialized"
 //
 // When logger is nil, slog.Default() is used. When runtime is nil, Docker or
 // Podman is auto-detected.
-func New(logger Logger, rt containers.Runtime, stdout io.Writer) (*Client, error) {
+func New(logger *slog.Logger, rt containers.Runtime, stdout io.Writer) (*Client, error) {
 	return newClient("", logger, rt, stdout)
 }
 
@@ -122,7 +117,7 @@ func New(logger Logger, rt containers.Runtime, stdout io.Writer) (*Client, error
 // home is empty, os.UserHomeDir() is used and XDG_* env vars are respected.
 // When home is explicit, all paths derive from it unconditionally. When runtime
 // is nil, Docker or Podman is auto-detected.
-func newClient(home string, logger Logger, rt containers.Runtime, stdout io.Writer) (*Client, error) {
+func newClient(home string, logger *slog.Logger, rt containers.Runtime, stdout io.Writer) (*Client, error) {
 	fromEnv := home == ""
 	if fromEnv {
 		var err error
@@ -203,15 +198,19 @@ func (c *Client) Container(repos ...Repo) (*Container, error) {
 	if len(repos) == 0 {
 		var buf [4]byte
 		_, _ = rand.Read(buf[:])
+		name := fmt.Sprintf("md-agent-%x", buf)
 		return &Container{
 			Client: c,
-			Name:   fmt.Sprintf("md-agent-%x", buf),
+			Logger: c.Logger.With(slog.String("cntr", name)),
+			Name:   name,
 		}, nil
 	}
+	name := containerName(sanitizeDockerName(filepath.Base(repos[0].MountedPath)), repos[0].Branches[0])
 	return &Container{
 		Client: c,
+		Logger: c.Logger.With(slog.String("cntr", name)),
 		Repos:  repos,
-		Name:   containerName(sanitizeDockerName(filepath.Base(repos[0].MountedPath)), repos[0].Branches[0]),
+		Name:   name,
 	}, nil
 }
 
@@ -623,6 +622,7 @@ func agentSymlinkContainerPath(root agentMountRoot, linkHostPath, rel string) (s
 func (c *Client) containerFromRuntime(ctx context.Context, raw containers.Container) (*Container, error) {
 	ct := &Container{
 		Client:    c,
+		Logger:    c.Logger.With(slog.String("cntr", raw.Name)),
 		Name:      raw.Name,
 		State:     raw.State,
 		CreatedAt: raw.CreatedAt,

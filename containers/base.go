@@ -25,7 +25,7 @@ import (
 type base struct {
 	name       string
 	executable string
-	logger     Logger
+	logger     *slog.Logger
 	env        []string
 }
 

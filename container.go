@@ -195,7 +195,7 @@ func (r *Repo) Validate() error {
 }
 
 // resolveDefaults populates DefaultRemote and DefaultBranch if not already set.
-func (r *Repo) resolveDefaults(ctx context.Context, logger Logger) error {
+func (r *Repo) resolveDefaults(ctx context.Context, logger *slog.Logger) error {
 	g := &git.Checkout{Root: r.GitRoot, Logger: logger}
 	if r.DefaultRemote == "" {
 		remote, err := g.DefaultRemote(ctx)
@@ -221,7 +221,7 @@ func (r *Repo) populateMountPath() {
 	}
 }
 
-func (r *Repo) containerSyncRefspecs(ctx context.Context, logger Logger) ([]string, error) {
+func (r *Repo) containerSyncRefspecs(ctx context.Context, logger *slog.Logger) ([]string, error) {
 	// These refspecs refresh the container's copy of the default branch and the
 	// tracked branches. Callers append them to the push that already transfers
 	// the mapped branches.
@@ -256,7 +256,7 @@ func (r *Repo) containerSyncRefspecs(ctx context.Context, logger Logger) ([]stri
 // It prefers the branch's configured upstream when it matches the local branch,
 // then the default remote's same-named tracking branch, and finally the local
 // branch via refs/remotes/host when the local branch contains unpushed commits.
-func (r *Repo) resolveContainerBranchBase(ctx context.Context, logger Logger, branch string) (containerBranchBase, error) {
+func (r *Repo) resolveContainerBranchBase(ctx context.Context, logger *slog.Logger, branch string) (containerBranchBase, error) {
 	g := &git.Checkout{Root: r.GitRoot, Logger: logger}
 	localRef := "refs/heads/" + branch
 	localCommit, err := g.RevParse(ctx, localRef)
@@ -285,7 +285,7 @@ func (r *Repo) resolveContainerBranchBase(ctx context.Context, logger Logger, br
 //
 // ok is false when branch has no upstream, its upstream is on another remote,
 // or the upstream tracking ref is unavailable locally.
-func (r *Repo) trackedBranchPushSource(ctx context.Context, logger Logger, branch string) (upstreamBranch, src string, ok bool, err error) {
+func (r *Repo) trackedBranchPushSource(ctx context.Context, logger *slog.Logger, branch string) (upstreamBranch, src string, ok bool, err error) {
 	remote, upstreamBranch, ok, err := r.branchUpstream(ctx, logger, branch)
 	if err != nil || !ok || remote != r.DefaultRemote {
 		return "", "", false, err
@@ -301,7 +301,7 @@ func (r *Repo) trackedBranchPushSource(ctx context.Context, logger Logger, branc
 //
 // ok is false when branch has no upstream. An error is returned when git reports
 // malformed upstream metadata.
-func (r *Repo) branchUpstream(ctx context.Context, logger Logger, branch string) (remote, upstreamBranch string, ok bool, err error) {
+func (r *Repo) branchUpstream(ctx context.Context, logger *slog.Logger, branch string) (remote, upstreamBranch string, ok bool, err error) {
 	out, err := (&git.Checkout{Root: r.GitRoot, Logger: logger}).RunGit(ctx, "for-each-ref", "--format=%(upstream:remotename)%00%(upstream:remoteref)", "refs/heads/"+branch)
 	if err != nil {
 		return "", "", false, err
@@ -484,8 +484,11 @@ func (opts *ForkOpts) runtimeEnvOverrides() []string {
 // Fields marked with a label are persisted as Docker container labels
 // and restored by [unmarshalContainer] when listing containers.
 type Container struct {
+	// Client is the client that created this container.
 	*Client
 
+	// Logger receives logs for this container. It includes the cntr attribute.
+	Logger *slog.Logger
 	// Repos are the git repositories in this container. Repos[0] is the
 	// primary; the rest are pushed alongside it. Each repo's MountedPath
 	// gives the absolute destination path.
@@ -550,7 +553,7 @@ func (c *Container) SSHCommand(opts []string, cmd string) []string {
 func (c *Container) Processes(ctx context.Context) ([]ProcessInfo, error) {
 	cmd := "ps -eo pid,ppid,user,stat,%cpu,%mem,time,args --no-headers"
 	sshArgs := c.SSHCommand(nil, cmd)
-	c.Logger.Log(ctx, slog.LevelDebug, "ssh", "container", c.Name, "cmd", sshArgs)
+	c.Logger.Log(ctx, slog.LevelDebug, "ssh", "cmd", sshArgs)
 	ec := exec.CommandContext(ctx, sshArgs[0], sshArgs[1:]...) //nolint:gosec // SSH target is an md container name; command is a constant literal.
 	ec.Env = c.commandEnv()
 	out, err := ec.CombinedOutput()
@@ -567,7 +570,7 @@ func (c *Container) Signal(ctx context.Context, pid int, sig string) error {
 	}
 	cmd := fmt.Sprintf("kill -s %s %d", shellQuote(sig), pid)
 	sshArgs := c.SSHCommand(nil, cmd)
-	c.Logger.Log(ctx, slog.LevelDebug, "ssh", "container", c.Name, "cmd", sshArgs)
+	c.Logger.Log(ctx, slog.LevelDebug, "ssh", "cmd", sshArgs)
 	ec := exec.CommandContext(ctx, sshArgs[0], sshArgs[1:]...) //nolint:gosec // SSH target is an md container name; pid is an integer and sig is shell-quoted.
 	ec.Env = c.commandEnv()
 	out, err := ec.CombinedOutput()
@@ -944,7 +947,7 @@ func (c *Container) Push(ctx context.Context, stdout, stderr io.Writer, repoIdx 
 	// Update host's remote-tracking refs for all branches.
 	for _, b := range r.Branches {
 		if err := c.runCmdOut(ctx, r.GitRoot, []string{"git", "update-ref", "refs/remotes/" + c.Name + "/" + b, b}, stdout, stderr); err != nil {
-			slog.WarnContext(ctx, "md", "msg", "failed to update host tracking ref", "branch", b, "err", err)
+			c.Logger.WarnContext(ctx, "failed to update host tracking ref", "branch", b, "err", err)
 		}
 	}
 	return backupBranch, nil
@@ -1071,7 +1074,7 @@ func (c *Container) Diff(ctx context.Context, stdout, stderr io.Writer, repoIdx 
 	}
 	exitOnDiff := slices.Contains(extraArgs, "--exit-code") || slices.Contains(extraArgs, "--quiet")
 	sshArgs := c.SSHCommand(opts, gitDiffCommand(repo.MountedPath, extraArgs, exitOnDiff))
-	c.Logger.Log(ctx, slog.LevelDebug, "ssh", "container", c.Name, "cmd", sshArgs)
+	c.Logger.Log(ctx, slog.LevelDebug, "ssh", "cmd", sshArgs)
 	cmd := exec.CommandContext(ctx, sshArgs[0]) //nolint:gosec // args are from trusted SSH config
 	cmd.Env = c.commandEnv()
 	if isTTY {
@@ -1319,7 +1322,7 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 		envContent = append(envContent, extraEnv...)
 	}
 	sshEnvArgs := fork.SSHCommand(nil, "cat > /home/user/.env")
-	fork.Logger.Log(ctx, slog.LevelDebug, "ssh", "container", fork.Name, "cmd", sshEnvArgs)
+	fork.Logger.Log(ctx, slog.LevelDebug, "ssh", "cmd", sshEnvArgs)
 	for {
 		cmd := exec.CommandContext(ctx, sshEnvArgs[0], sshEnvArgs[1:]...) //nolint:gosec // args are from trusted SSH config
 		cmd.Env = fork.commandEnv()
@@ -1506,17 +1509,17 @@ func (c *Container) TailscaleFQDN(ctx context.Context) string {
 	}
 	statusJSON, err := c.Runtime.Run(ctx, "", "exec", c.Name, "tailscale", "status", "--json")
 	if err != nil {
-		c.Logger.Log(ctx, slog.LevelDebug, "tailscale status failed", "container", c.Name, "err", err)
+		c.Logger.Log(ctx, slog.LevelDebug, "tailscale status failed", "err", err)
 		return ""
 	}
 	var status tailscaleStatus
 	if err := json.Unmarshal([]byte(statusJSON), &status); err != nil {
-		c.Logger.Log(ctx, slog.LevelDebug, "tailscale status JSON parse failed", "container", c.Name, "err", err)
+		c.Logger.Log(ctx, slog.LevelDebug, "tailscale status JSON parse failed", "err", err)
 		return ""
 	}
 	fqdn := strings.TrimRight(status.Self.DNSName, ".")
 	if fqdn == "" {
-		c.Logger.Log(ctx, slog.LevelDebug, "tailscale FQDN empty", "container", c.Name)
+		c.Logger.Log(ctx, slog.LevelDebug, "tailscale FQDN empty")
 	}
 	return fqdn
 }
@@ -1871,7 +1874,7 @@ func (c *Container) pullBranches(ctx context.Context, stdout, stderr io.Writer, 
 func (c *Container) waitForSSH(ctx context.Context, deadline time.Time) error {
 	var lastErr error
 	sshArgs := c.SSHCommand(nil, "true")
-	c.Logger.Log(ctx, slog.LevelDebug, "ssh", "container", c.Name, "cmd", sshArgs)
+	c.Logger.Log(ctx, slog.LevelDebug, "ssh", "cmd", sshArgs)
 	for {
 		cmd := exec.CommandContext(ctx, sshArgs[0], sshArgs[1:]...) //nolint:gosec // args are from trusted SSH config
 		cmd.Env = c.commandEnv()
@@ -2578,7 +2581,7 @@ func (c *Container) sendEnv(ctx context.Context, stdout io.Writer, opts *StartOp
 		_, _ = fmt.Fprintln(stdout, "- sending .env into container ...")
 	}
 	sshEnvArgs := c.SSHCommand(nil, "cat > /home/user/.env")
-	c.Logger.Log(ctx, slog.LevelDebug, "ssh", "container", c.Name, "cmd", sshEnvArgs)
+	c.Logger.Log(ctx, slog.LevelDebug, "ssh", "cmd", sshEnvArgs)
 	cmd := exec.CommandContext(ctx, sshEnvArgs[0], sshEnvArgs[1:]...) //nolint:gosec // args are from trusted SSH config
 	cmd.Env = c.commandEnv()
 	cmd.Stdin = bytes.NewReader(envContent)
@@ -2904,6 +2907,7 @@ func unmarshalContainer(ctx context.Context, client *Client, data []byte) (Conta
 		return Container{}, err
 	}
 	ct := Container{
+		Logger: client.Logger.With(slog.String("cntr", string(raw.Names))),
 		Name:   string(raw.Names),
 		State:  raw.State,
 		Labels: maps.Clone(map[string]string(raw.Labels)),
@@ -2920,7 +2924,7 @@ func unmarshalContainer(ctx context.Context, client *Client, data []byte) (Conta
 		case "md.repos":
 			if data, err := base64.StdEncoding.DecodeString(v); err == nil {
 				if err := json.Unmarshal(data, &ct.Repos); err != nil {
-					client.Logger.Log(ctx, slog.LevelWarn, "failed to unmarshal repos label", "err", err)
+					ct.Logger.Log(ctx, slog.LevelWarn, "failed to unmarshal repos label", "err", err)
 				}
 				for i := range ct.Repos {
 					if err := ct.Repos[i].Validate(); err != nil {

@@ -88,7 +88,7 @@ func RedactCommandArgsForLog(args []string) []string {
 }
 
 // New returns a runtime wrapper for executable.
-func New(executable string, logger Logger, env []string) (Runtime, error) {
+func New(executable string, logger *slog.Logger, env []string) (Runtime, error) {
 	switch runtimeName(executable) {
 	case "docker":
 		return newDocker(executable, logger, env), nil
@@ -99,7 +99,7 @@ func New(executable string, logger Logger, env []string) (Runtime, error) {
 	}
 }
 
-func newBase(executable string, logger Logger, env []string) base {
+func newBase(executable string, logger *slog.Logger, env []string) base {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -275,11 +275,6 @@ func parseByteSize(s string) (uint64, error) {
 		return uint64(f * float64(u.mult)), nil
 	}
 	return 0, fmt.Errorf("unknown byte size suffix in %q", s)
-}
-
-// Logger receives structured log records.
-type Logger interface {
-	Log(ctx context.Context, level slog.Level, msg string, args ...any)
 }
 
 // Runtime is a Docker-compatible container runtime.

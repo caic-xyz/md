@@ -365,7 +365,7 @@ func (a *app) newContainer(ctx context.Context, cf *containerFlags, extraRepoSpe
 
 // resolveRepoSpecs resolves "path[:branch1[,branch2,...]]" specs into Repos.
 // The first branch is the primary; extras are also available in the container.
-func resolveRepoSpecs(ctx context.Context, logger md.Logger, specs []string) ([]md.Repo, error) {
+func resolveRepoSpecs(ctx context.Context, logger *slog.Logger, specs []string) ([]md.Repo, error) {
 	repos := make([]md.Repo, 0, len(specs))
 	for _, spec := range specs {
 		path, branches, _ := strings.Cut(spec, ":")
@@ -566,7 +566,7 @@ func (a *app) cmdStart(ctx context.Context, args []string) error {
 	}
 	if !*noSSH {
 		sshArgs := ct.SSHCommand(nil, "")
-		slog.DebugContext(ctx, "md", "msg", "ssh", "container", ct.Name, "cmd", sshArgs)
+		ct.Logger.DebugContext(ctx, "ssh", "cmd", sshArgs)
 		cmd := exec.CommandContext(ctx, sshArgs[0], sshArgs[1:]...) //nolint:gosec // args are from trusted SSH config
 		cmd.Stdin = os.Stdin
 		cmd.Stdout = os.Stdout
@@ -760,6 +760,7 @@ func newRunContainer(c *md.Container) (*md.Container, error) {
 	}
 	return &md.Container{
 		Client: c.Client,
+		Logger: c.Logger.With(slog.String("cntr", name)),
 		Repos:  repos,
 		Name:   name,
 	}, nil
@@ -771,7 +772,7 @@ func runTemporaryCommand(ctx context.Context, c *md.Container, stdout, stderr io
 		sshCommand = "cd " + shellQuote(c.Repos[0].MountedPath) + " && " + sshCommand
 	}
 	sshArgs := c.SSHCommand(nil, sshCommand)
-	slog.DebugContext(ctx, "md", "msg", "ssh", "container", c.Name, "cmd", sshArgs)
+	c.Logger.DebugContext(ctx, "ssh", "cmd", sshArgs)
 	cmd := exec.CommandContext(ctx, sshArgs[0], sshArgs[1:]...) //nolint:gosec // SSH target is an md container name and command is shell-quoted.
 	cmd.Env = append(os.Environ(), "LANG=C")
 	cmd.Stdout = stdout
@@ -1300,7 +1301,7 @@ func (a *app) cmdFork(ctx context.Context, args []string) error {
 	}
 	if !*noSSH {
 		sshArgs := fork.SSHCommand(nil, "")
-		slog.DebugContext(ctx, "md", "msg", "ssh", "container", fork.Name, "cmd", sshArgs)
+		fork.Logger.DebugContext(ctx, "ssh", "cmd", sshArgs)
 		cmd := exec.CommandContext(ctx, sshArgs[0], sshArgs[1:]...) //nolint:gosec // args are from trusted SSH config
 		cmd.Stdin = os.Stdin
 		cmd.Stdout = os.Stdout
@@ -1327,7 +1328,10 @@ func (a *app) cmdVNC(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		ct = &md.Container{Client: c, Name: name}
+		ct, err = c.Get(ctx, name)
+		if err != nil {
+			return err
+		}
 	} else {
 		var err error
 		ct, _, err = a.findContainerAndRepo(ctx, cf)
@@ -1397,7 +1401,10 @@ func (a *app) cmdSudoPassword(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		ct = &md.Container{Client: c, Name: name}
+		ct, err = c.Get(ctx, name)
+		if err != nil {
+			return err
+		}
 	} else {
 		var err error
 		ct, _, err = a.findContainerAndRepo(ctx, cf)

@@ -36,7 +36,7 @@ const (
 	fakeSSHLogEnv           = "MD_TEST_FAKE_SSH_LOG"
 )
 
-func testRuntime(t testing.TB, name string, logger Logger, env []string) containers.Runtime {
+func testRuntime(t testing.TB, name string, logger *slog.Logger, env []string) containers.Runtime {
 	r, err := containers.New(name, logger, env)
 	if err != nil {
 		t.Fatal(err)
@@ -169,11 +169,14 @@ func TestClient(t *testing.T) {
 		logger := slog.New(slog.NewTextHandler(io.MultiWriter(&buf, testLogWriter{t: t}), testLoggerOptions()))
 		c := &Client{Logger: logger, Runtime: testRuntime(t, "docker", logger, nil)}
 		c.Logger.Log(t.Context(), slog.LevelDebug, "client")
-		ct := &Container{Client: c, Name: "md-test"}
+		ct, err := c.Container()
+		if err != nil {
+			t.Fatal(err)
+		}
 		ct.Logger.Log(t.Context(), slog.LevelDebug, "container")
 
 		got := buf.String()
-		for _, want := range []string{`msg=client`, `msg=container`} {
+		for _, want := range []string{`msg=client`, `msg=container`, `cntr=md-agent-`} {
 			if !strings.Contains(got, want) {
 				t.Fatalf("log output = %q, want %q", got, want)
 			}
