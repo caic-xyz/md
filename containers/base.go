@@ -258,7 +258,12 @@ func (b *base) WatchStats(ctx context.Context, names []string) (iter.Seq2[StatsS
 		stoppedEarly := false
 		scanner := bufio.NewScanner(stdout)
 		for scanner.Scan() {
-			line := strings.TrimSpace(scanner.Text())
+			line, err := normalizeStatsLine(scanner.Text())
+			if err != nil {
+				_ = yield(StatsSample{}, fmt.Errorf("%s stats: %w", b.name, err))
+				stoppedEarly = true
+				break
+			}
 			if line == "" {
 				continue
 			}

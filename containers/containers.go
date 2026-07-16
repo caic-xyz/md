@@ -166,9 +166,9 @@ func hasExplicitRegistry(image string) bool {
 
 // parseStatsLine parses one JSON line from runtime stats output.
 func parseStatsLine(line string) (*Stats, string, error) {
-	line, err := stripANSICSISequences(line)
+	line, err := normalizeStatsLine(line)
 	if err != nil {
-		return nil, "", fmt.Errorf("parsing ANSI control sequence: %w", err)
+		return nil, "", err
 	}
 	var raw struct {
 		Name     string `json:"Name"`
@@ -210,6 +210,16 @@ func parseStatsLine(line string) (*Stats, string, error) {
 		return nil, "", fmt.Errorf("parsing block I/O: %w", err)
 	}
 	return &Stats{CPUPerc: cpuPerc, MemUsed: memUsed, MemLimit: memLimit, MemPerc: memPerc, PIDs: pids, NetRx: netRx, NetTx: netTx, BlockRead: blockRead, BlockWrite: blockWrite, DiskUsed: -1}, raw.Name, nil
+}
+
+// normalizeStatsLine removes terminal control sequences and whitespace from a
+// stats output line.
+func normalizeStatsLine(line string) (string, error) {
+	line, err := stripANSICSISequences(line)
+	if err != nil {
+		return "", fmt.Errorf("parsing ANSI control sequence: %w", err)
+	}
+	return strings.TrimSpace(line), nil
 }
 
 // stripANSICSISequences removes complete ANSI Control Sequence Introducer

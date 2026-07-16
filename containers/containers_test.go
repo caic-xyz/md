@@ -240,6 +240,17 @@ func TestParseStatsLine(t *testing.T) {
 	})
 }
 
+func TestNormalizeStatsLine(t *testing.T) {
+	t.Parallel()
+	line, err := normalizeStatsLine("\x1b[K")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if line != "" {
+		t.Errorf("normalizeStatsLine() = %q, want empty", line)
+	}
+}
+
 func TestStripANSICSISequences(t *testing.T) {
 	t.Parallel()
 	t.Run("valid", func(t *testing.T) {
