@@ -50,7 +50,7 @@ jobs:
           sudo ln -s /mnt/docker /var/lib/docker
           sudo systemctl start docker
           sudo mkdir -p /mnt/user-containers
-          sudo chown $USER:$USER /mnt/user-containers
+          sudo chown "$USER:$USER" /mnt/user-containers
           mkdir -p ~/.local/share
           ln -s /mnt/user-containers ~/.local/share/containers
       - uses: docker/setup-buildx-action@v4
@@ -87,8 +87,8 @@ jobs:
             github_token=${{ secrets.GITHUB_TOKEN }}
       - name: Report Build Timings
         run: |
-          echo "### Build Timings (${{ matrix.arch }})" >> $GITHUB_STEP_SUMMARY
-          cat reports/${{ matrix.arch }}/build_timings.md >> $GITHUB_STEP_SUMMARY
+          echo "### Build Timings (${{ matrix.arch }})" >> "$GITHUB_STEP_SUMMARY"
+          cat "reports/${{ matrix.arch }}/build_timings.md" >> "$GITHUB_STEP_SUMMARY"
       - name: Push platform specific image
         uses: docker/build-push-action@v7
         id: push
@@ -149,16 +149,19 @@ jobs:
       - name: Create and Push Manifests
         id: push
         run: |
-          TAGS="${{ steps.meta.outputs.tags }}"
-          FIRST_TAG=$(echo "$TAGS" | head -n 1)
-          TAG_ARGS=$(echo "$TAGS" | awk '{printf "-t %s ", $0}')
-          docker buildx imagetools create $TAG_ARGS \
-            --annotation "org.opencontainers.image.description=Root base layer with system packages for the md dev environment." \
-            --annotation "org.opencontainers.image.url=${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
-            "${FIRST_TAG}-amd64" "${FIRST_TAG}-arm64"
-          DIGEST=$(docker buildx imagetools inspect "${FIRST_TAG}" | grep "Digest:" | head -n 1 | awk '{print $2}')
-          echo "image=${FIRST_TAG%:*}" >> "$GITHUB_OUTPUT"
-          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+          mapfile -t tags <<< "${{ steps.meta.outputs.tags }}"
+          first_tag=${tags[0]}
+          tag_args=()
+          for tag in "${tags[@]}"; do
+            tag_args+=(-t "$tag")
+          done
+          docker buildx imagetools create "${tag_args[@]}" \
+            --annotation "index:org.opencontainers.image.description=Root base layer with system packages for the md dev environment." \
+            --annotation "index:org.opencontainers.image.url=${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            "${first_tag}-amd64" "${first_tag}-arm64"
+          digest=$(docker buildx imagetools inspect "${first_tag}" | grep "Digest:" | head -n 1 | awk '{print $2}')
+          echo "image=${first_tag%:*}" >> "$GITHUB_OUTPUT"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
       - name: Attest Built Images
         uses: actions/attest-build-provenance@v4
         with:
