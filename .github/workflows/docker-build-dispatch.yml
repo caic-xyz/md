@@ -9,6 +9,7 @@ on:
   push:
     branches: [main]
     paths:
+      - .github/workflows/docker-build-dispatch.yml
       - .github/workflows/docker-build-root.yml
       - .github/workflows/docker-build-user.yml
       - rsc/root/**
