@@ -168,12 +168,12 @@ func TestHasExplicitRegistry(t *testing.T) {
 	})
 }
 
-func TestParseStatsLine(t *testing.T) {
+func TestParseDockerStats(t *testing.T) {
 	t.Parallel()
 	t.Run("normal", func(t *testing.T) {
 		t.Parallel()
 		line := `{"Name":"md-repo-main","CPUPerc":"1.23%","MemUsage":"150MiB / 7.5GiB","MemPerc":"1.95%","PIDs":"12","NetIO":"1.5kB / 500B","BlockIO":"10MB / 2MB"}`
-		s, name, err := parseStatsLine(line)
+		s, name, err := parseDockerStats(line)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -193,7 +193,11 @@ func TestParseStatsLine(t *testing.T) {
 	t.Run("docker_ansi_frame", func(t *testing.T) {
 		t.Parallel()
 		line := "\x1b[H{\"Name\":\"md-repo-main\",\"CPUPerc\":\"1.23%\",\"MemUsage\":\"150MiB / 7.5GiB\",\"MemPerc\":\"1.95%\",\"PIDs\":\"12\",\"NetIO\":\"1.5kB / 500B\",\"BlockIO\":\"10MB / 2MB\"}\x1b[K"
-		s, name, err := parseStatsLine(line)
+		line, err := normalizeStatsLine(line)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s, name, err := parseDockerStats(line)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -207,7 +211,7 @@ func TestParseStatsLine(t *testing.T) {
 	t.Run("na_values", func(t *testing.T) {
 		t.Parallel()
 		line := `{"Name":"md-repo-main","CPUPerc":"N/A","MemUsage":"N/A / N/A","MemPerc":"N/A","PIDs":"N/A","NetIO":"N/A / N/A","BlockIO":"N/A / N/A"}`
-		s, name, err := parseStatsLine(line)
+		s, name, err := parseDockerStats(line)
 		if err != nil {
 			t.Fatalf("N/A values should not cause an error, got: %v", err)
 		}
@@ -231,13 +235,40 @@ func TestParseStatsLine(t *testing.T) {
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {
 				t.Parallel()
-				_, _, err := parseStatsLine(tt.in)
+				_, _, err := parseDockerStats(tt.in)
 				if err == nil {
-					t.Errorf("parseStatsLine(%q) should return error", tt.in)
+					t.Errorf("parseDockerStats(%q) should return error", tt.in)
 				}
 			})
 		}
 	})
+}
+
+func TestParsePodmanStats(t *testing.T) {
+	t.Parallel()
+	line := `{"AvgCPU":4.902134241779032,"ContainerID":"ec4da855007520bd1702e702cbce0f3346ed1282ec88a273169329e22f2f9be1","Name":"md-caic-caic-28","PerCPU":null,"CPU":4.902134241779032,"CPUNano":6682560000,"CPUSystemNano":1298987,"SystemNano":1784235244400324567,"MemUsage":120074240,"MemLimit":33325363200,"MemPerc":0.3603088712923615,"NetInput":104882,"NetOutput":105535,"BlockInput":0,"BlockOutput":0,"PIDs":27,"UpTime":6682560000,"Duration":6682560000}`
+	s, name, err := parsePodmanStats(line)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name != "md-caic-caic-28" {
+		t.Errorf("name = %q, want md-caic-caic-28", name)
+	}
+	if s.CPUPerc != 4.902134241779032 {
+		t.Errorf("CPUPerc = %v, want 4.902134241779032", s.CPUPerc)
+	}
+	if s.MemUsed != 120074240 || s.MemLimit != 33325363200 {
+		t.Errorf("memory = %d / %d, want 120074240 / 33325363200", s.MemUsed, s.MemLimit)
+	}
+	if s.MemPerc != 0.3603088712923615 {
+		t.Errorf("MemPerc = %v, want 0.3603088712923615", s.MemPerc)
+	}
+	if s.PIDs != 27 {
+		t.Errorf("PIDs = %d, want 27", s.PIDs)
+	}
+	if s.NetRx != 104882 || s.NetTx != 105535 {
+		t.Errorf("network I/O = %d / %d, want 104882 / 105535", s.NetRx, s.NetTx)
+	}
 }
 
 func TestNormalizeStatsLine(t *testing.T) {

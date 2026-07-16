@@ -23,10 +23,11 @@ import (
 )
 
 type base struct {
-	name       string
-	executable string
-	logger     *slog.Logger
-	env        []string
+	name        string
+	executable  string
+	logger      *slog.Logger
+	env         []string
+	statsParser statsParser
 }
 
 // Name returns the normalized runtime name.
@@ -218,7 +219,11 @@ func (b *base) Stats(ctx context.Context, name string) (*Stats, error) {
 	if err != nil {
 		return nil, err
 	}
-	s, _, err := parseStatsLine(out)
+	out, err = normalizeStatsLine(out)
+	if err != nil {
+		return nil, err
+	}
+	s, _, err := b.statsParser(out)
 	if err != nil {
 		return nil, err
 	}
@@ -267,7 +272,7 @@ func (b *base) WatchStats(ctx context.Context, names []string) (iter.Seq2[StatsS
 			if line == "" {
 				continue
 			}
-			s, name, err := parseStatsLine(line)
+			s, name, err := b.statsParser(line)
 			if err != nil {
 				_ = yield(StatsSample{}, fmt.Errorf("%s stats: %w", b.name, err))
 				stoppedEarly = true
@@ -319,11 +324,15 @@ func (b *base) StatsAll(ctx context.Context, names []string) (map[string]*Stats,
 			return
 		}
 		for line := range strings.SplitSeq(out, "\n") {
-			line = strings.TrimSpace(line)
+			line, err := normalizeStatsLine(line)
+			if err != nil {
+				statsErr = fmt.Errorf("docker stats: %w", err)
+				return
+			}
 			if line == "" {
 				continue
 			}
-			s, name, err := parseStatsLine(line)
+			s, name, err := b.statsParser(line)
 			if err != nil {
 				statsErr = fmt.Errorf("docker stats: %w", err)
 				return

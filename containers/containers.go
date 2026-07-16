@@ -96,15 +96,15 @@ func New(executable string, logger *slog.Logger, env []string) (Runtime, error) 
 	case "podman":
 		return newPodman(executable, logger, env), nil
 	default:
-		return &commandRuntime{base: newBase(executable, logger, env)}, nil
+		return &commandRuntime{base: newBase(executable, logger, env, parseDockerStats)}, nil
 	}
 }
 
-func newBase(executable string, logger *slog.Logger, env []string) base {
+func newBase(executable string, logger *slog.Logger, env []string, statsParser statsParser) base {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return base{name: runtimeName(executable), executable: executable, logger: logger, env: slices.Clone(env)}
+	return base{name: runtimeName(executable), executable: executable, logger: logger, env: slices.Clone(env), statsParser: statsParser}
 }
 
 func runtimeName(executable string) string {
@@ -164,53 +164,7 @@ func hasExplicitRegistry(image string) bool {
 	return first == "localhost" || strings.ContainsAny(first, ".:")
 }
 
-// parseStatsLine parses one JSON line from runtime stats output.
-func parseStatsLine(line string) (*Stats, string, error) {
-	line, err := normalizeStatsLine(line)
-	if err != nil {
-		return nil, "", err
-	}
-	var raw struct {
-		Name     string `json:"Name"`
-		CPUPerc  string `json:"CPUPerc"`
-		MemUsage string `json:"MemUsage"`
-		MemPerc  string `json:"MemPerc"`
-		PIDs     string `json:"PIDs"`
-		NetIO    string `json:"NetIO"`
-		BlockIO  string `json:"BlockIO"`
-	}
-	if err := json.Unmarshal([]byte(line), &raw); err != nil {
-		return nil, "", fmt.Errorf("parsing stats JSON: %w", err)
-	}
-	cpuPerc, err := parsePercent(raw.CPUPerc)
-	if err != nil {
-		return nil, "", fmt.Errorf("parsing CPU%%: %w", err)
-	}
-	memPerc, err := parsePercent(raw.MemPerc)
-	if err != nil {
-		return nil, "", fmt.Errorf("parsing mem%%: %w", err)
-	}
-	memUsed, memLimit, err := parseMemUsage(raw.MemUsage)
-	if err != nil {
-		return nil, "", fmt.Errorf("parsing mem usage: %w", err)
-	}
-	var pids int
-	if raw.PIDs != "N/A" {
-		pids, err = strconv.Atoi(raw.PIDs)
-		if err != nil {
-			return nil, "", fmt.Errorf("parsing PIDs: %w", err)
-		}
-	}
-	netRx, netTx, err := parseIOPair(raw.NetIO)
-	if err != nil {
-		return nil, "", fmt.Errorf("parsing net I/O: %w", err)
-	}
-	blockRead, blockWrite, err := parseIOPair(raw.BlockIO)
-	if err != nil {
-		return nil, "", fmt.Errorf("parsing block I/O: %w", err)
-	}
-	return &Stats{CPUPerc: cpuPerc, MemUsed: memUsed, MemLimit: memLimit, MemPerc: memPerc, PIDs: pids, NetRx: netRx, NetTx: netTx, BlockRead: blockRead, BlockWrite: blockWrite, DiskUsed: -1}, raw.Name, nil
-}
+type statsParser func(string) (*Stats, string, error)
 
 // normalizeStatsLine removes terminal control sequences and whitespace from a
 // stats output line.
