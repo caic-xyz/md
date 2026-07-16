@@ -190,6 +190,20 @@ func TestParseStatsLine(t *testing.T) {
 			t.Errorf("PIDs = %d, want 12", s.PIDs)
 		}
 	})
+	t.Run("docker_ansi_frame", func(t *testing.T) {
+		t.Parallel()
+		line := "\x1b[H{\"Name\":\"md-repo-main\",\"CPUPerc\":\"1.23%\",\"MemUsage\":\"150MiB / 7.5GiB\",\"MemPerc\":\"1.95%\",\"PIDs\":\"12\",\"NetIO\":\"1.5kB / 500B\",\"BlockIO\":\"10MB / 2MB\"}\x1b[K"
+		s, name, err := parseStatsLine(line)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if name != "md-repo-main" {
+			t.Errorf("name = %q, want %q", name, "md-repo-main")
+		}
+		if s.CPUPerc != 1.23 {
+			t.Errorf("CPUPerc = %v, want 1.23", s.CPUPerc)
+		}
+	})
 	t.Run("na_values", func(t *testing.T) {
 		t.Parallel()
 		line := `{"Name":"md-repo-main","CPUPerc":"N/A","MemUsage":"N/A / N/A","MemPerc":"N/A","PIDs":"N/A","NetIO":"N/A / N/A","BlockIO":"N/A / N/A"}`
@@ -222,6 +236,28 @@ func TestParseStatsLine(t *testing.T) {
 					t.Errorf("parseStatsLine(%q) should return error", tt.in)
 				}
 			})
+		}
+	})
+}
+
+func TestStripANSICSISequences(t *testing.T) {
+	t.Parallel()
+	t.Run("valid", func(t *testing.T) {
+		t.Parallel()
+		got, err := stripANSICSISequences("\x1b[H{\"Name\":\"container\"}\x1b[K\n\x1b[J")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := "{\"Name\":\"container\"}\n"; got != want {
+			t.Errorf("stripANSICSISequences() = %q, want %q", got, want)
+		}
+	})
+	t.Run("error", func(t *testing.T) {
+		t.Parallel()
+		for _, in := range []string{"\x1b", "\x1b[", "\x1b[1"} {
+			if _, err := stripANSICSISequences(in); err == nil {
+				t.Errorf("stripANSICSISequences(%q) returned nil error", in)
+			}
 		}
 	})
 }

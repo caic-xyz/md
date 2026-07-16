@@ -8,6 +8,7 @@ package containers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"iter"
@@ -165,6 +166,10 @@ func hasExplicitRegistry(image string) bool {
 
 // parseStatsLine parses one JSON line from runtime stats output.
 func parseStatsLine(line string) (*Stats, string, error) {
+	line, err := stripANSICSISequences(line)
+	if err != nil {
+		return nil, "", fmt.Errorf("parsing ANSI control sequence: %w", err)
+	}
 	var raw struct {
 		Name     string `json:"Name"`
 		CPUPerc  string `json:"CPUPerc"`
@@ -205,6 +210,39 @@ func parseStatsLine(line string) (*Stats, string, error) {
 		return nil, "", fmt.Errorf("parsing block I/O: %w", err)
 	}
 	return &Stats{CPUPerc: cpuPerc, MemUsed: memUsed, MemLimit: memLimit, MemPerc: memPerc, PIDs: pids, NetRx: netRx, NetTx: netTx, BlockRead: blockRead, BlockWrite: blockWrite, DiskUsed: -1}, raw.Name, nil
+}
+
+// stripANSICSISequences removes complete ANSI Control Sequence Introducer
+// sequences. Docker stats uses these terminal-only sequences while streaming
+// output, even when its output is formatted as JSON.
+func stripANSICSISequences(s string) (string, error) {
+	if !strings.ContainsRune(s, '\x1b') {
+		return s, nil
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); {
+		if s[i] != '\x1b' {
+			b.WriteByte(s[i])
+			i++
+			continue
+		}
+		if i+1 == len(s) || s[i+1] != '[' {
+			return "", fmt.Errorf("unexpected escape sequence at byte %d", i)
+		}
+		i += 2
+		for i < len(s) && s[i] >= 0x30 && s[i] <= 0x3f {
+			i++
+		}
+		for i < len(s) && s[i] >= 0x20 && s[i] <= 0x2f {
+			i++
+		}
+		if i == len(s) || s[i] < 0x40 || s[i] > 0x7e {
+			return "", errors.New("incomplete ANSI CSI sequence")
+		}
+		i++
+	}
+	return b.String(), nil
 }
 
 // parsePercent parses a percentage string like "1.23%" into 1.23.

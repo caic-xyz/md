@@ -415,11 +415,11 @@ func (b *base) WatchDieEvents(ctx context.Context, labelKey string) (iter.Seq2[E
 }
 
 func (b *base) command(ctx context.Context, args ...string) *exec.Cmd {
-	cmdArgs := append([]string{b.name}, args...)
+	cmdArgs := append([]string{b.executable}, args...)
 	// Command arguments are redacted before logging.
 	// codeql[go/clear-text-logging]
 	b.logger.Log(ctx, slog.LevelDebug, "exec", "cmd", RedactCommandArgsForLog(cmdArgs))
-	cmd := exec.CommandContext(ctx, b.name, args...) //nolint:gosec // args are from trusted callers.
+	cmd := exec.CommandContext(ctx, b.executable, args...) //nolint:gosec // args are from trusted callers.
 	cmd.Env = b.commandEnv("LANG=C")
 	return cmd
 }
