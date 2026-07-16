@@ -5,9 +5,13 @@
 *.swp
 *~
 __pycache__/
-.coverage
 .DS_Store
-.env
+.coverage
+/.env
 .claude/worktrees/
-.vscode/
+/.letta/
+/.vscode/
 cover.cov
+kls_database.db
+**/.claude/settings.local.json
+.pi-subagents
