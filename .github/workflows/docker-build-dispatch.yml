@@ -9,6 +9,8 @@ on:
   push:
     branches: [main]
     paths:
+      - .github/workflows/docker-build-root.yml
+      - .github/workflows/docker-build-user.yml
       - rsc/root/**
       - rsc/user/**
 
@@ -28,11 +30,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if ! git diff --quiet "${{ github.event.before }}" "${{ github.event.after }}" -- rsc/root/; then
-            echo "Root changed: dispatching root build (root will chain to user)."
+          if ! git diff --quiet "${{ github.event.before }}" "${{ github.event.after }}" -- rsc/root/ .github/workflows/docker-build-root.yml; then
+            echo "Root build inputs changed: dispatching root build (root will chain to user)."
             gh workflow run docker-build-root.yml --ref "${{ github.ref }}"
-          elif ! git diff --quiet "${{ github.event.before }}" "${{ github.event.after }}" -- rsc/user/; then
-            echo "Only user changed: dispatching user build directly."
+          elif ! git diff --quiet "${{ github.event.before }}" "${{ github.event.after }}" -- rsc/user/ .github/workflows/docker-build-user.yml; then
+            echo "User build inputs changed: dispatching user build directly."
             gh workflow run docker-build-user.yml --ref "${{ github.ref }}"
           else
             echo "No relevant changes."
