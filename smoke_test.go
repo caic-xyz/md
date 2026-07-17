@@ -750,6 +750,17 @@ func TestSmoke(t *testing.T) {
 						t.Fatalf("prepare source for Fork: %v", err)
 					}
 
+					if err := ct.Stop(t.Context()); err != nil {
+						t.Fatalf("stop source before Fork: %v", err)
+					}
+					if got := ct.Status(t.Context()); got != "exited" {
+						t.Fatalf("source state after Stop = %q, want exited", got)
+					}
+					sourceStartedAt, err := client.Runtime.Run(t.Context(), "", "inspect", "--format", "{{.State.StartedAt}}", ct.Name)
+					if err != nil {
+						t.Fatalf("inspect source start time: %v", err)
+					}
+
 					var forkStdout, forkStderr strings.Builder
 					mounts, err := ct.AgentMounts(slices.Collect(maps.Values(HarnessMounts))...)
 					if err != nil {
@@ -792,17 +803,26 @@ func TestSmoke(t *testing.T) {
 						t.Fatalf("temporary fork snapshot tag md-fork-%s still exists", ct.Name)
 					}
 
+					if got := ct.Status(t.Context()); got != "exited" {
+						t.Fatalf("source state after Fork = %q, want exited", got)
+					}
+					if got, err := client.Runtime.Run(t.Context(), "", "inspect", "--format", "{{.State.StartedAt}}", ct.Name); err != nil {
+						t.Fatalf("inspect source start time after Fork: %v", err)
+					} else if got != sourceStartedAt {
+						t.Fatalf("source start time changed from %q to %q", sourceStartedAt, got)
+					}
+
 					if len(fork.Repos) != 1 {
 						t.Fatalf("fork repos = %d, want 1", len(fork.Repos))
 					}
 					if fork.Repos[0].Branches[0] != "main-0" {
 						t.Fatalf("fork branch = %q, want main-0", fork.Repos[0].Branches[0])
 					}
-					out, err := fork.runCmd(t.Context(), "", fork.SSHCommand(nil, "cat /tmp/fork-marker && printf '\n' && git -C "+shellQuote(mountedPath)+" branch --show-current && cat "+shellQuote(mountedPath+"/README.md")))
+					out, err := fork.runCmd(t.Context(), "", fork.SSHCommand(nil, "cat /tmp/fork-marker && printf '\n' && git -C "+shellQuote(mountedPath)+" branch --show-current && git -C "+shellQuote(mountedPath)+" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' && cat "+shellQuote(mountedPath+"/README.md")))
 					if err != nil {
 						t.Fatalf("inspect fork: %v", err)
 					}
-					for _, want := range []string{"snapshot", "main-0", "fork-uncommitted"} {
+					for _, want := range []string{"snapshot", "main-0", "host/main", "fork-uncommitted"} {
 						if !strings.Contains(out, want) {
 							t.Fatalf("fork output missing %q:\n%s", want, out)
 						}

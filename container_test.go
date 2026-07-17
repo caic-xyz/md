@@ -929,6 +929,8 @@ func TestFork(t *testing.T) {
 		runTestGit(t, ctx, dir, "add", ".")
 		runTestGit(t, ctx, dir, "commit", "-q", "-m", "base")
 		runTestGit(t, ctx, dir, "checkout", "-q", "-b", "caic-23")
+		runTestGit(t, ctx, dir, "config", "branch.caic-23.remote", "origin")
+		runTestGit(t, ctx, dir, "config", "branch.caic-23.merge", "refs/heads/main")
 		writeTestFile(t, filepath.Join(dir, "tracked.txt"), "source\n")
 		runTestGit(t, ctx, dir, "commit", "-q", "-am", "source")
 		sourceTip := runTestGit(t, ctx, dir, "rev-parse", "refs/heads/caic-23")
@@ -983,6 +985,12 @@ func TestFork(t *testing.T) {
 		}
 		if got := runTestGit(t, ctx, dir, "branch", "--show-current"); got != "caic-23-0" {
 			t.Fatalf("current branch after rebase = %q, want caic-23-0", got)
+		}
+		if got := runTestGit(t, ctx, dir, "config", "--get", "branch.caic-23-0.remote"); got != "origin" {
+			t.Errorf("fork remote = %q, want origin", got)
+		}
+		if got := runTestGit(t, ctx, dir, "config", "--get", "branch.caic-23-0.merge"); got != "refs/heads/main" {
+			t.Errorf("fork merge ref = %q, want refs/heads/main", got)
 		}
 	})
 

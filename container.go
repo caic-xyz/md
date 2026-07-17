@@ -1154,7 +1154,7 @@ func forkRepoBranches(ctx context.Context, src *Repo, existing []*Container) ([]
 	}
 }
 
-// Fork snapshots a running container and creates a new one where each mapped
+// Fork snapshots a running or stopped container and creates a new one where each mapped
 // repository is checked out on a new primary branch.
 //
 // The snapshot preserves the container's entire filesystem (installed
@@ -1236,28 +1236,6 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 		return nil, fmt.Errorf("fork container: %w", err)
 	}
 
-	// Fetch current state from source container and create/reset local branches
-	// for repos inherited from the source.
-	if !opts.Quiet {
-		_, _ = fmt.Fprintln(stdout, "- Creating local branches ...")
-	}
-	for i, r := range c.Repos {
-		g := &git.Checkout{Root: r.GitRoot, Logger: c.Logger}
-		curr, _ := g.CurrentBranch(ctx)
-		if err := c.runCmdOut(ctx, r.GitRoot, append([]string{"git", "fetch", "-q", c.Name}, r.Branches...), stdout, stderr); err != nil {
-			return nil, fmt.Errorf("fetching %s from source container: %w", r.MountedPath, err)
-		}
-		fetchedRef := c.Name + "/" + r.Branches[0]
-		newBranch := fork.Repos[i].Branches[0]
-		if curr == newBranch {
-			if err := c.runCmdOut(ctx, r.GitRoot, []string{"git", "reset", "--hard", fetchedRef}, stdout, stderr); err != nil {
-				return nil, fmt.Errorf("resetting branch %s: %w", newBranch, err)
-			}
-		} else if err := c.runCmdOut(ctx, r.GitRoot, []string{"git", "branch", "-f", newBranch, fetchedRef}, stdout, stderr); err != nil {
-			return nil, fmt.Errorf("creating branch %s: %w", newBranch, err)
-		}
-	}
-
 	// Start the new container from the snapshot image.
 	if !opts.Quiet {
 		_, _ = fmt.Fprintf(stdout, "- Starting forked container %s ...\n", fork.Name)
@@ -1297,6 +1275,29 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 	if err := fork.waitForSSH(ctx, time.Now().Add(containerSSHReadyTimeout)); err != nil {
 		return nil, fmt.Errorf("SSH handshake on forked container: %w", err)
 	}
+
+	// The snapshot preserves source refs, so fetch them from the running fork
+	// instead of restarting the stopped source container.
+	if !opts.Quiet {
+		_, _ = fmt.Fprintln(stdout, "- Creating local branches ...")
+	}
+	for i, r := range c.Repos {
+		g := &git.Checkout{Root: r.GitRoot, Logger: c.Logger}
+		curr, _ := g.CurrentBranch(ctx)
+		if err := c.runCmdOut(ctx, r.GitRoot, append([]string{"git", "fetch", "-q", fork.Name}, r.Branches...), stdout, stderr); err != nil {
+			return nil, fmt.Errorf("fetching %s from forked container: %w", r.MountedPath, err)
+		}
+		fetchedRef := fork.Name + "/" + r.Branches[0]
+		newBranch := fork.Repos[i].Branches[0]
+		if curr == newBranch {
+			if err := c.runCmdOut(ctx, r.GitRoot, []string{"git", "reset", "--hard", fetchedRef}, stdout, stderr); err != nil {
+				return nil, fmt.Errorf("resetting branch %s: %w", newBranch, err)
+			}
+		} else if err := c.runCmdOut(ctx, r.GitRoot, []string{"git", "branch", "-f", newBranch, fetchedRef}, stdout, stderr); err != nil {
+			return nil, fmt.Errorf("creating branch %s: %w", newBranch, err)
+		}
+	}
+
 	sshCommandDeadline := time.Now().Add(containerSSHCommandRetryTimeout)
 
 	// Send .env into the forked container.
@@ -1363,25 +1364,13 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 		_, _ = fmt.Fprintln(stdout, "- Setting up branches in forked container ...")
 	}
 	for i, r := range c.Repos {
-		refspecs := make([]string, len(fork.Repos[i].Branches))
-		setupCommands := []string{"cd " + shellQuote(r.MountedPath), hostRemoteSetupCommand}
 		oldPrimary := r.Branches[0]
 		newPrimary := fork.Repos[i].Branches[0]
-		refspecs[0] = newPrimary + ":refs/remotes/host/" + newPrimary
-		setupCommands = append(setupCommands,
-			forkPrimaryBranchSetupCommand(oldPrimary, newPrimary),
-			"git branch -q --set-upstream-to="+shellQuote("host/"+newPrimary)+" "+shellQuote(newPrimary),
-		)
-		for j, branch := range r.Branches[1:] {
-			refspecs[j+1] = c.Name + "/" + branch + ":refs/remotes/host/" + branch
-			setupCommands = append(setupCommands, "git branch -q --set-upstream-to="+shellQuote("host/"+branch)+" "+shellQuote(branch))
-		}
-		args := append([]string{"git", "push", "-q", "-f", fork.Name}, refspecs...)
-		if err := c.runCmdOut(ctx, fork.Repos[i].GitRoot, args, stdout, stderr); err != nil {
-			return nil, fmt.Errorf("pushing fork branches for %s: %w", r.MountedPath, err)
-		}
-		if err := c.runCmdOut(ctx, "", fork.SSHCommand(nil, strings.Join(setupCommands, " && ")), stdout, stderr); err != nil {
-			return nil, fmt.Errorf("setting up branches for %s: %w", r.MountedPath, err)
+		// The snapshot already has the source branch's upstream configuration.
+		// Renaming the branch preserves it, including its original diff base.
+		setup := "cd " + shellQuote(r.MountedPath) + " && " + forkPrimaryBranchSetupCommand(oldPrimary, newPrimary)
+		if err := c.runCmdOut(ctx, "", fork.SSHCommand(nil, setup), stdout, stderr); err != nil {
+			return nil, fmt.Errorf("renaming branch for %s: %w", r.MountedPath, err)
 		}
 		if err := c.runCmdOut(ctx, fork.Repos[i].GitRoot, []string{"git", "fetch", "-q", fork.Name, newPrimary}, stdout, stderr); err != nil {
 			return nil, fmt.Errorf("fetching %s from fork: %w", newPrimary, err)
@@ -1425,12 +1414,16 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 func forkPrimaryBranchSetupCommand(oldBranch, newBranch string) string {
 	oldRef := "refs/heads/" + oldBranch
 	newRef := "refs/heads/" + newBranch
+	oldConfig := "branch." + oldBranch
+	newConfig := "branch." + newBranch
 	return strings.Join([]string{
 		"old_ref=" + shellQuote(oldRef),
 		"new_ref=" + shellQuote(newRef),
+		"old_config=" + shellQuote(oldConfig),
+		"new_config=" + shellQuote(newConfig),
 		"rebase_head=",
 		`for candidate in "$(git rev-parse --git-path rebase-merge/head-name)" "$(git rev-parse --git-path rebase-apply/head-name)"; do if [ -s "$candidate" ] && [ "$(cat "$candidate")" = "$old_ref" ]; then rebase_head=$candidate; break; fi; done`,
-		`if [ -n "$rebase_head" ]; then git update-ref "$new_ref" "$old_ref" "" && printf '%s\n' "$new_ref" > "$rebase_head" && git branch -q -D ` + shellQuote(oldBranch) + `; else git branch -m ` + shellQuote(oldBranch) + ` ` + shellQuote(newBranch) + `; fi`,
+		`if [ -n "$rebase_head" ]; then git update-ref "$new_ref" "$old_ref" "" && printf '%s\n' "$new_ref" > "$rebase_head" && if git config --get "$old_config.remote" >/dev/null || git config --get "$old_config.merge" >/dev/null; then git config --rename-section "$old_config" "$new_config"; fi && git branch -q -D ` + shellQuote(oldBranch) + `; else git branch -m ` + shellQuote(oldBranch) + ` ` + shellQuote(newBranch) + `; fi`,
 	}, " && ")
 }
 
