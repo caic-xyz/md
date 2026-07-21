@@ -323,6 +323,34 @@ func (r *Repo) branchUpstream(ctx context.Context, logger *slog.Logger, branch s
 	return remote, upstreamBranch, true, nil
 }
 
+// createForkHostBranch creates destinationBranch at startPoint and gives it the
+// source branch's upstream, falling back to the repository's default branch.
+func (r *Repo) createForkHostBranch(ctx context.Context, logger *slog.Logger, sourceBranch, destinationBranch, startPoint string) error {
+	remote, upstreamBranch, hasUpstream, err := r.branchUpstream(ctx, logger, sourceBranch)
+	if err != nil {
+		return fmt.Errorf("reading upstream for source branch %q: %w", sourceBranch, err)
+	}
+	if !hasUpstream {
+		if err := r.resolveDefaults(ctx, logger); err != nil {
+			return fmt.Errorf("resolving default upstream for fork branch %q: %w", destinationBranch, err)
+		}
+		remote = r.DefaultRemote
+		upstreamBranch = r.DefaultBranch
+	}
+
+	g := &git.Checkout{Root: r.GitRoot, Logger: logger}
+	if _, err := g.RunGit(ctx, "branch", "--no-track", "-f", destinationBranch, startPoint); err != nil {
+		return fmt.Errorf("creating fork branch %q: %w", destinationBranch, err)
+	}
+	if _, err := g.RunGit(ctx, "config", "--replace-all", "branch."+destinationBranch+".remote", remote); err != nil {
+		return fmt.Errorf("setting remote for fork branch %q: %w", destinationBranch, err)
+	}
+	if _, err := g.RunGit(ctx, "config", "--replace-all", "branch."+destinationBranch+".merge", "refs/heads/"+upstreamBranch); err != nil {
+		return fmt.Errorf("setting merge ref for fork branch %q: %w", destinationBranch, err)
+	}
+	return nil
+}
+
 // StartOpts configures container startup.
 type StartOpts struct {
 	// BaseImage is the full Docker image reference (e.g.
@@ -1282,19 +1310,13 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 		_, _ = fmt.Fprintln(stdout, "- Creating local branches ...")
 	}
 	for i, r := range c.Repos {
-		g := &git.Checkout{Root: r.GitRoot, Logger: c.Logger}
-		curr, _ := g.CurrentBranch(ctx)
 		if err := c.runCmdOut(ctx, r.GitRoot, append([]string{"git", "fetch", "-q", fork.Name}, r.Branches...), stdout, stderr); err != nil {
 			return nil, fmt.Errorf("fetching %s from forked container: %w", r.MountedPath, err)
 		}
 		fetchedRef := fork.Name + "/" + r.Branches[0]
 		newBranch := fork.Repos[i].Branches[0]
-		if curr == newBranch {
-			if err := c.runCmdOut(ctx, r.GitRoot, []string{"git", "reset", "--hard", fetchedRef}, stdout, stderr); err != nil {
-				return nil, fmt.Errorf("resetting branch %s: %w", newBranch, err)
-			}
-		} else if err := c.runCmdOut(ctx, r.GitRoot, []string{"git", "branch", "-f", newBranch, fetchedRef}, stdout, stderr); err != nil {
-			return nil, fmt.Errorf("creating branch %s: %w", newBranch, err)
+		if err := r.createForkHostBranch(ctx, c.Logger, r.Branches[0], newBranch, fetchedRef); err != nil {
+			return nil, fmt.Errorf("creating host branch for %s: %w", r.MountedPath, err)
 		}
 	}
 
@@ -1374,9 +1396,6 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 		}
 		if err := c.runCmdOut(ctx, fork.Repos[i].GitRoot, []string{"git", "fetch", "-q", fork.Name, newPrimary}, stdout, stderr); err != nil {
 			return nil, fmt.Errorf("fetching %s from fork: %w", newPrimary, err)
-		}
-		if err := c.runCmdOut(ctx, fork.Repos[i].GitRoot, []string{"git", "branch", "--set-upstream-to", fork.Name + "/" + newPrimary, newPrimary}, stdout, stderr); err != nil {
-			return nil, fmt.Errorf("setting upstream for %s: %w", newPrimary, err)
 		}
 	}
 	// Push extra repos into the container using source branches, set up

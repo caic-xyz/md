@@ -818,6 +818,9 @@ func TestSmoke(t *testing.T) {
 					if fork.Repos[0].Branches[0] != "main-0" {
 						t.Fatalf("fork branch = %q, want main-0", fork.Repos[0].Branches[0])
 					}
+					if got := runSmokeGit(t, t.Context(), repo, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "main-0@{upstream}"); got != "origin/main" {
+						t.Fatalf("host fork upstream = %q, want origin/main", got)
+					}
 					out, err := fork.runCmd(t.Context(), "", fork.SSHCommand(nil, "cat /tmp/fork-marker && printf '\n' && git -C "+shellQuote(mountedPath)+" branch --show-current && git -C "+shellQuote(mountedPath)+" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' && cat "+shellQuote(mountedPath+"/README.md")))
 					if err != nil {
 						t.Fatalf("inspect fork: %v", err)

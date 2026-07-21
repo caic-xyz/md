@@ -852,6 +852,57 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 				t.Fatalf("forkRepoBranches = %v, want %v", got, want)
 			}
 		})
+		t.Run("host_branch_tracks_source_upstream", func(t *testing.T) {
+			t.Parallel()
+			tests := []struct {
+				name           string
+				sourceRemote   string
+				sourceMergeRef string
+				wantRemote     string
+				wantMergeRef   string
+			}{
+				{name: "remote_branch", sourceRemote: "origin", sourceMergeRef: "refs/heads/main", wantRemote: "origin", wantMergeRef: "refs/heads/main"},
+				{name: "local_branch", sourceRemote: ".", sourceMergeRef: "refs/heads/main", wantRemote: ".", wantMergeRef: "refs/heads/main"},
+				{name: "no_upstream", wantRemote: "origin", wantMergeRef: "refs/heads/main"},
+			}
+			for _, tt := range tests {
+				t.Run(tt.name, func(t *testing.T) {
+					t.Parallel()
+					ctx := t.Context()
+					dir := t.TempDir()
+					runTestGit(t, ctx, dir, "init", "-q", "--initial-branch=main")
+					runTestGit(t, ctx, dir, "config", "user.name", "Test")
+					runTestGit(t, ctx, dir, "config", "user.email", "test@test")
+					writeTestFile(t, filepath.Join(dir, "README.md"), "main\n")
+					runTestGit(t, ctx, dir, "add", ".")
+					runTestGit(t, ctx, dir, "commit", "-q", "-m", "main")
+					runTestGit(t, ctx, dir, "remote", "add", "origin", "/dev/null")
+					runTestGit(t, ctx, dir, "remote", "add", "fork", "/dev/null")
+					runTestGit(t, ctx, dir, "branch", "source")
+					runTestGit(t, ctx, dir, "update-ref", "refs/remotes/fork/source", "source")
+					runTestGit(t, ctx, dir, "config", "branch.autoSetupMerge", "always")
+					runTestGit(t, ctx, dir, "config", "branch.autoSetupRebase", "always")
+					if tt.sourceRemote != "" {
+						runTestGit(t, ctx, dir, "config", "branch.source.remote", tt.sourceRemote)
+						runTestGit(t, ctx, dir, "config", "branch.source.merge", tt.sourceMergeRef)
+					}
+
+					repo := &Repo{GitRoot: dir, DefaultRemote: "origin", DefaultBranch: "main"}
+					if err := repo.createForkHostBranch(ctx, testLogger(t), "source", "source-0", "fork/source"); err != nil {
+						t.Fatal(err)
+					}
+					if got := runTestGit(t, ctx, dir, "rev-parse", "source-0"); got != runTestGit(t, ctx, dir, "rev-parse", "fork/source") {
+						t.Errorf("fork tip = %q, want fork/source %q", got, runTestGit(t, ctx, dir, "rev-parse", "fork/source"))
+					}
+					if got := runTestGit(t, ctx, dir, "config", "--get", "branch.source-0.remote"); got != tt.wantRemote {
+						t.Errorf("fork remote = %q, want %q", got, tt.wantRemote)
+					}
+					if got := runTestGit(t, ctx, dir, "config", "--get", "branch.source-0.merge"); got != tt.wantMergeRef {
+						t.Errorf("fork merge ref = %q, want %q", got, tt.wantMergeRef)
+					}
+				})
+			}
+		})
 		t.Run("error_git_check", func(t *testing.T) {
 			t.Parallel()
 			_, err := forkRepoBranches(t.Context(), &Repo{GitRoot: filepath.Join(t.TempDir(), "missing"), Branches: []string{"main"}}, nil)
