@@ -79,7 +79,7 @@ passwd -l user >/dev/null`
 	// It resolves the current upstream, falls back to the upstream of the branch
 	// recorded by an in-progress rebase, supports the legacy base branch, then
 	// uses the merge-base with HEAD for diff_base_ref when possible.
-	gitBaseRefCommand = `if ! base_ref=$(git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null); then
+	gitBaseRefCommandPrefix = `if ! base_ref=$(git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null); then
 	base_ref=
 fi
 if [ -z "$base_ref" ]; then
@@ -95,14 +95,38 @@ if [ -z "$base_ref" ] && git rev-parse --verify --quiet base >/dev/null; then
 	base_ref=base
 fi
 if [ -z "$base_ref" ]; then
-	echo 'no upstream branch configured' >&2
-	exit 128
-fi
+`
+	gitBaseRefCommandSuffix = `fi
 diff_base_ref=$base_ref
 if merge_base=$(git merge-base HEAD "$base_ref" 2>/dev/null) && [ -n "$merge_base" ]; then
 	diff_base_ref=$merge_base
 fi`
 )
+
+func gitBaseRefCommand() string {
+	return gitBaseRefCommandPrefix + "\techo 'no upstream branch configured' >&2\n\texit 128\n" + gitBaseRefCommandSuffix
+}
+
+func gitDiffBaseRefCommand(primaryBranch, defaultRemote, defaultBranch string) string {
+	primaryBranchRef := shellQuote(primaryBranch)
+	primaryBranchCommand := shellQuote(primaryBranch)
+	defaultBranchCommand := shellQuote(defaultRemote + "/" + defaultBranch)
+	return gitBaseRefCommandPrefix + `	current_branch=$(git branch --show-current)
+	if [ -z "$current_branch" ]; then
+		echo 'cannot run md diff: HEAD is detached and has no upstream branch configured' >&2
+	elif [ "$current_branch" = ` + primaryBranchRef + ` ]; then
+		echo ` + shellQuote(`primary branch "`+primaryBranch+`" has no upstream branch configured`) + ` >&2
+		echo ` + shellQuote("Configure it: git branch --set-upstream-to="+defaultBranchCommand+" "+primaryBranchCommand) + ` >&2
+	else
+		echo "current branch \"$current_branch\" has no upstream branch configured" >&2
+		echo 'md diff compares the checked-out branch with its upstream.' >&2
+		echo ` + shellQuote(`The container's primary branch is "`+primaryBranch+`".`) + ` >&2
+		echo ` + shellQuote("Either switch back: git switch "+primaryBranchCommand) + ` >&2
+		echo ` + shellQuote("Or configure this branch: git branch --set-upstream-to="+primaryBranchCommand) + ` >&2
+	fi
+	exit 128
+` + gitBaseRefCommandSuffix
+}
 
 var forkSnapshotEnvKeys = [...]string{
 	"MD_DISPLAY",
@@ -1101,7 +1125,7 @@ func (c *Container) Diff(ctx context.Context, stdout, stderr io.Writer, repoIdx 
 		isTTY = true
 	}
 	exitOnDiff := slices.Contains(extraArgs, "--exit-code") || slices.Contains(extraArgs, "--quiet")
-	sshArgs := c.SSHCommand(opts, gitDiffCommand(repo.MountedPath, extraArgs, exitOnDiff))
+	sshArgs := c.SSHCommand(opts, gitDiffCommand(repo.MountedPath, repo.Branches[0], repo.DefaultRemote, repo.DefaultBranch, extraArgs, exitOnDiff))
 	c.Logger.Log(ctx, slog.LevelDebug, "ssh", "cmd", sshArgs)
 	cmd := exec.CommandContext(ctx, sshArgs[0]) //nolint:gosec // args are from trusted SSH config
 	cmd.Env = c.commandEnv()
@@ -1119,7 +1143,7 @@ func (c *Container) Diff(ctx context.Context, stdout, stderr io.Writer, repoIdx 
 	return cmd.Run()
 }
 
-func gitDiffCommand(repo string, extraArgs []string, exitOnDiff bool) string {
+func gitDiffCommand(repo, primaryBranch, defaultRemote, defaultBranch string, extraArgs []string, exitOnDiff bool) string {
 	diffArgs := ""
 	if len(extraArgs) != 0 {
 		quotedArgs := make([]string, len(extraArgs))
@@ -1134,7 +1158,7 @@ func gitDiffCommand(repo string, extraArgs []string, exitOnDiff bool) string {
 	}
 	commands := []string{
 		"cd " + shellQuote(repo),
-		gitBaseRefCommand,
+		gitDiffBaseRefCommand(primaryBranch, defaultRemote, defaultBranch),
 		"export GIT_OPTIONAL_LOCKS=0",
 		`index_path=$(git rev-parse --git-path index) || exit $?`,
 		`tmp_index=$(mktemp) || exit $?`,
@@ -1909,7 +1933,7 @@ func (c *Container) waitForSSH(ctx context.Context, deadline time.Time) error {
 // the container. This data is always small.
 func (c *Container) gatherGitMetadata(ctx context.Context, r *Repo) string {
 	repo := shellQuote(r.MountedPath)
-	cmd := "cd " + repo + " && " + gitBaseRefCommand + " && echo '=== Branch ===' && git rev-parse --abbrev-ref HEAD && echo && echo '=== Files Changed ===' && git diff --stat --cached \"$diff_base_ref\" -- . && echo && echo '=== Recent Commits ===' && git log -5 \"$base_ref\" -- ."
+	cmd := "cd " + repo + " && " + gitBaseRefCommand() + " && echo '=== Branch ===' && git rev-parse --abbrev-ref HEAD && echo && echo '=== Files Changed ===' && git diff --stat --cached \"$diff_base_ref\" -- . && echo && echo '=== Recent Commits ===' && git log -5 \"$base_ref\" -- ."
 	out, _ := c.runCmd(ctx, "", c.SSHCommand(nil, cmd))
 	return out
 }
@@ -1917,7 +1941,7 @@ func (c *Container) gatherGitMetadata(ctx context.Context, r *Repo) string {
 // gatherGitDiff runs SSH to get the full patience diff from the container.
 func (c *Container) gatherGitDiff(ctx context.Context, r *Repo) string {
 	repo := shellQuote(r.MountedPath)
-	cmd := "cd " + repo + " && " + gitBaseRefCommand + " && git diff --patience -U10 --cached \"$diff_base_ref\" -- ."
+	cmd := "cd " + repo + " && " + gitBaseRefCommand() + " && git diff --patience -U10 --cached \"$diff_base_ref\" -- ."
 	out, _ := c.runCmd(ctx, "", c.SSHCommand(nil, cmd))
 	return out
 }

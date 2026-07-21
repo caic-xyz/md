@@ -135,7 +135,7 @@ func TestDiff(t *testing.T) {
 		runTestGit(t, ctx, dir, "add", "staged.txt")
 		writeTestFile(t, filepath.Join(dir, "untracked.txt"), "new\n")
 
-		diffCommand := gitDiffCommand(dir, nil, false)
+		diffCommand := gitDiffCommand(dir, "main", "host", "main", nil, false)
 		if strings.Count(diffCommand, "git diff ") != 1 {
 			t.Fatalf("diff command runs multiple git diff invocations: %s", diffCommand)
 		}
@@ -194,7 +194,7 @@ func TestDiff(t *testing.T) {
 		runTestGit(t, ctx, dir, "update-ref", "refs/remotes/host/main", upstreamCommit)
 		runTestGit(t, ctx, dir, "checkout", "-q", "main")
 
-		cmd := exec.CommandContext(ctx, "bash", "-c", gitDiffCommand(dir, []string{"--name-only"}, false)) //nolint:gosec // repo path is a test temp dir
+		cmd := exec.CommandContext(ctx, "bash", "-c", gitDiffCommand(dir, "main", "host", "main", []string{"--name-only"}, false)) //nolint:gosec // repo path is a test temp dir
 		cmd.Env = append(os.Environ(), "LANG=C")
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout = &stdout
@@ -225,7 +225,7 @@ func TestDiff(t *testing.T) {
 		runTestGit(t, ctx, dir, "branch", "-q", "--set-upstream-to=base", "caic-2")
 		writeTestFile(t, filepath.Join(dir, "tracked.txt"), "new\n")
 
-		cmd := exec.CommandContext(ctx, "bash", "-c", gitDiffCommand(dir, nil, false)) //nolint:gosec // repo path is a test temp dir
+		cmd := exec.CommandContext(ctx, "bash", "-c", gitDiffCommand(dir, "caic-2", "origin", "main", nil, false)) //nolint:gosec // repo path is a test temp dir
 		cmd.Env = append(os.Environ(), "LANG=C")
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout = &stdout
@@ -269,7 +269,7 @@ func TestDiff(t *testing.T) {
 			t.Fatalf("rebase metadata missing: %v", err)
 		}
 
-		cmd := exec.CommandContext(ctx, "bash", "-c", gitDiffCommand(dir, []string{"--name-only"}, false)) //nolint:gosec // repo path is a test temp dir
+		cmd := exec.CommandContext(ctx, "bash", "-c", gitDiffCommand(dir, "main", "host", "main", []string{"--name-only"}, false)) //nolint:gosec // repo path is a test temp dir
 		cmd.Env = append(os.Environ(), "LANG=C")
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout = &stdout
@@ -279,6 +279,70 @@ func TestDiff(t *testing.T) {
 		}
 		if got := strings.TrimSpace(stdout.String()); got != "tracked.txt" {
 			t.Errorf("diff --name-only = %q, want tracked.txt", got)
+		}
+	})
+	t.Run("error_checked_out_branch_has_no_upstream", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		dir := t.TempDir()
+		runTestGit(t, ctx, dir, "init", "-q", "--initial-branch=caic-1")
+		runTestGit(t, ctx, dir, "config", "user.name", "Test")
+		runTestGit(t, ctx, dir, "config", "user.email", "test@test")
+		writeTestFile(t, filepath.Join(dir, "tracked.txt"), "base\n")
+		runTestGit(t, ctx, dir, "add", ".")
+		runTestGit(t, ctx, dir, "commit", "-q", "-m", "base")
+		runTestGit(t, ctx, dir, "update-ref", "refs/remotes/origin/main", "HEAD")
+		runTestGit(t, ctx, dir, "config", "--replace-all", "remote.origin.url", ".")
+		runTestGit(t, ctx, dir, "config", "--replace-all", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
+		runTestGit(t, ctx, dir, "branch", "-q", "--set-upstream-to=origin/main", "caic-1")
+		runTestGit(t, ctx, dir, "checkout", "-q", "-b", "fix-$(touch-pwn)")
+
+		cmd := exec.CommandContext(ctx, "bash", "-c", gitDiffCommand(dir, "caic-1", "origin", "main", nil, false)) //nolint:gosec // repo path is a test temp dir
+		cmd.Env = append(os.Environ(), "LANG=C")
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err == nil {
+			t.Fatal("diff command unexpectedly succeeded")
+		}
+		for _, want := range []string{
+			`current branch "fix-$(touch-pwn)" has no upstream branch configured`,
+			`The container's primary branch is "caic-1".`,
+			"git switch caic-1",
+			"git branch --set-upstream-to=caic-1",
+		} {
+			if !strings.Contains(stderr.String(), want) {
+				t.Errorf("error missing %q:\n%s", want, stderr.String())
+			}
+		}
+		if strings.Contains(stderr.String(), "git branch --set-upstream-to=caic-1 fix-$(touch-pwn)") {
+			t.Fatalf("error suggests an unsafe command:\n%s", stderr.String())
+		}
+	})
+	t.Run("error_primary_branch_has_no_upstream", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		dir := t.TempDir()
+		runTestGit(t, ctx, dir, "init", "-q", "--initial-branch=caic-1")
+		runTestGit(t, ctx, dir, "config", "user.name", "Test")
+		runTestGit(t, ctx, dir, "config", "user.email", "test@test")
+		writeTestFile(t, filepath.Join(dir, "tracked.txt"), "base\n")
+		runTestGit(t, ctx, dir, "add", ".")
+		runTestGit(t, ctx, dir, "commit", "-q", "-m", "base")
+
+		cmd := exec.CommandContext(ctx, "bash", "-c", gitDiffCommand(dir, "caic-1", "origin", "main", nil, false)) //nolint:gosec // repo path is a test temp dir
+		cmd.Env = append(os.Environ(), "LANG=C")
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err == nil {
+			t.Fatal("diff command unexpectedly succeeded")
+		}
+		for _, want := range []string{
+			`primary branch "caic-1" has no upstream branch configured`,
+			"git branch --set-upstream-to=origin/main caic-1",
+		} {
+			if !strings.Contains(stderr.String(), want) {
+				t.Errorf("error missing %q:\n%s", want, stderr.String())
+			}
 		}
 	})
 }
@@ -557,7 +621,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 				t.Fatalf("container upstream = %q, want host/main", got)
 			}
 
-			cmd := exec.CommandContext(ctx, "bash", "-c", gitDiffCommand(containerPath, nil, false)) //nolint:gosec // repo path is a test temp dir
+			cmd := exec.CommandContext(ctx, "bash", "-c", gitDiffCommand(containerPath, "main", "origin", "main", nil, false)) //nolint:gosec // repo path is a test temp dir
 			cmd.Env = append(os.Environ(), "LANG=C")
 			stdout.Reset()
 			stderr.Reset()
