@@ -1121,6 +1121,8 @@ func (a *app) cmdPull(ctx context.Context, args []string) error {
 	verbose := addVerboseFlag(fs)
 	cf := addContainerFlags(fs, false)
 	all := fs.Bool("all", false, "Operate on all repos, not just the current one")
+	noDescribe := fs.Bool("no-describe", false, "Skip AI-generated commit description; use a fixed commit message")
+	fs.BoolVar(noDescribe, "n", false, "Alias for -no-describe")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -1132,9 +1134,11 @@ func (a *app) cmdPull(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	p, err := newProvider(ctx, os.Getenv("ASK_PROVIDER"), os.Getenv("ASK_MODEL"))
-	if err != nil {
-		slog.WarnContext(ctx, "md", "msg", "failed to initialize provider", "err", err)
+	var p genai.Provider
+	if !*noDescribe {
+		if p, err = newProvider(ctx, os.Getenv("ASK_PROVIDER"), os.Getenv("ASK_MODEL")); err != nil {
+			slog.WarnContext(ctx, "md", "msg", "failed to initialize provider", "err", err)
+		}
 	}
 	if !*all {
 		return ct.Pull(ctx, os.Stdout, os.Stderr, repoIdx, p)
