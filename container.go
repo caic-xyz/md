@@ -1378,8 +1378,8 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 		if err == nil {
 			break
 		}
-		var exitErr *exec.ExitError
-		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 255 || time.Now().After(sshCommandDeadline) {
+		exitErr, ok := errors.AsType[*exec.ExitError](err)
+		if !ok || exitErr.ExitCode() != 255 || time.Now().After(sshCommandDeadline) {
 			return nil, fmt.Errorf("copying .env to forked container: %w\n%s", err, out)
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -1809,8 +1809,8 @@ func gitRefExists(ctx context.Context, dir, ref string) (bool, error) {
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		exitErr, ok := errors.AsType[*exec.ExitError](err)
+		if ok && exitErr.ExitCode() == 1 {
 			return false, nil
 		}
 		return false, fmt.Errorf("git show-ref --verify --quiet %s: %w: %s", ref, err, stderr.String())

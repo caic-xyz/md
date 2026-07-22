@@ -701,8 +701,8 @@ func TestCreateBranch(t *testing.T) {
 		if err == nil {
 			t.Fatalf("branch config = %q, want none", strings.TrimSpace(string(out)))
 		}
-		var exitErr *exec.ExitError
-		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+		exitErr, ok := errors.AsType[*exec.ExitError](err)
+		if !ok || exitErr.ExitCode() != 1 {
 			t.Fatalf("git config --get-regexp: %v\n%s", err, out)
 		}
 	})

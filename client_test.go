@@ -874,8 +874,8 @@ func runFakeSSH(args []string) int {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
+		exitErr, ok := errors.AsType[*exec.ExitError](err)
+		if ok {
 			return exitErr.ExitCode()
 		}
 		_, _ = fmt.Fprintf(os.Stderr, "fake ssh: %v\n", err)

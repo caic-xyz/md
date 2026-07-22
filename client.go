@@ -694,8 +694,8 @@ func cmdErrWithStderr(prefix string, err error) error {
 	if err == nil {
 		return nil
 	}
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {
+	exitErr, ok := errors.AsType[*exec.ExitError](err)
+	if ok && len(exitErr.Stderr) > 0 {
 		return fmt.Errorf("%s: %w\n%s", prefix, err, strings.TrimSpace(string(exitErr.Stderr)))
 	}
 	return fmt.Errorf("%s: %w", prefix, err)

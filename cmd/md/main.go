@@ -46,8 +46,8 @@ type app struct {
 
 func main() {
 	if err := mainImpl(); err != nil {
-		var ec *exitCodeError
-		if errors.As(err, &ec) {
+		ec, ok := errors.AsType[*exitCodeError](err)
+		if ok {
 			os.Exit(ec.code)
 		}
 		fmt.Fprintf(os.Stderr, "md: %v\n", err)
@@ -778,8 +778,8 @@ func runTemporaryCommand(ctx context.Context, c *md.Container, stdout, stderr io
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	if err := cmd.Run(); err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
+		exitErr, ok := errors.AsType[*exec.ExitError](err)
+		if ok {
 			return exitErr.ExitCode(), nil
 		}
 		return 1, fmt.Errorf("run command in temporary container %s: %w", c.Name, err)
