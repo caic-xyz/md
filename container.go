@@ -462,6 +462,15 @@ type ForkOpts struct {
 	// the host; if empty, defaults to the repo's default upstream branch.
 	// Fork generates a unique destination for the primary branch only.
 	ExtraRepos []Repo
+	// DestPrimaryBranches optionally names the destination primary branch for
+	// mapped repos, keyed by source repo GitRoot. When an entry is present,
+	// Fork uses that exact name verbatim for the repo's primary branch instead
+	// of generating a unique "<source>-<n>". The caller owns the name: Fork does
+	// not check it for collisions, so the caller must ensure it is unused (both
+	// as another container's branch and as a local ref). Repos absent from the
+	// map keep generated naming. Callers that need the destination branch known
+	// before Fork returns (e.g. to name a log file up front) supply it here.
+	DestPrimaryBranches map[string]string
 	// Display enables X11/VNC virtual display on the forked container.
 	Display bool
 	// Tailscale enables Tailscale networking on the forked container.
@@ -1176,7 +1185,16 @@ func gitDiffCommand(repo, primaryBranch, defaultRemote, defaultBranch string, ex
 	return strings.Join(commands, "; ")
 }
 
-func forkRepoBranches(ctx context.Context, src *Repo, existing []*Container) ([]string, error) {
+// forkRepoBranches resolves the fork's branch list for src. When dest is
+// non-empty it is used verbatim for the primary branch (the caller owns its
+// uniqueness); otherwise a unique "<source>-<n>" is generated. Extra branches
+// keep their source names either way.
+func forkRepoBranches(ctx context.Context, src *Repo, existing []*Container, dest string) ([]string, error) {
+	branches := slices.Clone(src.Branches)
+	if dest != "" {
+		branches[0] = dest
+		return branches, nil
+	}
 	usedBranches := map[string]struct{}{}
 	for _, ct := range existing {
 		for _, r := range ct.Repos {
@@ -1188,7 +1206,6 @@ func forkRepoBranches(ctx context.Context, src *Repo, existing []*Container) ([]
 			}
 		}
 	}
-	branches := slices.Clone(src.Branches)
 	primary := src.Branches[0]
 	for n := 0; ; n++ {
 		candidate := fmt.Sprintf("%s-%d", primary, n)
@@ -1215,7 +1232,9 @@ func forkRepoBranches(ctx context.Context, src *Repo, existing []*Container) ([]
 // branches keep their original names.
 //
 // Branch naming: the primary branch gets a unique destination branch derived
-// from its source branch (e.g. "main" → "main-0").
+// from its source branch (e.g. "main" → "main-0"), unless the caller pins it
+// via ForkOpts.DestPrimaryBranches (keyed by GitRoot), in which case that name
+// is used verbatim and the caller owns its uniqueness.
 func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *ForkOpts) (*Container, error) {
 	if err := c.checkContainerState(ctx); err != nil {
 		return nil, err
@@ -1253,7 +1272,7 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 		return nil, fmt.Errorf("listing containers for fork branch allocation: %w", err)
 	}
 	for i := range allSrc {
-		branches, err := forkRepoBranches(ctx, &allSrc[i], existing)
+		branches, err := forkRepoBranches(ctx, &allSrc[i], existing, opts.DestPrimaryBranches[allSrc[i].GitRoot])
 		if err != nil {
 			return nil, fmt.Errorf("allocating fork branches for %s: %w", allSrc[i].GitRoot, err)
 		}
