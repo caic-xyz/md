@@ -1190,11 +1190,9 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 				t.Fatalf("host host.txt = %q, want host change", got)
 			}
 		})
-		t.Run("updates_container_diff_base", func(t *testing.T) {
+		t.Run("does_not_update_container_branch", func(t *testing.T) { //nolint:paralleltest // fakeSSH changes process environment.
 			ctx := t.Context()
 			fakeSSH(t)
-			sshLogPath := filepath.Join(t.TempDir(), "ssh.log")
-			t.Setenv(fakeSSHLogEnv, sshLogPath)
 			home := t.TempDir()
 			writeTestSSHConfig(t, home)
 
@@ -1220,6 +1218,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			writeTestFile(t, filepath.Join(containerDir, "container.txt"), "container\n")
 			runTestGit(t, ctx, containerDir, "add", ".")
 			runTestGit(t, ctx, containerDir, "commit", "-q", "-m", "container")
+			containerCommit := runTestGit(t, ctx, containerDir, "rev-parse", "main")
 			runTestGit(t, ctx, hostDir, "remote", "add", "md-test", containerDir)
 
 			ct := &Container{
@@ -1238,39 +1237,14 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			if err := ct.Pull(ctx, &stdout, &stderr, 0, nil); err != nil {
 				t.Fatalf("Pull: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 			}
-			sshLog, err := os.ReadFile(sshLogPath) //nolint:gosec // test log is under t.TempDir.
-			if err != nil {
-				t.Fatal(err)
+			if got := runTestGit(t, ctx, containerDir, "rev-parse", "main"); got != containerCommit {
+				t.Fatalf("container main = %q, want unchanged %q", got, containerCommit)
 			}
-			sshCommands := strings.FieldsFunc(string(sshLog), func(r rune) bool { return r == '\n' })
-			if len(sshCommands) > 2 {
-				t.Fatalf("ssh invocations = %d, want at most 2\n%s", len(sshCommands), sshLog)
+			if got := runTestGit(t, ctx, hostDir, "show", "main:container.txt"); got != "container" {
+				t.Fatalf("host container.txt = %q, want container", got)
 			}
-			hasCombinedUpdate := false
-			for _, cmd := range sshCommands {
-				if strings.Contains(cmd, "git config --replace-all remote.origin.url") && strings.Contains(cmd, "git switch -q -C main") {
-					hasCombinedUpdate = true
-					break
-				}
-			}
-			if !hasCombinedUpdate {
-				t.Fatalf("missing combined remote config and branch update ssh command:\n%s", sshLog)
-			}
-			if got := runTestGit(t, ctx, containerDir, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"); got != "host/main" {
-				t.Fatalf("container upstream = %q, want host/main", got)
-			}
-
-			cmd := exec.CommandContext(ctx, "bash", "-c", gitDiffCommand(containerPath, "main", "origin", "main", nil, false)) //nolint:gosec // repo path is a test temp dir
-			cmd.Env = append(os.Environ(), "LANG=C")
-			stdout.Reset()
-			stderr.Reset()
-			cmd.Stdout = &stdout
-			cmd.Stderr = &stderr
-			if err := cmd.Run(); err != nil {
-				t.Fatalf("diff command: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
-			}
-			if out := stdout.String(); out != "" {
-				t.Fatalf("diff after pull = %q, want empty", out)
+			if got := runTestGit(t, ctx, hostDir, "show", "main:host.txt"); got != "host" {
+				t.Fatalf("host host.txt = %q, want host", got)
 			}
 		})
 		t.Run("commits_uncommitted_changes", func(t *testing.T) {

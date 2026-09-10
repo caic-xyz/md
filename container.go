@@ -1399,15 +1399,6 @@ func (c *Container) Pull(ctx context.Context, stdout, stderr io.Writer, repoIdx 
 			_ = c.runCmdOut(ctx, r.GitRoot, []string{"git", "checkout", "-q", origRef}, stdout, stderr)
 		}
 	}
-	bases, includeHost, err := c.pushMappedBranchRefs(ctx, stdout, stderr, r)
-	if err != nil {
-		return err
-	}
-	// Configure remotes before moving the branches; the branch resets depend on the
-	// refs and upstreams set by the preceding push.
-	if err := c.configureContainerRemotes(ctx, stdout, stderr, repoIdx, includeHost, containerBranchSetupCommands(bases)...); err != nil {
-		return err
-	}
 	return nil
 }
 

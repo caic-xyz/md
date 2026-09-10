@@ -41,6 +41,24 @@ md diff
 md pull
 ```
 
+### Git synchronization commands
+
+`md` keeps a container checkout separate from the host checkout. These commands
+make their Git effects explicit:
+
+| Command | Git effects |
+| --- | --- |
+| `md start` | Copies the host's mapped branches and cached remote refs into a new container, then checks out the primary mapped branch there. |
+| `md diff` | Refreshes cached remote refs in the container from the host, then reports the primary container branch's changes. It does not move either mapped branch. |
+| `md fetch` | Refreshes cached remote refs in the container from the host; commits dirty container changes when needed; then fetches each mapped container branch into the host's corresponding remote-tracking ref. It does not integrate those refs into a host branch. |
+| `md pull` | Performs `md fetch`, then fast-forwards or rebases each mapped host branch to include the fetched container changes. It never pushes a mapped branch to the container or resets the container checkout. |
+| `md push` | Commits dirty container changes to a timestamped backup branch, then force-pushes the mapped host branches into the container and resets the container's mapped branches to those host refs. |
+| `md fork` | Snapshots the source container's filesystem and creates a new container on new host branches; it does not modify the source container. |
+
+`md pull` may rewrite host commit IDs when Git rebases host-only commits onto
+container changes. Use `md push` explicitly when that reconciled host history
+should replace the container branch.
+
 ### Remote branches and fork workflows
 
 `md` mirrors every cached remote branch from the host into the container. A task
