@@ -1288,7 +1288,7 @@ func (c *Container) Push(ctx context.Context, stdout, stderr io.Writer, repoIdx 
 	}
 	// Update host's remote-tracking refs for all branches.
 	for _, b := range r.Branches {
-		if err := c.runCmdOut(ctx, r.GitRoot, []string{"git", "update-ref", "refs/remotes/" + c.Name + "/" + b, b}, stdout, stderr); err != nil {
+		if err := c.runCmdOut(ctx, r.GitRoot, []string{"git", "update-ref", remoteTrackingRef(c.Name, b), "refs/heads/" + b}, stdout, stderr); err != nil {
 			c.Logger.WarnContext(ctx, "failed to update host tracking ref", "branch", b, "err", err)
 		}
 	}
@@ -1406,26 +1406,14 @@ func (c *Container) Pull(ctx context.Context, stdout, stderr io.Writer, repoIdx 
 			return fmt.Errorf("reading detached HEAD: %w", err)
 		}
 	}
-	if err := c.pullBranches(ctx, stdout, stderr, g, r.Branches, previousTips); err != nil {
-		return err
+	integrationErr := c.pullBranches(ctx, stdout, stderr, g, r.Branches, previousTips)
+	if integrationErr != nil {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		recoveryErr := c.recoverPullCheckout(cleanupCtx, stdout, stderr, g, currentBranch, origCommit)
+		return errors.Join(integrationErr, recoveryErr)
 	}
-	// Restore the original branch.
-	finalBranch, err := g.RunGit(ctx, "branch", "--show-current")
-	if err != nil {
-		return fmt.Errorf("reading final branch: %w", err)
-	}
-	if currentBranch != "" {
-		if finalBranch != currentBranch {
-			if err := c.runCmdOut(ctx, r.GitRoot, []string{"git", "switch", "-q", currentBranch}, stdout, stderr); err != nil {
-				return fmt.Errorf("restoring original branch %s: %w", currentBranch, err)
-			}
-		}
-	} else if finalBranch != "" {
-		if err := c.runCmdOut(ctx, r.GitRoot, []string{"git", "switch", "-q", "--detach", origCommit}, stdout, stderr); err != nil {
-			return fmt.Errorf("restoring detached HEAD %s: %w", origCommit, err)
-		}
-	}
-	return nil
+	return c.restorePullCheckout(context.WithoutCancel(ctx), stdout, stderr, g, currentBranch, origCommit)
 }
 
 // Diff writes the diff between the host branch and current for Repos[repoIdx] to stdout/stderr.
@@ -1954,6 +1942,43 @@ func (c *Container) SyncDefaultBranch(ctx context.Context, repoIdx int) error {
 	return nil
 }
 
+func (c *Container) restorePullCheckout(ctx context.Context, stdout, stderr io.Writer, g *git.Checkout, originalBranch, originalCommit string) error {
+	finalBranch, err := g.RunGit(ctx, "branch", "--show-current")
+	if err != nil {
+		return fmt.Errorf("reading final branch: %w", err)
+	}
+	if originalBranch != "" {
+		if finalBranch != originalBranch {
+			if err := c.runCmdOut(ctx, g.Root, []string{"git", "switch", "-q", originalBranch}, stdout, stderr); err != nil {
+				return fmt.Errorf("restoring original branch %s: %w", originalBranch, err)
+			}
+		}
+		return nil
+	}
+	finalCommit, err := g.RevParse(ctx, "HEAD")
+	if err != nil {
+		return fmt.Errorf("reading final HEAD: %w", err)
+	}
+	if finalBranch != "" || finalCommit != originalCommit {
+		if err := c.runCmdOut(ctx, g.Root, []string{"git", "switch", "-q", "--detach", originalCommit}, stdout, stderr); err != nil {
+			return fmt.Errorf("restoring detached HEAD %s: %w", originalCommit, err)
+		}
+	}
+	return nil
+}
+
+func (c *Container) recoverPullCheckout(ctx context.Context, stdout, stderr io.Writer, g *git.Checkout, originalBranch, originalCommit string) error {
+	rebaseActive, err := gitRebaseInProgress(ctx, g)
+	if err != nil {
+		err = fmt.Errorf("checking for an interrupted rebase: %w", err)
+	} else if rebaseActive {
+		if abortErr := c.runCmdOut(ctx, g.Root, []string{"git", "rebase", "--abort"}, stdout, stderr); abortErr != nil {
+			err = fmt.Errorf("aborting failed rebase: %w", abortErr)
+		}
+	}
+	return errors.Join(err, c.restorePullCheckout(ctx, stdout, stderr, g, originalBranch, originalCommit))
+}
+
 func (c *Container) untagImage(ctx context.Context, image string) error {
 	if err := c.Runtime.UntagImage(ctx, image); err != nil {
 		return fmt.Errorf("untagging image %s: %w", image, err)
@@ -2389,8 +2414,11 @@ func (c *Container) pullBranches(ctx context.Context, stdout, stderr io.Writer, 
 func (c *Container) pullBranch(ctx context.Context, stdout, stderr io.Writer, g *git.Checkout, branch, previousTip string) error {
 	localRef := "refs/heads/" + branch
 	remoteRef := remoteTrackingRef(c.Name, branch)
-	run := func(args ...string) error {
-		return c.runCmdOut(ctx, g.Root, append([]string{"git"}, args...), stdout, stderr)
+	run := func(operation string, args ...string) error {
+		if err := c.runCmdOut(ctx, g.Root, append([]string{"git"}, args...), stdout, stderr); err != nil {
+			return fmt.Errorf("%s: %w", operation, err)
+		}
+		return nil
 	}
 
 	exists, err := g.RefExists(ctx, localRef)
@@ -2398,7 +2426,7 @@ func (c *Container) pullBranch(ctx context.Context, stdout, stderr io.Writer, g 
 		return err
 	}
 	if !exists {
-		return run("update-ref", localRef, remoteRef)
+		return run("creating local branch "+branch, "update-ref", localRef, remoteRef)
 	}
 	currentBranch, err := g.RunGit(ctx, "branch", "--show-current")
 	if err != nil {
@@ -2416,36 +2444,36 @@ func (c *Container) pullBranch(ctx context.Context, stdout, stderr io.Writer, g 
 			}
 			if localTip == previousTip {
 				if currentBranch == branch {
-					return run("reset", "--hard", "-q", remoteRef)
+					return run("resetting branch "+branch+" to rewritten container history", "reset", "--hard", "-q", remoteRef)
 				}
-				return run("update-ref", localRef, remoteRef, previousTip)
+				return run("updating branch "+branch+" to rewritten container history", "update-ref", localRef, remoteRef, previousTip)
 			}
 			localExtendsPreviousTip, err := gitIsAncestor(ctx, g, previousTip, localRef)
 			if err != nil {
 				return fmt.Errorf("comparing previous container and local tips: %w", err)
 			}
 			if localExtendsPreviousTip {
-				if err := run("switch", "-q", branch); err != nil {
+				if err := run("switching to branch "+branch, "switch", "-q", branch); err != nil {
 					return err
 				}
-				return run("rebase", "-q", "--onto", remoteRef, previousTip)
+				return run("rebasing branch "+branch+" onto rewritten container history", "rebase", "-q", "--onto", remoteRef, previousTip)
 			}
 		}
 	}
 	if currentBranch == branch {
-		return run("rebase", "-q", remoteRef)
+		return run("rebasing branch "+branch+" onto "+remoteRef, "rebase", "-q", remoteRef)
 	}
 	fastForward, err := gitIsAncestor(ctx, g, localRef, remoteRef)
 	if err != nil {
 		return fmt.Errorf("checking for fast-forward: %w", err)
 	}
 	if fastForward {
-		return run("update-ref", localRef, remoteRef)
+		return run("fast-forwarding branch "+branch, "update-ref", localRef, remoteRef)
 	}
-	if err := run("switch", "-q", branch); err != nil {
+	if err := run("switching to branch "+branch, "switch", "-q", branch); err != nil {
 		return err
 	}
-	return run("rebase", "-q", remoteRef)
+	return run("rebasing branch "+branch+" onto "+remoteRef, "rebase", "-q", remoteRef)
 }
 
 func gitIsAncestor(ctx context.Context, g *git.Checkout, ancestor, descendant string) (bool, error) {
@@ -2456,6 +2484,24 @@ func gitIsAncestor(ctx context.Context, g *git.Checkout, ancestor, descendant st
 		return false, err
 	}
 	return true, nil
+}
+
+func gitRebaseInProgress(ctx context.Context, g *git.Checkout) (bool, error) {
+	for _, name := range []string{"rebase-apply", "rebase-merge"} {
+		stateDir, err := g.RunGit(ctx, "rev-parse", "--git-path", name)
+		if err != nil {
+			return false, err
+		}
+		if !filepath.IsAbs(stateDir) {
+			stateDir = filepath.Join(g.Root, stateDir)
+		}
+		if _, err := os.Stat(stateDir); err == nil {
+			return true, nil
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return false, err
+		}
+	}
+	return false, nil
 }
 
 // waitForSSH runs a trivial SSH command in a retry loop until it succeeds or

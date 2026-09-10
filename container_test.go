@@ -1265,6 +1265,31 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 				t.Fatalf("container.txt = %q, want integrated container commit", got)
 			}
 		})
+		t.Run("aborts_conflicting_rebase_and_restores_checkout", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
+			ctx := t.Context()
+			ct, hostDir, containerDir := setupPullTest(t)
+			writeTestFile(t, filepath.Join(hostDir, "shared.txt"), "host\n")
+			runTestGit(t, ctx, hostDir, "commit", "-q", "-am", "host")
+			hostTip := runTestGit(t, ctx, hostDir, "rev-parse", "refs/heads/main")
+			writeTestFile(t, filepath.Join(containerDir, "shared.txt"), "container\n")
+			runTestGit(t, ctx, containerDir, "commit", "-q", "-am", "container")
+			runTestGit(t, ctx, hostDir, "switch", "-q", "-c", "other", "origin/main")
+
+			var stderr bytes.Buffer
+			err := ct.Pull(ctx, io.Discard, &stderr, 0, nil)
+			if err == nil || !strings.Contains(err.Error(), "rebasing branch main") {
+				t.Fatalf("Pull error = %v, want named rebase failure; stderr:\n%s", err, stderr.String())
+			}
+			if got := runTestGit(t, ctx, hostDir, "branch", "--show-current"); got != "other" {
+				t.Fatalf("current branch = %q, want restored other", got)
+			}
+			if got := runTestGit(t, ctx, hostDir, "rev-parse", "refs/heads/main"); got != hostTip {
+				t.Fatalf("main tip = %q, want pre-rebase host tip %q", got, hostTip)
+			}
+			if got := runTestGit(t, ctx, hostDir, "status", "--porcelain", "--untracked-files=no"); got != "" {
+				t.Fatalf("tracked status after failed Pull = %q, want clean checkout", got)
+			}
+		})
 		t.Run("integrates_unchanged_tracking_tip_after_host_reset", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
 			ctx := t.Context()
 			ct, hostDir, containerDir := setupPullTest(t)
@@ -1576,6 +1601,22 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 		})
 	})
 	t.Run("Push", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
+		t.Run("uses_fully_qualified_tracking_source", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
+			ctx := t.Context()
+			ct, hostDir, _ := setupPullTest(t)
+			runTestGit(t, ctx, hostDir, "tag", "main", "origin/main")
+			writeTestFile(t, filepath.Join(hostDir, "host.txt"), "host\n")
+			runTestGit(t, ctx, hostDir, "add", ".")
+			runTestGit(t, ctx, hostDir, "commit", "-q", "-m", "host")
+			hostTip := runTestGit(t, ctx, hostDir, "rev-parse", "refs/heads/main")
+
+			if _, err := ct.Push(ctx, io.Discard, io.Discard, 0); err != nil {
+				t.Fatalf("Push with shadowing tag: %v", err)
+			}
+			if got := runTestGit(t, ctx, hostDir, "rev-parse", "refs/remotes/md-test/main"); got != hostTip {
+				t.Fatalf("tracking ref = %q, want host branch tip %q", got, hostTip)
+			}
+		})
 		t.Run("backs_up_extra_branch_before_reset", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
 			ctx := t.Context()
 			fakeSSH(t)
