@@ -70,6 +70,50 @@ func writeTestSSHConfig(t *testing.T, home string) {
 	}
 }
 
+func setupAmendedPullTest(t *testing.T) (ct *Container, hostDir, containerDir string) {
+	ctx := t.Context()
+	fakeSSH(t)
+	home := t.TempDir()
+	writeTestSSHConfig(t, home)
+
+	originDir := filepath.Join(t.TempDir(), "origin.git")
+	hostDir = t.TempDir()
+	containerDir = t.TempDir()
+	runTestGit(t, ctx, "", "init", "-q", "--bare", "--initial-branch=main", originDir)
+	runTestGit(t, ctx, hostDir, "init", "-q", "--initial-branch=main")
+	runTestGit(t, ctx, hostDir, "config", "user.name", "Test")
+	runTestGit(t, ctx, hostDir, "config", "user.email", "test@test")
+	writeTestFile(t, filepath.Join(hostDir, "shared.txt"), "base\n")
+	runTestGit(t, ctx, hostDir, "add", ".")
+	runTestGit(t, ctx, hostDir, "commit", "-q", "-m", "base")
+	runTestGit(t, ctx, hostDir, "remote", "add", "origin", originDir)
+	runTestGit(t, ctx, hostDir, "push", "-q", "-u", "origin", "main")
+	runTestGit(t, ctx, "", "clone", "-q", originDir, containerDir)
+	runTestGit(t, ctx, containerDir, "config", "user.name", "Test")
+	runTestGit(t, ctx, containerDir, "config", "user.email", "test@test")
+	writeTestFile(t, filepath.Join(containerDir, "shared.txt"), "container v1\n")
+	runTestGit(t, ctx, containerDir, "commit", "-q", "-am", "container v1")
+	runTestGit(t, ctx, hostDir, "remote", "add", "md-test", containerDir)
+
+	logger := testLogger(t)
+	ct = &Container{
+		Client: &Client{Home: home, Logger: logger, Runtime: testRuntime(t, "true", logger, nil)},
+		Logger: logger,
+		Name:   "md-test",
+		Repos: []Repo{{
+			GitRoot:       hostDir,
+			Branches:      []string{"main"},
+			ContainerPath: filepath.ToSlash(containerDir),
+			DefaultRemote: "origin",
+			DefaultBranch: "main",
+		}},
+	}
+	if err := ct.Pull(ctx, io.Discard, io.Discard, 0, nil); err != nil {
+		t.Fatalf("initial Pull: %v", err)
+	}
+	return ct, hostDir, containerDir
+}
+
 func TestShellQuote(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -1114,6 +1158,38 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 		}
 	})
 	t.Run("Pull", func(t *testing.T) {
+		t.Run("replaces_amended_container_commit", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
+			ctx := t.Context()
+			ct, hostDir, containerDir := setupAmendedPullTest(t)
+			writeTestFile(t, filepath.Join(containerDir, "shared.txt"), "container v2\n")
+			runTestGit(t, ctx, containerDir, "commit", "-q", "--amend", "-am", "container v2")
+
+			if err := ct.Pull(ctx, io.Discard, io.Discard, 0, nil); err != nil {
+				t.Fatalf("Pull after amend: %v", err)
+			}
+			if got := runTestGit(t, ctx, hostDir, "show", "main:shared.txt"); got != "container v2" {
+				t.Fatalf("host shared.txt = %q, want container v2", got)
+			}
+		})
+		t.Run("rebases_host_commits_after_amended_container_commit", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
+			ctx := t.Context()
+			ct, hostDir, containerDir := setupAmendedPullTest(t)
+			writeTestFile(t, filepath.Join(hostDir, "host.txt"), "host change\n")
+			runTestGit(t, ctx, hostDir, "add", ".")
+			runTestGit(t, ctx, hostDir, "commit", "-q", "-m", "host change")
+			writeTestFile(t, filepath.Join(containerDir, "shared.txt"), "container v2\n")
+			runTestGit(t, ctx, containerDir, "commit", "-q", "--amend", "-am", "container v2")
+
+			if err := ct.Pull(ctx, io.Discard, io.Discard, 0, nil); err != nil {
+				t.Fatalf("Pull after amend: %v", err)
+			}
+			if got := runTestGit(t, ctx, hostDir, "show", "main:shared.txt"); got != "container v2" {
+				t.Fatalf("host shared.txt = %q, want container v2", got)
+			}
+			if got := runTestGit(t, ctx, hostDir, "show", "main:host.txt"); got != "host change" {
+				t.Fatalf("host host.txt = %q, want host change", got)
+			}
+		})
 		t.Run("updates_container_diff_base", func(t *testing.T) {
 			ctx := t.Context()
 			fakeSSH(t)

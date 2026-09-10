@@ -1357,17 +1357,39 @@ func (c *Container) Fetch(ctx context.Context, stdout, stderr io.Writer, repoIdx
 //
 // p controls AI commit message generation. Pass nil to use a default message.
 func (c *Container) Pull(ctx context.Context, stdout, stderr io.Writer, repoIdx int, p genai.Provider) error {
-	if err := c.Fetch(ctx, stdout, stderr, repoIdx, p); err != nil {
-		return err
+	if len(c.Repos) == 0 {
+		return errors.New("container has no repos")
+	}
+	if repoIdx < 0 || repoIdx >= len(c.Repos) {
+		return fmt.Errorf("repo index %d out of range [0, %d)", repoIdx, len(c.Repos))
 	}
 	r := &c.Repos[repoIdx]
 	g := &git.Checkout{Root: r.GitRoot, Logger: c.Logger}
+	previousTips := make(map[string]string, len(r.Branches))
+	for _, branch := range r.Branches {
+		ref := remoteTrackingRef(c.Name, branch)
+		exists, err := g.RefExists(ctx, ref)
+		if err != nil {
+			return fmt.Errorf("checking previous container ref %s: %w", ref, err)
+		}
+		if !exists {
+			continue
+		}
+		tip, err := g.RunGit(ctx, "rev-parse", ref)
+		if err != nil {
+			return fmt.Errorf("reading previous container ref %s: %w", ref, err)
+		}
+		previousTips[branch] = tip
+	}
+	if err := c.Fetch(ctx, stdout, stderr, repoIdx, p); err != nil {
+		return err
+	}
 	// Save the original branch to restore it after integration.
 	origRef, _ := g.CurrentBranch(ctx)
 	if origRef == "" {
 		origRef, _ = g.RunGit(ctx, "rev-parse", "HEAD")
 	}
-	if err := c.pullBranches(ctx, stdout, stderr, r.GitRoot, r.Branches); err != nil {
+	if err := c.pullBranches(ctx, stdout, stderr, r.GitRoot, r.Branches, previousTips); err != nil {
 		return err
 	}
 	// Restore the original branch.
@@ -2335,16 +2357,24 @@ func (c *Container) readContainerFile(ctx context.Context, containerPath string)
 }
 
 // pullBranches integrates mapped branches from the container's remote-tracking
-// refs into the host's local branches.
-func (c *Container) pullBranches(ctx context.Context, stdout, stderr io.Writer, gitRoot string, branches []string) error {
+// refs into the host's local branches. previousTips are the tracking refs from
+// before the fetch; they identify amended container commits that replace,
+// rather than extend, host history.
+func (c *Container) pullBranches(ctx context.Context, stdout, stderr io.Writer, gitRoot string, branches []string, previousTips map[string]string) error {
 	commands := make([]string, 0, len(branches))
 	for _, branch := range branches {
 		quotedBranch := shellQuote(branch)
 		localRef := shellQuote("refs/heads/" + branch)
 		remoteRef := shellQuote(c.Name + "/" + branch)
-		commands = append(commands,
-			"current_branch=$(git branch --show-current || true); if ! git show-ref --verify --quiet "+localRef+"; then git update-ref "+localRef+" "+remoteRef+"; elif [ \"$current_branch\" = "+quotedBranch+" ]; then git rebase -q "+remoteRef+"; elif git merge-base --is-ancestor "+quotedBranch+" "+remoteRef+"; then git update-ref "+localRef+" "+remoteRef+"; else git checkout -q "+quotedBranch+" && git rebase -q "+remoteRef+"; fi",
-		)
+		integrate := "if [ \"$current_branch\" = " + quotedBranch + " ]; then git rebase -q " + remoteRef + "; elif git merge-base --is-ancestor " + quotedBranch + " " + remoteRef + "; then git update-ref " + localRef + " " + remoteRef + "; else git checkout -q " + quotedBranch + " && git rebase -q " + remoteRef + "; fi"
+		command := "current_branch=$(git branch --show-current || true); if ! git show-ref --verify --quiet " + localRef + "; then git update-ref " + localRef + " " + remoteRef
+		if previousTip := previousTips[branch]; previousTip != "" {
+			previousRef := shellQuote(previousTip)
+			command += "; elif ! git merge-base --is-ancestor " + previousRef + " " + remoteRef + "; then local_tip=$(git rev-parse " + localRef + "); if [ \"$local_tip\" = " + previousRef + " ]; then if [ \"$current_branch\" = " + quotedBranch + " ]; then git diff --quiet && git diff --cached --quiet && git reset --hard -q " + remoteRef + "; else git update-ref " + localRef + " " + remoteRef + " " + previousRef + "; fi; elif git merge-base --is-ancestor " + previousRef + " " + localRef + "; then git checkout -q " + quotedBranch + " && git rebase -q --onto " + remoteRef + " " + previousRef + "; else " + integrate + "; fi"
+		} else {
+			command += "; else " + integrate
+		}
+		commands = append(commands, command+"; fi")
 	}
 	if err := c.runCmdOut(ctx, gitRoot, []string{"bash", "-c", strings.Join(commands, " && ")}, stdout, stderr); err != nil {
 		return fmt.Errorf("integrating mapped branches: %w", err)
