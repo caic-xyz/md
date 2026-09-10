@@ -2361,7 +2361,7 @@ func (c *Container) pullBranches(ctx context.Context, stdout, stderr io.Writer, 
 		command := "current_branch=$(git branch --show-current || true); if ! git show-ref --verify --quiet " + localRef + "; then git update-ref " + localRef + " " + remoteRef
 		if previousTip := previousTips[branch]; previousTip != "" {
 			previousRef := shellQuote(previousTip)
-			command += "; elif ! git merge-base --is-ancestor " + previousRef + " " + remoteRef + "; then local_tip=$(git rev-parse " + localRef + "); if [ \"$local_tip\" = " + previousRef + " ]; then if [ \"$current_branch\" = " + quotedBranch + " ]; then git diff --quiet && git diff --cached --quiet && git reset --hard -q " + remoteRef + "; else git update-ref " + localRef + " " + remoteRef + " " + previousRef + "; fi; elif git merge-base --is-ancestor " + previousRef + " " + localRef + "; then git checkout -q " + quotedBranch + " && git rebase -q --onto " + remoteRef + " " + previousRef + "; else " + integrate + "; fi"
+			command += "; elif ! git merge-base --is-ancestor " + previousRef + " " + remoteRef + "; then local_tip=$(git rev-parse " + localRef + "); if [ \"$local_tip\" = " + previousRef + " ]; then if [ \"$current_branch\" = " + quotedBranch + " ]; then git diff --quiet && git diff --cached --quiet && git reset --hard -q " + remoteRef + "; else git update-ref " + localRef + " " + remoteRef + " " + previousRef + "; fi; elif git merge-base --is-ancestor " + previousRef + " " + localRef + "; then git checkout -q " + quotedBranch + " && git rebase -q --onto " + remoteRef + " " + previousRef + "; else " + integrate + "; fi; else " + integrate
 		} else {
 			command += "; else " + integrate
 		}
