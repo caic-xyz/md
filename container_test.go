@@ -526,6 +526,44 @@ func TestPlanFork(t *testing.T) {
 }
 
 func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with t.Setenv.
+	t.Run("configure_global_git_identity_uses_host_global_config", func(t *testing.T) {
+		ctx := t.Context()
+		fakeSSH(t)
+		sshLogPath := filepath.Join(t.TempDir(), "ssh.log")
+		t.Setenv(fakeSSHLogEnv, sshLogPath)
+		home := t.TempDir()
+		writeTestSSHConfig(t, home)
+		config := filepath.Join(t.TempDir(), "gitconfig")
+		writeTestFile(t, config, "[user]\n\tname = Global User\n\temail = global@example.com\n")
+
+		logger := testLogger(t)
+		ct := &Container{
+			Client: &Client{
+				Home:          home,
+				XDGConfigHome: filepath.Join(home, ".config"),
+				Logger:        logger,
+				Runtime:       testRuntime(t, "true", logger, nil),
+				env:           []string{"GIT_CONFIG_GLOBAL=" + config, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_COUNT=0"},
+			},
+			Logger: logger,
+			Name:   "md-test",
+		}
+		if err := ct.configureGlobalGitIdentity(ctx, io.Discard, io.Discard); err != nil {
+			t.Fatal(err)
+		}
+		sshLog, err := os.ReadFile(sshLogPath) //nolint:gosec // test log is under t.TempDir.
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, want := range []string{
+			"git config --global --replace-all user.name 'Global User'",
+			"git config --global --replace-all user.email global@example.com",
+		} {
+			if !strings.Contains(string(sshLog), want) {
+				t.Errorf("global identity command = %q, want %q", sshLog, want)
+			}
+		}
+	})
 	t.Run("configure_container_remotes_propagates_git_identity", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
 		ctx := t.Context()
 		fakeSSH(t)

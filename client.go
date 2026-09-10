@@ -647,6 +647,34 @@ func (c *Client) commandEnv(extra ...string) []string {
 	return containers.EnvWithOverrides(os.Environ(), overrides)
 }
 
+// globalGitIdentity returns the host user's Git identity. It intentionally
+// reads only the global configuration so unrelated bind-mounted repositories
+// receive the user's default identity rather than a project-specific override.
+func (c *Client) globalGitIdentity(ctx context.Context) (gitIdentity, error) {
+	name, err := c.globalGitConfig(ctx, "user.name")
+	if err != nil {
+		return gitIdentity{}, fmt.Errorf("read global Git user name: %w", err)
+	}
+	email, err := c.globalGitConfig(ctx, "user.email")
+	if err != nil {
+		return gitIdentity{}, fmt.Errorf("read global Git user email: %w", err)
+	}
+	return gitIdentity{name: name, email: email}, nil
+}
+
+func (c *Client) globalGitConfig(ctx context.Context, key string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", "config", "--global", "--get", key) //nolint:gosec // key is a package constant.
+	cmd.Env = c.commandEnv("HOME="+c.Home, "XDG_CONFIG_HOME="+c.XDGConfigHome)
+	out, err := cmd.Output()
+	if err == nil {
+		return strings.TrimSpace(string(out)), nil
+	}
+	if exitErr, ok := errors.AsType[*exec.ExitError](err); ok && exitErr.ExitCode() == 1 {
+		return "", nil
+	}
+	return "", err
+}
+
 // cmdErrWithStderr wraps err with the captured stderr from an *exec.ExitError
 // so that quiet-mode failures include actionable output.
 func cmdErrWithStderr(prefix string, err error) error {

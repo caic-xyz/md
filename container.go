@@ -1124,6 +1124,9 @@ func (c *Container) Revive(ctx context.Context, stdout, stderr io.Writer) error 
 	if err := c.waitForSSH(ctx, time.Now().Add(containerSSHReadyTimeout)); err != nil {
 		return fmt.Errorf("SSH handshake on %s: %w", c.Name, err)
 	}
+	if err := c.configureGlobalGitIdentity(ctx, stdout, stderr); err != nil {
+		return err
+	}
 
 	// Refresh cached remote refs and remote configuration without resetting the
 	// preserved working branches.
@@ -1257,7 +1260,7 @@ func (c *Container) Push(ctx context.Context, stdout, stderr io.Writer, repoIdx 
 	// remote shell so every step observes the same index and HEAD.
 	backupCommands := make([]string, 0, 7+2*len(r.Branches))
 	backupCommands = append(backupCommands, "cd "+mp)
-	backupCommands = append(backupCommands, containerGitIdentityCommands(identity)...)
+	backupCommands = append(backupCommands, gitIdentityCommands("--local", identity)...)
 	backupCommands = append(backupCommands,
 		"git add .",
 		"diff_status=0",
@@ -1317,7 +1320,7 @@ func (c *Container) Fetch(ctx context.Context, stdout, stderr io.Writer, repoIdx
 	}
 	commitCommands := make([]string, 0, 3)
 	commitCommands = append(commitCommands, "cd "+mp)
-	commitCommands = append(commitCommands, containerGitIdentityCommands(identity)...)
+	commitCommands = append(commitCommands, gitIdentityCommands("--local", identity)...)
 	commitPrefix := strings.Join(commitCommands, " && ")
 	commitMsg := "Pull from md"
 	if p == nil {
@@ -1638,6 +1641,9 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 	}
 	if err := fork.waitForSSH(ctx, time.Now().Add(containerSSHReadyTimeout)); err != nil {
 		return nil, fmt.Errorf("SSH handshake on forked container: %w", err)
+	}
+	if err := fork.configureGlobalGitIdentity(ctx, stdout, stderr); err != nil {
+		return nil, err
 	}
 
 	// Restore ownership before running Git. Under rootless podman, `commit` does
@@ -2010,7 +2016,7 @@ func (c *Container) configureContainerRemotes(ctx context.Context, stdout, stder
 		return err
 	}
 	commands := containerRemoteConfigCommands(r, configs, includeHost)
-	commands = slices.Insert(commands, 1, containerGitIdentityCommands(identity)...)
+	commands = slices.Insert(commands, 1, gitIdentityCommands("--local", identity)...)
 	commands = append(commands, postCommands...)
 	if err := c.runCmdOut(ctx, "", c.SSHCommand(nil, strings.Join(commands, " && ")), stdout, stderr); err != nil {
 		return fmt.Errorf("configuring remotes for %s: %w", r.ContainerPath, err)
@@ -2039,7 +2045,7 @@ func containerRemoteConfigCommands(r *Repo, configs []containerRemoteConfig, inc
 	return commands
 }
 
-func containerGitIdentityCommands(identity gitIdentity) []string {
+func gitIdentityCommands(scope string, identity gitIdentity) []string {
 	commands := make([]string, 0, 2)
 	for _, setting := range []struct {
 		key   string
@@ -2049,12 +2055,26 @@ func containerGitIdentityCommands(identity gitIdentity) []string {
 		{key: "user.name", value: identity.name},
 	} {
 		if setting.value == "" {
-			commands = append(commands, "(git config --local --unset-all "+setting.key+" >/dev/null 2>&1 || true)")
+			commands = append(commands, "(git config "+scope+" --unset-all "+setting.key+" >/dev/null 2>&1 || true)")
 		} else {
-			commands = append(commands, "git config --local --replace-all "+setting.key+" "+shellQuote(setting.value))
+			commands = append(commands, "git config "+scope+" --replace-all "+setting.key+" "+shellQuote(setting.value))
 		}
 	}
 	return commands
+}
+
+// configureGlobalGitIdentity sets the host user's global identity in the
+// container before agents can commit in bind-mounted repositories.
+func (c *Container) configureGlobalGitIdentity(ctx context.Context, stdout, stderr io.Writer) error {
+	identity, err := c.globalGitIdentity(ctx)
+	if err != nil {
+		return err
+	}
+	commands := gitIdentityCommands("--global", identity)
+	if err := c.runCmdOut(ctx, "", c.SSHCommand(nil, strings.Join(commands, " && ")), stdout, stderr); err != nil {
+		return fmt.Errorf("configuring global Git identity: %w", err)
+	}
+	return nil
 }
 
 func (c *Container) pushContainerRefs(ctx context.Context, r *Repo, refspecs []string) error {
@@ -3045,6 +3065,9 @@ func (c *Container) provisionContainer(ctx context.Context, stdout, stderr io.Wr
 		return nil, err
 	}
 	if err := c.waitForSSH(ctx, time.Now().Add(containerSSHReadyTimeout)); err != nil {
+		return nil, err
+	}
+	if err := c.configureGlobalGitIdentity(ctx, stdout, stderr); err != nil {
 		return nil, err
 	}
 
