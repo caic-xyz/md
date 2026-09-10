@@ -1343,11 +1343,17 @@ func (c *Container) Fetch(ctx context.Context, stdout, stderr io.Writer, repoIdx
 			return fmt.Errorf("committing in container: %w", err)
 		}
 	}
-	// Fetch all mapped branches from the container.
+	// Fetch all mapped branches over one connection. Explicit forced refspecs
+	// preserve rewritten container history and avoid ambiguous short ref names.
+	if len(r.Branches) == 0 {
+		return nil
+	}
+	fetchArgs := []string{"git", "fetch", "-q", c.Name}
 	for _, b := range r.Branches {
-		if err := c.runCmdOut(ctx, r.GitRoot, []string{"git", "fetch", "-q", c.Name, b}, stdout, stderr); err != nil {
-			return fmt.Errorf("fetching %s: %w", b, err)
-		}
+		fetchArgs = append(fetchArgs, "+refs/heads/"+b+":"+remoteTrackingRef(c.Name, b))
+	}
+	if err := c.runCmdOut(ctx, r.GitRoot, fetchArgs, stdout, stderr); err != nil {
+		return fmt.Errorf("fetching mapped branches %s: %w", strings.Join(r.Branches, ", "), err)
 	}
 	return nil
 }
@@ -1365,6 +1371,13 @@ func (c *Container) Pull(ctx context.Context, stdout, stderr io.Writer, repoIdx 
 	}
 	r := &c.Repos[repoIdx]
 	g := &git.Checkout{Root: r.GitRoot, Logger: c.Logger}
+	rebaseActive, err := gitRebaseInProgress(ctx, g)
+	if err != nil {
+		return fmt.Errorf("checking for an existing rebase: %w", err)
+	}
+	if rebaseActive {
+		return errors.New("a rebase is already in progress locally. Complete or abort it before pulling")
+	}
 	currentBranch, err := g.RunGit(ctx, "branch", "--show-current")
 	if err != nil {
 		return fmt.Errorf("reading current branch: %w", err)

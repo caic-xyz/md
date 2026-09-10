@@ -114,6 +114,52 @@ func setupPullTest(t *testing.T) (ct *Container, hostDir, containerDir string) {
 	return ct, hostDir, containerDir
 }
 
+func setupMultiBranchPullTest(t *testing.T) (ct *Container, hostDir, containerDir string) {
+	ctx := t.Context()
+	fakeSSH(t)
+	home := t.TempDir()
+	writeTestSSHConfig(t, home)
+
+	originDir := filepath.Join(t.TempDir(), "origin.git")
+	hostDir = t.TempDir()
+	containerDir = t.TempDir()
+	runTestGit(t, ctx, "", "init", "-q", "--bare", "--initial-branch=main", originDir)
+	runTestGit(t, ctx, hostDir, "init", "-q", "--initial-branch=main")
+	runTestGit(t, ctx, hostDir, "config", "user.name", "Test")
+	runTestGit(t, ctx, hostDir, "config", "user.email", "test@test")
+	writeTestFile(t, filepath.Join(hostDir, "main.txt"), "main base\n")
+	runTestGit(t, ctx, hostDir, "add", ".")
+	runTestGit(t, ctx, hostDir, "commit", "-q", "-m", "main base")
+	runTestGit(t, ctx, hostDir, "remote", "add", "origin", originDir)
+	runTestGit(t, ctx, hostDir, "push", "-q", "-u", "origin", "main")
+	runTestGit(t, ctx, hostDir, "switch", "-q", "-c", "feature")
+	writeTestFile(t, filepath.Join(hostDir, "feature.txt"), "feature base\n")
+	runTestGit(t, ctx, hostDir, "add", ".")
+	runTestGit(t, ctx, hostDir, "commit", "-q", "-m", "feature base")
+	runTestGit(t, ctx, hostDir, "push", "-q", "-u", "origin", "feature")
+	runTestGit(t, ctx, hostDir, "switch", "-q", "main")
+
+	runTestGit(t, ctx, "", "clone", "-q", originDir, containerDir)
+	runTestGit(t, ctx, containerDir, "config", "user.name", "Test")
+	runTestGit(t, ctx, containerDir, "config", "user.email", "test@test")
+	runTestGit(t, ctx, hostDir, "remote", "add", "md-test", containerDir)
+
+	logger := testLogger(t)
+	ct = &Container{
+		Client: &Client{Home: home, Logger: logger, Runtime: testRuntime(t, "true", logger, nil)},
+		Logger: logger,
+		Name:   "md-test",
+		Repos: []Repo{{
+			GitRoot:       hostDir,
+			Branches:      []string{"main", "feature"},
+			ContainerPath: filepath.ToSlash(containerDir),
+			DefaultRemote: "origin",
+			DefaultBranch: "main",
+		}},
+	}
+	return ct, hostDir, containerDir
+}
+
 func TestShellQuote(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -1158,6 +1204,41 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 		}
 	})
 	t.Run("Pull", func(t *testing.T) {
+		t.Run("rejects_existing_rebase", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
+			ctx := t.Context()
+			ct, hostDir, _ := setupPullTest(t)
+			previousTip := runTestGit(t, ctx, hostDir, "rev-parse", "refs/remotes/md-test/main")
+			writeTestFile(t, filepath.Join(hostDir, "host.txt"), "host\n")
+			runTestGit(t, ctx, hostDir, "add", ".")
+			runTestGit(t, ctx, hostDir, "commit", "-q", "-m", "host")
+
+			rebase := exec.CommandContext(ctx, "git", "rebase", "--exec", "git rev-parse --verify refs/heads/md-test-stop-rebase", "origin/main")
+			rebase.Dir = hostDir
+			rebase.Env = append(os.Environ(), "LANG=C")
+			if out, err := rebase.CombinedOutput(); err == nil {
+				t.Fatalf("git rebase unexpectedly succeeded:\n%s", out)
+			}
+			if got := runTestGit(t, ctx, hostDir, "status", "--porcelain"); got != "" {
+				t.Fatalf("pre-existing rebase status = %q, want clean", got)
+			}
+			rebaseHead := runTestGit(t, ctx, hostDir, "rev-parse", "HEAD")
+
+			err := ct.Pull(ctx, io.Discard, io.Discard, 0, nil)
+			if err == nil || !strings.Contains(err.Error(), "rebase is already in progress") {
+				t.Fatalf("Pull error = %v, want existing rebase error", err)
+			}
+			if got := runTestGit(t, ctx, hostDir, "rev-parse", "HEAD"); got != rebaseHead {
+				t.Fatalf("HEAD = %q, want unchanged rebase HEAD %q", got, rebaseHead)
+			}
+			if active, err := gitRebaseInProgress(ctx, &git.Checkout{Root: hostDir, Logger: ct.Logger}); err != nil {
+				t.Fatal(err)
+			} else if !active {
+				t.Fatal("pre-existing rebase was aborted")
+			}
+			if got := runTestGit(t, ctx, hostDir, "rev-parse", "refs/remotes/md-test/main"); got != previousTip {
+				t.Fatalf("tracking ref = %q, want unchanged %q", got, previousTip)
+			}
+		})
 		t.Run("rejects_dirty_host_worktree", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
 			ctx := t.Context()
 			ct, hostDir, containerDir := setupPullTest(t)
@@ -1349,6 +1430,26 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 				t.Fatalf("host host.txt = %q, want host change", got)
 			}
 		})
+		t.Run("rebases_divergent_host_history_after_container_rewrite", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
+			ctx := t.Context()
+			ct, hostDir, containerDir := setupPullTest(t)
+			runTestGit(t, ctx, hostDir, "reset", "--hard", "origin/main")
+			writeTestFile(t, filepath.Join(hostDir, "host.txt"), "divergent host\n")
+			runTestGit(t, ctx, hostDir, "add", ".")
+			runTestGit(t, ctx, hostDir, "commit", "-q", "-m", "divergent host")
+			writeTestFile(t, filepath.Join(containerDir, "shared.txt"), "rewritten container\n")
+			runTestGit(t, ctx, containerDir, "commit", "-q", "--amend", "-am", "rewritten container")
+
+			if err := ct.Pull(ctx, io.Discard, io.Discard, 0, nil); err != nil {
+				t.Fatalf("Pull with independently divergent host history: %v", err)
+			}
+			if got := runTestGit(t, ctx, hostDir, "show", "refs/heads/main:shared.txt"); got != "rewritten container" {
+				t.Fatalf("shared.txt = %q, want rewritten container content", got)
+			}
+			if got := runTestGit(t, ctx, hostDir, "show", "refs/heads/main:host.txt"); got != "divergent host" {
+				t.Fatalf("host.txt = %q, want preserved divergent host commit", got)
+			}
+		})
 		t.Run("does_not_update_container_branch", func(t *testing.T) { //nolint:paralleltest // fakeSSH changes process environment.
 			ctx := t.Context()
 			fakeSSH(t)
@@ -1504,7 +1605,8 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			runTestGit(t, ctx, containerDir, "checkout", "-q", "main")
 			runTestGit(t, ctx, hostDir, "remote", "add", "md-test", containerDir)
 
-			logger := testLogger(t)
+			var log bytes.Buffer
+			logger := slog.New(slog.NewTextHandler(io.MultiWriter(&log, testLogWriter{t: t}), testLoggerOptions()))
 			ct := &Container{
 				Client: &Client{Home: home, Logger: logger, Runtime: testRuntime(t, "true", logger, nil)},
 				Logger: logger,
@@ -1521,6 +1623,12 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			if err := ct.Pull(ctx, &stdout, &stderr, 0, nil); err != nil {
 				t.Fatalf("Pull: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 			}
+			if got := strings.Count(log.String(), `cmd="[git fetch -q md-test`); got != 1 {
+				t.Fatalf("container fetch invocations = %d, want 1\n%s", got, log.String())
+			}
+			if !strings.Contains(log.String(), `cmd="[git fetch -q md-test +refs/heads/main:refs/remotes/md-test/main +refs/heads/feature:refs/remotes/md-test/feature]"`) {
+				t.Fatalf("missing batched mapped-branch fetch\n%s", log.String())
+			}
 			if got := runTestGit(t, ctx, hostDir, "show", "main:main-container.txt"); got != "main container" {
 				t.Fatalf("main branch container file = %q, want main container", got)
 			}
@@ -1529,6 +1637,47 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			}
 			if got := runTestGit(t, ctx, hostDir, "branch", "--show-current"); got != "main" {
 				t.Fatalf("current branch = %q, want main", got)
+			}
+		})
+		t.Run("preserves_completed_branches_after_later_branch_failure", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
+			ctx := t.Context()
+			ct, hostDir, containerDir := setupMultiBranchPullTest(t)
+
+			runTestGit(t, ctx, hostDir, "switch", "-q", "feature")
+			writeTestFile(t, filepath.Join(hostDir, "feature.txt"), "host feature\n")
+			runTestGit(t, ctx, hostDir, "commit", "-q", "-am", "host feature")
+			hostFeatureTip := runTestGit(t, ctx, hostDir, "rev-parse", "refs/heads/feature")
+			runTestGit(t, ctx, hostDir, "switch", "-q", "main")
+
+			writeTestFile(t, filepath.Join(containerDir, "main-container.txt"), "main container\n")
+			runTestGit(t, ctx, containerDir, "add", ".")
+			runTestGit(t, ctx, containerDir, "commit", "-q", "-m", "container main")
+			containerMainTip := runTestGit(t, ctx, containerDir, "rev-parse", "refs/heads/main")
+			runTestGit(t, ctx, containerDir, "switch", "-q", "feature")
+			writeTestFile(t, filepath.Join(containerDir, "feature.txt"), "container feature\n")
+			runTestGit(t, ctx, containerDir, "commit", "-q", "-am", "container feature")
+			containerFeatureTip := runTestGit(t, ctx, containerDir, "rev-parse", "refs/heads/feature")
+			runTestGit(t, ctx, containerDir, "switch", "-q", "main")
+
+			var stderr bytes.Buffer
+			err := ct.Pull(ctx, io.Discard, &stderr, 0, nil)
+			if err == nil || !strings.Contains(err.Error(), "integrating branch feature") {
+				t.Fatalf("Pull error = %v, want feature integration failure; stderr:\n%s", err, stderr.String())
+			}
+			if got := runTestGit(t, ctx, hostDir, "rev-parse", "refs/heads/main"); got != containerMainTip {
+				t.Fatalf("main tip = %q, want completed integration %q", got, containerMainTip)
+			}
+			if got := runTestGit(t, ctx, hostDir, "rev-parse", "refs/heads/feature"); got != hostFeatureTip {
+				t.Fatalf("feature tip = %q, want pre-rebase host tip %q", got, hostFeatureTip)
+			}
+			if got := runTestGit(t, ctx, hostDir, "rev-parse", "refs/remotes/md-test/feature"); got != containerFeatureTip {
+				t.Fatalf("feature tracking tip = %q, want fetched container tip %q", got, containerFeatureTip)
+			}
+			if got := runTestGit(t, ctx, hostDir, "branch", "--show-current"); got != "main" {
+				t.Fatalf("current branch = %q, want restored main", got)
+			}
+			if got := runTestGit(t, ctx, hostDir, "status", "--porcelain", "--untracked-files=no"); got != "" {
+				t.Fatalf("tracked status after partial Pull = %q, want clean checkout", got)
 			}
 		})
 		t.Run("deleted_source_branch", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.

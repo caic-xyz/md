@@ -50,14 +50,21 @@ make their Git effects explicit:
 | --- | --- |
 | `md start` | Copies the host's mapped branches and cached remote refs into a new container, then checks out the primary mapped branch there. |
 | `md diff` | Refreshes cached remote refs in the container from the host, then reports the primary container branch's changes. It does not move either mapped branch. |
-| `md fetch` | Refreshes cached remote refs in the container from the host; commits dirty container changes when needed; then fetches each mapped container branch into the host's corresponding remote-tracking ref. It does not integrate those refs into a host branch. |
-| `md pull` | Performs `md fetch`, then fast-forwards or rebases each mapped host branch to include the fetched container changes. It never pushes a mapped branch to the container or resets the container checkout. |
+| `md fetch` | Refreshes cached remote refs in the container from the host; commits dirty container changes when needed; then fetches all mapped container branches into the host's corresponding remote-tracking refs over one connection. It does not integrate those refs into a host branch. |
+| `md pull` | Performs `md fetch`, then fast-forwards, rebases, or replaces each mapped host branch to include the fetched container changes. It never pushes a mapped branch to the container or resets the container checkout. |
 | `md push` | Commits dirty container changes to a timestamped backup branch, then force-pushes the mapped host branches into the container and resets the container's mapped branches to those host refs. |
 | `md fork` | Snapshots the source container's filesystem and creates a new container on new host branches; it does not modify the source container. |
 
 `md pull` may rewrite host commit IDs when Git rebases host-only commits onto
 container changes. Use `md push` explicitly when that reconciled host history
 should replace the container branch.
+
+If the checked-out host branch still points exactly to a container commit from
+an earlier pull and that commit was amended in the container, `md pull` uses
+`git reset --hard` to replace it. Before fetching, it refuses to proceed when
+the host has staged or unstaged tracked changes. Untracked files are normally
+left in place, but Git may remove an untracked path that obstructs a tracked
+path during the hard reset.
 
 ### Remote branches and fork workflows
 
@@ -86,6 +93,10 @@ semantics: an empty tag expression maps no tags.
 `md start --extra-branch <branch>` maps additional branches into the same container. The first branch (`Branches[0]`: current branch or `-b`) remains the primary branch.
 
 For now, `md diff` reports changes for the primary branch only. Extra mapped branches are available for `push`, `pull`, and `fork`, but they are not diffed by `md diff`; inspect them inside the container with Git directly.
+
+`md pull` integrates mapped branches in order. If a later branch cannot be
+rebased, branches already completed remain integrated; the failed rebase is
+aborted and the original host checkout is restored.
 
 ## Documentation
 
