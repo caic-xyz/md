@@ -1365,6 +1365,20 @@ func (c *Container) Pull(ctx context.Context, stdout, stderr io.Writer, repoIdx 
 	}
 	r := &c.Repos[repoIdx]
 	g := &git.Checkout{Root: r.GitRoot, Logger: c.Logger}
+	currentBranch, err := g.RunGit(ctx, "branch", "--show-current")
+	if err != nil {
+		return fmt.Errorf("reading current branch: %w", err)
+	}
+	status, err := g.RunGit(ctx, "status", "--porcelain", "--untracked-files=no")
+	if err != nil {
+		return fmt.Errorf("checking local changes: %w", err)
+	}
+	if status != "" {
+		if currentBranch != "" {
+			return fmt.Errorf("there are pending changes on branch %s locally. Please commit or stash them before pulling", currentBranch)
+		}
+		return errors.New("there are pending changes locally. Please commit or stash them before pulling")
+	}
 	previousTips := make(map[string]string, len(r.Branches))
 	for _, branch := range r.Branches {
 		ref := remoteTrackingRef(c.Name, branch)
@@ -1384,19 +1398,31 @@ func (c *Container) Pull(ctx context.Context, stdout, stderr io.Writer, repoIdx 
 	if err := c.Fetch(ctx, stdout, stderr, repoIdx, p); err != nil {
 		return err
 	}
-	// Save the original branch to restore it after integration.
-	origRef, _ := g.CurrentBranch(ctx)
-	if origRef == "" {
-		origRef, _ = g.RunGit(ctx, "rev-parse", "HEAD")
+	// Save the original commit when detached so it can be restored after integration.
+	origCommit := ""
+	if currentBranch == "" {
+		origCommit, err = g.RevParse(ctx, "HEAD")
+		if err != nil {
+			return fmt.Errorf("reading detached HEAD: %w", err)
+		}
 	}
-	if err := c.pullBranches(ctx, stdout, stderr, r.GitRoot, r.Branches, previousTips); err != nil {
+	if err := c.pullBranches(ctx, stdout, stderr, g, r.Branches, previousTips); err != nil {
 		return err
 	}
 	// Restore the original branch.
-	currentRef, _ := g.CurrentBranch(ctx)
-	if origRef != "" && currentRef != origRef {
-		if _, err := g.RunGit(ctx, "rev-parse", "--verify", "-q", origRef); err == nil {
-			_ = c.runCmdOut(ctx, r.GitRoot, []string{"git", "checkout", "-q", origRef}, stdout, stderr)
+	finalBranch, err := g.RunGit(ctx, "branch", "--show-current")
+	if err != nil {
+		return fmt.Errorf("reading final branch: %w", err)
+	}
+	if currentBranch != "" {
+		if finalBranch != currentBranch {
+			if err := c.runCmdOut(ctx, r.GitRoot, []string{"git", "switch", "-q", currentBranch}, stdout, stderr); err != nil {
+				return fmt.Errorf("restoring original branch %s: %w", currentBranch, err)
+			}
+		}
+	} else if finalBranch != "" {
+		if err := c.runCmdOut(ctx, r.GitRoot, []string{"git", "switch", "-q", "--detach", origCommit}, stdout, stderr); err != nil {
+			return fmt.Errorf("restoring detached HEAD %s: %w", origCommit, err)
 		}
 	}
 	return nil
@@ -2351,26 +2377,85 @@ func (c *Container) readContainerFile(ctx context.Context, containerPath string)
 // refs into the host's local branches. previousTips are the tracking refs from
 // before the fetch; they identify amended container commits that replace,
 // rather than extend, host history.
-func (c *Container) pullBranches(ctx context.Context, stdout, stderr io.Writer, gitRoot string, branches []string, previousTips map[string]string) error {
-	commands := make([]string, 0, len(branches))
+func (c *Container) pullBranches(ctx context.Context, stdout, stderr io.Writer, g *git.Checkout, branches []string, previousTips map[string]string) error {
 	for _, branch := range branches {
-		quotedBranch := shellQuote(branch)
-		localRef := shellQuote("refs/heads/" + branch)
-		remoteRef := shellQuote(c.Name + "/" + branch)
-		integrate := "if [ \"$current_branch\" = " + quotedBranch + " ]; then git rebase -q " + remoteRef + "; elif git merge-base --is-ancestor " + quotedBranch + " " + remoteRef + "; then git update-ref " + localRef + " " + remoteRef + "; else git checkout -q " + quotedBranch + " && git rebase -q " + remoteRef + "; fi"
-		command := "current_branch=$(git branch --show-current || true); if ! git show-ref --verify --quiet " + localRef + "; then git update-ref " + localRef + " " + remoteRef
-		if previousTip := previousTips[branch]; previousTip != "" {
-			previousRef := shellQuote(previousTip)
-			command += "; elif ! git merge-base --is-ancestor " + previousRef + " " + remoteRef + "; then local_tip=$(git rev-parse " + localRef + "); if [ \"$local_tip\" = " + previousRef + " ]; then if [ \"$current_branch\" = " + quotedBranch + " ]; then git diff --quiet && git diff --cached --quiet && git reset --hard -q " + remoteRef + "; else git update-ref " + localRef + " " + remoteRef + " " + previousRef + "; fi; elif git merge-base --is-ancestor " + previousRef + " " + localRef + "; then git checkout -q " + quotedBranch + " && git rebase -q --onto " + remoteRef + " " + previousRef + "; else " + integrate + "; fi; else " + integrate
-		} else {
-			command += "; else " + integrate
+		if err := c.pullBranch(ctx, stdout, stderr, g, branch, previousTips[branch]); err != nil {
+			return fmt.Errorf("integrating branch %s: %w", branch, err)
 		}
-		commands = append(commands, command+"; fi")
-	}
-	if err := c.runCmdOut(ctx, gitRoot, []string{"bash", "-c", strings.Join(commands, " && ")}, stdout, stderr); err != nil {
-		return fmt.Errorf("integrating mapped branches: %w", err)
 	}
 	return nil
+}
+
+func (c *Container) pullBranch(ctx context.Context, stdout, stderr io.Writer, g *git.Checkout, branch, previousTip string) error {
+	localRef := "refs/heads/" + branch
+	remoteRef := remoteTrackingRef(c.Name, branch)
+	run := func(args ...string) error {
+		return c.runCmdOut(ctx, g.Root, append([]string{"git"}, args...), stdout, stderr)
+	}
+
+	exists, err := g.RefExists(ctx, localRef)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return run("update-ref", localRef, remoteRef)
+	}
+	currentBranch, err := g.RunGit(ctx, "branch", "--show-current")
+	if err != nil {
+		return fmt.Errorf("reading current branch: %w", err)
+	}
+	if previousTip != "" {
+		extendsPreviousTip, err := gitIsAncestor(ctx, g, previousTip, remoteRef)
+		if err != nil {
+			return fmt.Errorf("comparing previous and fetched container tips: %w", err)
+		}
+		if !extendsPreviousTip {
+			localTip, err := g.RevParse(ctx, localRef)
+			if err != nil {
+				return fmt.Errorf("reading local tip: %w", err)
+			}
+			if localTip == previousTip {
+				if currentBranch == branch {
+					return run("reset", "--hard", "-q", remoteRef)
+				}
+				return run("update-ref", localRef, remoteRef, previousTip)
+			}
+			localExtendsPreviousTip, err := gitIsAncestor(ctx, g, previousTip, localRef)
+			if err != nil {
+				return fmt.Errorf("comparing previous container and local tips: %w", err)
+			}
+			if localExtendsPreviousTip {
+				if err := run("switch", "-q", branch); err != nil {
+					return err
+				}
+				return run("rebase", "-q", "--onto", remoteRef, previousTip)
+			}
+		}
+	}
+	if currentBranch == branch {
+		return run("rebase", "-q", remoteRef)
+	}
+	fastForward, err := gitIsAncestor(ctx, g, localRef, remoteRef)
+	if err != nil {
+		return fmt.Errorf("checking for fast-forward: %w", err)
+	}
+	if fastForward {
+		return run("update-ref", localRef, remoteRef)
+	}
+	if err := run("switch", "-q", branch); err != nil {
+		return err
+	}
+	return run("rebase", "-q", remoteRef)
+}
+
+func gitIsAncestor(ctx context.Context, g *git.Checkout, ancestor, descendant string) (bool, error) {
+	if _, err := g.RunGit(ctx, "merge-base", "--is-ancestor", ancestor, descendant); err != nil {
+		if exitErr, ok := errors.AsType[*exec.ExitError](err); ok && exitErr.ExitCode() == 1 {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 // waitForSSH runs a trivial SSH command in a retry loop until it succeeds or
