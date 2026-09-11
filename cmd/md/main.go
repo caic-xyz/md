@@ -85,6 +85,9 @@ func mainImpl() (retErr error) {
 	_ = pre.Parse(os.Args[1:])
 	initLogging(*preVerbose)
 	a.runtimeOverride = *preRuntime
+	if a.runtimeOverride != "" && a.runtimeOverride != "docker" && a.runtimeOverride != "podman" {
+		return fmt.Errorf("--runtime must be \"docker\" or \"podman\", got %q", a.runtimeOverride)
+	}
 	a.controlMasterEnabled = *preControlMaster && runtime.GOOS != "windows"
 	remaining := pre.Args()
 
@@ -148,7 +151,7 @@ func usage() {
 		"  diff          Show differences between host branch and current changes\n"+
 		"  fork          Snapshot container and create a new one on forked branches\n"+
 		"  list          List running md containers\n"+
-		"  prune         Remove unused md images and build cache\n"+
+		"  prune         Remove unused md images and build cache from all available runtimes\n"+
 		"  pull          Pull changes from container back to local branch\n"+
 		"  purge         Stop and remove the container permanently\n"+
 		"  push          Force-push current repo state into the running container\n"+
@@ -223,9 +226,6 @@ func (a *app) Close() error {
 }
 
 func (a *app) newClient() (*md.Client, error) {
-	if a.runtimeOverride != "" && a.runtimeOverride != "docker" && a.runtimeOverride != "podman" {
-		return nil, fmt.Errorf("--runtime must be \"docker\" or \"podman\", got %q", a.runtimeOverride)
-	}
 	if a.client != nil {
 		return a.client, nil
 	}
@@ -233,7 +233,7 @@ func (a *app) newClient() (*md.Client, error) {
 	var rt containers.Runtime
 	if a.runtimeOverride != "" {
 		var err error
-		rt, err = containers.New(a.runtimeOverride, logger, nil)
+		rt, err = containers.New(a.runtimeOverride, slog.Default(), nil)
 		if err != nil {
 			return nil, err
 		}
@@ -247,6 +247,33 @@ func (a *app) newClient() (*md.Client, error) {
 	c.TailscaleAPIKey = os.Getenv("TAILSCALE_API_KEY")
 	a.client = c
 	return c, nil
+}
+
+func (a *app) availableRuntimes() ([]containers.Runtime, error) {
+	if a.runtimeOverride != "" {
+		rt, err := containers.New(a.runtimeOverride, slog.Default(), nil)
+		if err != nil {
+			return nil, err
+		}
+		return []containers.Runtime{rt}, nil
+	}
+
+	var runtimes []containers.Runtime
+	for _, name := range []string{"docker", "podman"} {
+		path, err := exec.LookPath(name)
+		if err != nil {
+			continue
+		}
+		rt, err := containers.New(path, slog.Default(), nil)
+		if err != nil {
+			return nil, fmt.Errorf("creating %s runtime: %w", name, err)
+		}
+		runtimes = append(runtimes, rt)
+	}
+	if len(runtimes) == 0 {
+		return nil, errors.New("no supported container runtime found (install Docker or Podman)")
+	}
+	return runtimes, nil
 }
 
 // findContainerAndRepo searches all containers for one that contains the
@@ -1532,22 +1559,23 @@ func (a *app) cmdPrune(ctx context.Context, args []string) error {
 	if err := checkArgs(fs, 0); err != nil {
 		return err
 	}
-	c, err := a.newClient()
+	runtimes, err := a.availableRuntimes()
 	if err != nil {
 		return err
 	}
-	removed, err := c.PruneImages(ctx, os.Stdout, os.Stderr)
-	if err != nil {
-		return err
+	var errs []error
+	for _, rt := range runtimes {
+		client := &md.Client{Logger: slog.Default(), Runtime: rt}
+		names, err := client.PruneImages(ctx, os.Stdout, os.Stderr)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("pruning %s: %w", rt.Name(), err))
+			continue
+		}
+		for _, name := range names {
+			fmt.Printf("Removed %s image %s\n", rt.Name(), name)
+		}
 	}
-	if len(removed) == 0 {
-		fmt.Println("No unused md images to remove")
-		return nil
-	}
-	for _, name := range removed {
-		fmt.Printf("Removed %s\n", name)
-	}
-	return nil
+	return errors.Join(errs...)
 }
 
 func cmdVersion(args []string) error {

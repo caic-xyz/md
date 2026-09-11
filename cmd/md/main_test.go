@@ -8,11 +8,15 @@ package main
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -24,6 +28,97 @@ import (
 )
 
 var testLogStart = time.Now()
+
+const (
+	fakePruneRuntimeEnv    = "MD_TEST_FAKE_PRUNE_RUNTIME"
+	fakePruneRuntimeLogEnv = "MD_TEST_FAKE_PRUNE_RUNTIME_LOG"
+)
+
+func TestMain(m *testing.M) {
+	if os.Getenv(fakePruneRuntimeEnv) == "1" {
+		os.Exit(runFakePruneRuntime(os.Args[1:]))
+	}
+	os.Exit(m.Run())
+}
+
+func TestCmdPrune(t *testing.T) {
+	dir := t.TempDir()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"docker", "podman"} {
+		path := filepath.Join(dir, name)
+		if runtime.GOOS == "windows" {
+			path += ".exe"
+		}
+		if err := copyTestExecutable(exe, path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	logPath := filepath.Join(dir, "commands.log")
+	t.Setenv(fakePruneRuntimeEnv, "1")
+	t.Setenv(fakePruneRuntimeLogEnv, logPath)
+	t.Setenv("PATH", dir)
+	if err := (&app{}).cmdPrune(t.Context(), nil); err != nil {
+		t.Fatal(err)
+	}
+	log, err := os.ReadFile(logPath) //nolint:gosec // logPath is generated in a private test directory.
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, runtimeName := range []string{"docker", "podman"} {
+		for _, command := range []string{"images ", "ps -a ", "rmi md-specialized-unused", "builder prune -f"} {
+			if want := runtimeName + " " + command; !strings.Contains(string(log), want) {
+				t.Errorf("commands = %q, want %q", log, want)
+			}
+		}
+	}
+}
+
+func copyTestExecutable(src, dst string) error {
+	in, err := os.Open(src) //nolint:gosec // test binary is copied to a private temporary directory.
+	if err != nil {
+		return err
+	}
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755) //nolint:gosec // test executable is written to a private temporary directory.
+	if err != nil {
+		return errors.Join(err, in.Close())
+	}
+	_, copyErr := io.Copy(out, in)
+	return errors.Join(copyErr, out.Close(), in.Close())
+}
+
+func runFakePruneRuntime(args []string) int {
+	logPath := os.Getenv(fakePruneRuntimeLogEnv)
+	if logPath == "" {
+		_, _ = fmt.Fprintln(os.Stderr, "missing fake prune runtime log path")
+		return 1
+	}
+	log, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600) //nolint:gosec // test path comes from a private temporary directory.
+	if err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "opening fake prune runtime log: %v\n", err)
+		return 1
+	}
+	if _, err := fmt.Fprintln(log, strings.TrimSuffix(filepath.Base(os.Args[0]), ".exe"), strings.Join(args, " ")); err != nil {
+		_ = log.Close()
+		_, _ = fmt.Fprintf(os.Stderr, "writing fake prune runtime log: %v\n", err)
+		return 1
+	}
+	if err := log.Close(); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "closing fake prune runtime log: %v\n", err)
+		return 1
+	}
+	switch args[0] {
+	case "images":
+		_, _ = fmt.Fprintln(os.Stdout, "sha256:unused\tmd-specialized-unused")
+	case "ps", "rmi", "builder":
+	default:
+		_, _ = fmt.Fprintf(os.Stderr, "unexpected fake prune runtime command: %s\n", strings.Join(args, " "))
+		return 1
+	}
+	return 0
+}
 
 func testLogger(t testing.TB) *slog.Logger {
 	return slog.New(slog.NewTextHandler(testLogWriter{t: t}, testLoggerOptions()))
