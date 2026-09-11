@@ -528,7 +528,8 @@ func (r *Repo) requiredMappedBranchUpstream(ctx context.Context, logger *slog.Lo
 		return "", "", fmt.Errorf("mapped host branch %q has no upstream; configure an upstream before using md", branch)
 	}
 	if r.isMDTransportRemote(ctx, g, remote) {
-		return "", "", fmt.Errorf("mapped host branch %q tracks md container remote %q; configure a non-md upstream before using md", branch, remote)
+		command := shellQuoteArgs([]string{"git", "branch", "--set-upstream-to=" + r.DefaultRemote + "/" + r.DefaultBranch, branch})
+		return "", "", fmt.Errorf("mapped host branch %q tracks md container remote %q; to track the repository's default branch instead, run: %s", branch, remote, command)
 	}
 	if len(r.Branches) > 1 && branch != r.Branches[0] && remote == "." && upstreamBranch == r.Branches[0] {
 		return "", "", fmt.Errorf("mapped host branch %q tracks primary branch %q locally; configure a different upstream before using md", branch, r.Branches[0])

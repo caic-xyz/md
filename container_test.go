@@ -3048,8 +3048,8 @@ func TestRepo(t *testing.T) {
 			if want := []string{"origin"}; !slices.Equal(repo.Remotes, want) {
 				t.Fatalf("remotes = %v, want %v", repo.Remotes, want)
 			}
-			if _, err := repo.resolveContainerBranchBase(ctx, testLogger(t), "master"); err == nil || !strings.Contains(err.Error(), "tracks md container remote") {
-				t.Fatalf("resolveContainerBranchBase error = %v, want synthetic upstream error", err)
+			if _, err := repo.resolveContainerBranchBase(ctx, testLogger(t), "master"); err == nil || !strings.Contains(err.Error(), "git branch --set-upstream-to=origin/main master") {
+				t.Fatalf("resolveContainerBranchBase error = %v, want upstream repair command", err)
 			}
 		})
 		t.Run("default_branch_comes_from_remote", func(t *testing.T) {
