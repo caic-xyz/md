@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -762,6 +763,110 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			t.Fatalf("Diff error = %v, want missing host upstream error", err)
 		}
 	})
+	t.Run("diff_reports_stopped_container", func(t *testing.T) {
+		t.Parallel()
+		executable, err := os.Executable()
+		if err != nil {
+			t.Fatal(err)
+		}
+		logger := testLogger(t)
+		env := []string{
+			fakeRuntimeEnv + "=1",
+			fakeRuntimeLogEnv + "=" + filepath.Join(t.TempDir(), "runtime.log"),
+			fakeRuntimeStateEnv + "=exited",
+		}
+		ct := &Container{
+			Client: &Client{Home: t.TempDir(), Logger: logger, Runtime: testRuntime(t, executable, logger, env), env: env},
+			Logger: logger,
+			Name:   "md-test",
+			Repos:  []Repo{{Branches: []string{"main"}}},
+		}
+		err = ct.Diff(t.Context(), io.Discard, io.Discard, 0, nil)
+		if err == nil || err.Error() != "Container md-test is stopped. Restart it with: md start" {
+			t.Fatalf("Diff error = %v, want stopped-container guidance", err)
+		}
+	})
+	t.Run("diff_preserves_runtime_inspection_failure", func(t *testing.T) {
+		t.Parallel()
+		executable, err := os.Executable()
+		if err != nil {
+			t.Fatal(err)
+		}
+		logger := testLogger(t)
+		env := []string{
+			fakeRuntimeEnv + "=1",
+			fakeRuntimeErrorEnv + "=permission denied connecting to runtime socket",
+			fakeRuntimeLogEnv + "=" + filepath.Join(t.TempDir(), "runtime.log"),
+		}
+		ct := &Container{
+			Client: &Client{Home: t.TempDir(), Logger: logger, Runtime: testRuntime(t, executable, logger, env), env: env},
+			Logger: logger,
+			Name:   "md-test",
+			Repos:  []Repo{{Branches: []string{"main"}}},
+		}
+		err = ct.Diff(t.Context(), io.Discard, io.Discard, 0, nil)
+		if err == nil || !strings.Contains(err.Error(), `inspecting container "md-test"`) || !strings.Contains(err.Error(), "permission denied connecting to runtime socket") {
+			t.Fatalf("Diff error = %v, want runtime inspection diagnostic", err)
+		}
+		if exitErr, ok := errors.AsType[*exec.ExitError](err); !ok || exitErr.ExitCode() != 1 {
+			t.Fatalf("Diff error = %v, want wrapped runtime exit status 1", err)
+		}
+	})
+	t.Run("diff_preserves_upstream_ssh_failure", func(t *testing.T) {
+		ct, _, _ := setupPullTest(t)
+		t.Setenv(fakeSSHFailureMatchEnv, "branch.main.remote")
+		t.Setenv(fakeSSHFailureTextEnv, "ssh: connect to host md-test port 22: Connection refused")
+
+		err := ct.Diff(t.Context(), io.Discard, io.Discard, 0, nil)
+		if err == nil || !strings.Contains(err.Error(), "Connection refused") || strings.Contains(err.Error(), "has no configured upstream") {
+			t.Fatalf("Diff error = %v, want classified SSH failure", err)
+		}
+	})
+	t.Run("diff_preserves_upstream_path_failure", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
+		ct, _, _ := setupPullTest(t)
+		missingPath := filepath.ToSlash(filepath.Join(t.TempDir(), "missing"))
+		ct.Repos[0].ContainerPath = missingPath
+
+		err := ct.Diff(t.Context(), io.Discard, io.Discard, 0, nil)
+		if err == nil || !strings.Contains(err.Error(), missingPath) || strings.Contains(err.Error(), "has no configured upstream") {
+			t.Fatalf("Diff error = %v, want classified container path failure", err)
+		}
+	})
+	t.Run("diff_repairs_missing_and_malformed_container_upstreams", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
+		for _, test := range []struct {
+			name  string
+			setup func(*testing.T, string)
+		}{
+			{name: "missing", setup: func(t *testing.T, dir string) {
+				runTestGit(t, t.Context(), dir, "config", "--unset", "branch.main.remote")
+			}},
+			{name: "malformed", setup: func(t *testing.T, dir string) {
+				runTestGit(t, t.Context(), dir, "config", "branch.main.merge", "refs/tags/main")
+			}},
+		} {
+			t.Run(test.name, func(t *testing.T) { //nolint:paralleltest // setupPullTest uses t.Setenv.
+				ct, _, containerDir := setupPullTest(t)
+				test.setup(t, containerDir)
+				err := ct.Diff(t.Context(), io.Discard, io.Discard, 0, nil)
+				if err == nil || !strings.Contains(err.Error(), "run md pull or md push") {
+					t.Fatalf("Diff error = %v, want upstream repair guidance", err)
+				}
+			})
+		}
+	})
+	t.Run("diff_preserves_final_ssh_failure", func(t *testing.T) {
+		ct, _, _ := setupPullTest(t)
+		t.Setenv(fakeSSHFailureMatchEnv, "GIT_OPTIONAL_LOCKS=0")
+		t.Setenv(fakeSSHFailureTextEnv, "ssh: connection reset by peer")
+
+		err := ct.Diff(t.Context(), io.Discard, io.Discard, 0, nil)
+		if err == nil || !strings.Contains(err.Error(), `running diff in container "md-test" over SSH`) || !strings.Contains(err.Error(), "connection reset by peer") {
+			t.Fatalf("Diff error = %v, want final SSH diagnostic", err)
+		}
+		if exitErr, ok := errors.AsType[*exec.ExitError](err); !ok || exitErr.ExitCode() != 255 {
+			t.Fatalf("Diff error = %v, want wrapped SSH exit status 255", err)
+		}
+	})
 	t.Run("diff_rejects_changed_host_branch_upstream", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
 		ctx := t.Context()
 		ct, hostDir, containerDir := setupPullTest(t)
@@ -934,6 +1039,55 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 		t.Parallel()
 		if err := (&Container{}).pushContainerRefs(t.Context(), &Repo{}, nil); err != nil {
 			t.Fatal(err)
+		}
+	})
+	t.Run("sync_default_branch_preserves_push_diagnostic", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		hostDir := t.TempDir()
+		originDir := filepath.Join(t.TempDir(), "origin.git")
+		missingContainerDir := filepath.Join(t.TempDir(), "missing-container.git")
+		runTestGit(t, ctx, "", "init", "-q", "--bare", originDir)
+		runTestGit(t, ctx, hostDir, "init", "-q", "--initial-branch=main")
+		runTestGit(t, ctx, hostDir, "commit", "-q", "--allow-empty", "-m", "main")
+		runTestGit(t, ctx, hostDir, "remote", "add", "origin", originDir)
+		runTestGit(t, ctx, hostDir, "push", "-q", "-u", "origin", "main")
+		runTestGit(t, ctx, hostDir, "remote", "add", "md-test", missingContainerDir)
+
+		ct := &Container{
+			Client: testClient(t),
+			Logger: testLogger(t),
+			Name:   "md-test",
+			Repos: []Repo{{
+				GitRoot:       hostDir,
+				Branches:      []string{"main"},
+				DefaultRemote: "origin",
+				DefaultBranch: "main",
+			}},
+		}
+		err := ct.SyncDefaultBranch(ctx, 0)
+		if err == nil || !strings.Contains(err.Error(), hostDir) || !strings.Contains(err.Error(), `container "md-test"`) || !strings.Contains(err.Error(), "does not appear to be a git repository") {
+			t.Fatalf("SyncDefaultBranch error = %v, want repository/container context and Git stderr", err)
+		}
+	})
+	t.Run("sync_default_branch_contextualizes_source_ref_failure", func(t *testing.T) {
+		t.Parallel()
+		missingRepo := filepath.Join(t.TempDir(), "missing-repository")
+		ct := &Container{
+			Client: testClient(t),
+			Logger: testLogger(t),
+			Name:   "md-test",
+			Repos: []Repo{{
+				GitRoot:       missingRepo,
+				Branches:      []string{"main"},
+				Remotes:       []string{"origin"},
+				DefaultRemote: "origin",
+				DefaultBranch: "main",
+			}},
+		}
+		err := ct.SyncDefaultBranch(t.Context(), 0)
+		if err == nil || !strings.Contains(err.Error(), missingRepo) || !strings.Contains(err.Error(), `container "md-test"`) {
+			t.Fatalf("SyncDefaultBranch error = %v, want source repository/container context", err)
 		}
 	})
 	t.Run("pushRefspecs_skips_host_hooks", func(t *testing.T) {

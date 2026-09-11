@@ -7,10 +7,75 @@
 package containers
 
 import (
+	"bytes"
+	"errors"
+	"fmt"
+	"log/slog"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+const fakeBaseRunEnv = "MD_TEST_FAKE_BASE_RUN"
+
+func TestBaseRun(t *testing.T) {
+	if mode := os.Getenv(fakeBaseRunEnv); mode != "" {
+		_, _ = fmt.Fprintln(os.Stdout, "  runtime output  ")
+		if mode == "error" || mode == "echo-error" {
+			_, _ = fmt.Fprintln(os.Stderr, "  runtime unavailable  ")
+			if mode == "echo-error" {
+				_, _ = fmt.Fprintln(os.Stderr, strings.Join(os.Args, " "))
+			}
+			os.Exit(23)
+		}
+		os.Exit(0)
+	}
+	t.Parallel()
+
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var log bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&log, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	runtime, err := New(executable, logger, []string{fakeBaseRunEnv + "=success"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := runtime.Run(t.Context(), "", "-test.run=^TestBaseRun$", "--", "--password", "runtime-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "runtime output" {
+		t.Fatalf("Run output = %q, want trimmed runtime output", out)
+	}
+	if strings.Contains(log.String(), "runtime-secret") || !strings.Contains(log.String(), "<redacted>") {
+		t.Fatalf("Run log did not redact sensitive arguments: %s", log.String())
+	}
+
+	runtime, err = New(executable, nil, []string{fakeBaseRunEnv + "=error"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = runtime.Run(t.Context(), "", "-test.run=^TestBaseRun$")
+	if err == nil || !strings.Contains(err.Error(), "exit status 23") || !strings.Contains(err.Error(), "runtime unavailable") {
+		t.Fatalf("Run error = %v, want exit status and trimmed stderr", err)
+	}
+	if exitErr, ok := errors.AsType[*exec.ExitError](err); !ok || exitErr.ExitCode() != 23 {
+		t.Fatalf("Run error = %v, want wrapped exit status 23", err)
+	}
+
+	runtime, err = New(executable, nil, []string{fakeBaseRunEnv + "=echo-error"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = runtime.Run(t.Context(), "", "-test.run=^TestBaseRun$", "--", "--password", "runtime-secret", "--env", "API_TOKEN=assignment-secret")
+	if err == nil || strings.Contains(err.Error(), "runtime-secret") || strings.Contains(err.Error(), "assignment-secret") || !strings.Contains(err.Error(), "<redacted>") {
+		t.Fatalf("Run error leaked sensitive arguments: %v", err)
+	}
+}
 
 func TestNew(t *testing.T) {
 	t.Parallel()

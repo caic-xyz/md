@@ -30,9 +30,13 @@ import (
 
 const (
 	fakeRuntimeEnv          = "MD_TEST_FAKE_RUNTIME"
+	fakeRuntimeErrorEnv     = "MD_TEST_FAKE_RUNTIME_ERROR"
+	fakeRuntimeStateEnv     = "MD_TEST_FAKE_RUNTIME_STATE"
 	fakeRuntimeLocalBaseEnv = "MD_TEST_FAKE_RUNTIME_LOCAL_BASE"
 	fakeRuntimeLogEnv       = "MD_TEST_FAKE_RUNTIME_LOG"
 	fakeSSHEnv              = "MD_TEST_FAKE_SSH"
+	fakeSSHFailureMatchEnv  = "MD_TEST_FAKE_SSH_FAILURE_MATCH"
+	fakeSSHFailureTextEnv   = "MD_TEST_FAKE_SSH_FAILURE_TEXT"
 	fakeSSHLogEnv           = "MD_TEST_FAKE_SSH_LOG"
 )
 
@@ -54,7 +58,7 @@ func TestMain(m *testing.M) {
 		os.Exit(runFakeSSH(os.Args[1:]))
 	}
 	if os.Getenv(fakeRuntimeEnv) == "1" {
-		os.Exit(runFakeRuntime(os.Args[1:], os.Getenv(fakeRuntimeLogEnv), os.Getenv(fakeRuntimeLocalBaseEnv) == "1"))
+		os.Exit(runFakeRuntime(os.Args[1:], os.Getenv(fakeRuntimeLogEnv), os.Getenv(fakeRuntimeLocalBaseEnv) == "1", os.Getenv(fakeRuntimeStateEnv), os.Getenv(fakeRuntimeErrorEnv)))
 	}
 
 	dir, err := os.MkdirTemp("", "md-git-config-*")
@@ -870,6 +874,10 @@ func runFakeSSH(args []string) int {
 	if hostIndex+1 >= len(args) {
 		return 0
 	}
+	if match := os.Getenv(fakeSSHFailureMatchEnv); match != "" && strings.Contains(strings.Join(args[hostIndex+1:], " "), match) {
+		_, _ = fmt.Fprintln(os.Stderr, os.Getenv(fakeSSHFailureTextEnv))
+		return 255
+	}
 	cmd := exec.CommandContext(ctx, "bash", "-c", strings.Join(args[hostIndex+1:], " ")) //nolint:gosec // test fake executes trusted test commands.
 	cmd.Env = append(os.Environ(), "LANG=C")
 	cmd.Stdin = os.Stdin
@@ -886,13 +894,17 @@ func runFakeSSH(args []string) int {
 	return 0
 }
 
-func runFakeRuntime(args []string, logPath string, localBase bool) int {
+func runFakeRuntime(args []string, logPath string, localBase bool, containerState, runtimeError string) int {
 	if err := appendFakeCommandLog(logPath, args); err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "writing fake runtime log: %v\n", err)
 		return 1
 	}
 	if len(args) >= 2 && args[0] == "inspect" {
-		return fakeRuntimeContainerInspect(args)
+		if runtimeError != "" {
+			_, _ = fmt.Fprintln(os.Stderr, runtimeError)
+			return 1
+		}
+		return fakeRuntimeContainerInspect(args, containerState)
 	}
 	if len(args) >= 2 && args[0] == "image" && args[1] == "inspect" {
 		return fakeRuntimeInspect(args, localBase)
@@ -941,13 +953,16 @@ func writeFakeIIDFile(args []string, imageID string) error {
 	return nil
 }
 
-func fakeRuntimeContainerInspect(args []string) int {
+func fakeRuntimeContainerInspect(args []string, state string) int {
+	if state == "" {
+		state = "running"
+	}
 	if len(args) == 4 && args[1] == "md-test" && args[2] == "--format" && args[3] == "{{.Os}}/{{.Architecture}}" {
 		_, _ = fmt.Fprintln(os.Stdout, "linux/amd64")
 		return 0
 	}
 	if len(args) == 2 && args[1] == "md-test" {
-		_, _ = fmt.Fprintln(os.Stdout, `[{"Name":"/md-test","Id":"ctr","Image":"sha256:image","Platform":"linux","Config":{"Image":"base:latest","Labels":{}},"State":{"Status":"running"}}]`)
+		_, _ = fmt.Fprintf(os.Stdout, `[{"Name":"/md-test","Id":"ctr","Image":"sha256:image","Platform":"linux","Config":{"Image":"base:latest","Labels":{}},"State":{"Status":%q}}]`+"\n", state)
 		return 0
 	}
 	_, _ = fmt.Fprintf(os.Stderr, "unexpected inspect command: %s\n", strings.Join(args, " "))

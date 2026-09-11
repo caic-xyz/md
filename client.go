@@ -681,9 +681,24 @@ func cmdErrWithStderr(prefix string, err error) error {
 	if err == nil {
 		return nil
 	}
+	stderr := ""
 	exitErr, ok := errors.AsType[*exec.ExitError](err)
 	if ok && len(exitErr.Stderr) > 0 {
-		return fmt.Errorf("%s: %w\n%s", prefix, err, strings.TrimSpace(string(exitErr.Stderr)))
+		stderr = string(exitErr.Stderr)
+	}
+	return commandErrorWithStderr(prefix, err, stderr)
+}
+
+func commandErrorWithStderr(prefix string, err error, stderr string) error {
+	diagnostic := strings.TrimSpace(stderr)
+	if diagnostic != "" {
+		if prefix == "" {
+			return fmt.Errorf("%w: %s", err, diagnostic)
+		}
+		return fmt.Errorf("%s: %w: %s", prefix, err, diagnostic)
+	}
+	if prefix == "" {
+		return err
 	}
 	return fmt.Errorf("%s: %w", prefix, err)
 }

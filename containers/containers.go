@@ -88,6 +88,25 @@ func RedactCommandArgsForLog(args []string) []string {
 	return redacted
 }
 
+func redactCommandOutput(args []string, output string) string {
+	for i, redacted := range RedactCommandArgsForLog(args) {
+		original := args[i]
+		if original == redacted {
+			continue
+		}
+		if prefix, suffix, ok := strings.Cut(redacted, redactedLogValue); ok {
+			if strings.HasPrefix(original, prefix) && strings.HasSuffix(original, suffix) {
+				secret := original[len(prefix) : len(original)-len(suffix)]
+				if secret != "" {
+					output = strings.ReplaceAll(output, secret, redactedLogValue)
+				}
+			}
+		}
+		output = strings.ReplaceAll(output, original, redacted)
+	}
+	return output
+}
+
 // New returns a runtime wrapper for executable.
 func New(executable string, logger *slog.Logger, env []string) (Runtime, error) {
 	switch runtimeName(executable) {

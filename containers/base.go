@@ -51,7 +51,14 @@ func (b *base) Run(ctx context.Context, dir string, args ...string) (string, err
 	cmd := exec.CommandContext(ctx, b.executable, args...) //nolint:gosec // args are from trusted callers.
 	cmd.Dir = dir
 	cmd.Env = b.commandEnv("LANG=C")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 	out, err := cmd.Output()
+	if err != nil {
+		if diagnostic := strings.TrimSpace(redactCommandOutput(cmdArgs, stderr.String())); diagnostic != "" {
+			err = fmt.Errorf("%w: %s", err, diagnostic)
+		}
+	}
 	return strings.TrimSpace(string(out)), err
 }
 

@@ -1551,8 +1551,17 @@ func (c *Container) Diff(ctx context.Context, stdout, stderr io.Writer, repoIdx 
 	cmd.Path = sshPath
 	cmd.Args = sshArgs
 	cmd.Stdout = stdout
-	cmd.Stderr = stderr
-	return cmd.Run()
+	var sshStderr bytes.Buffer
+	cmd.Stderr = &sshStderr
+	if err := cmd.Run(); err != nil {
+		return commandErrorWithStderr(fmt.Sprintf("running diff in container %q over SSH", c.Name), err, sshStderr.String())
+	}
+	if stderr != nil {
+		if _, err := stderr.Write(sshStderr.Bytes()); err != nil {
+			return fmt.Errorf("writing SSH stderr: %w", err)
+		}
+	}
+	return nil
 }
 
 func gitDiffCommand(repo, primaryBranch, defaultRemote, defaultBranch string, extraArgs []string, exitOnDiff bool) string {
@@ -2088,10 +2097,10 @@ func (c *Container) SyncDefaultBranch(ctx context.Context, repoIdx int) error {
 func (c *Container) syncRepoRefs(ctx context.Context, r *Repo) error {
 	refspecs, err := r.containerSyncRefspecs(ctx, c.Logger)
 	if err != nil {
-		return err
+		return fmt.Errorf("selecting refs from repository %q for container %q: %w", r.GitRoot, c.Name, err)
 	}
 	if err := c.pushContainerRefs(ctx, r, refspecs); err != nil {
-		return fmt.Errorf("sync refs %q: %w", refspecs, err)
+		return fmt.Errorf("syncing refs %q from repository %q to container %q: %w", refspecs, r.GitRoot, c.Name, err)
 	}
 	return nil
 }
@@ -2099,23 +2108,30 @@ func (c *Container) syncRepoRefs(ctx context.Context, r *Repo) error {
 func (c *Container) containerBranchUpstream(ctx context.Context, repoIdx int, branch string) (branchUpstreamSpec, error) {
 	r := &c.Repos[repoIdx]
 	prefix := "branch." + branch
-	command := "cd " + shellQuote(r.ContainerPath) +
-		" && remote=$(git config --get " + shellQuote(prefix+".remote") + ")" +
-		" && merge=$(git config --get " + shellQuote(prefix+".merge") + ")" +
-		` && printf '%s\0%s' "$remote" "$merge"`
+	command := "cd " + shellQuote(r.ContainerPath) + " || exit $?; " +
+		"remote=$(git config --local --get " + shellQuote(prefix+".remote") + "); status=$?; " +
+		`if [ "$status" -eq 1 ]; then printf missing; exit 0; fi; ` +
+		`if [ "$status" -ne 0 ]; then exit "$status"; fi; ` +
+		"merge=$(git config --local --get " + shellQuote(prefix+".merge") + "); status=$?; " +
+		`if [ "$status" -eq 1 ]; then printf missing; exit 0; fi; ` +
+		`if [ "$status" -ne 0 ]; then exit "$status"; fi; ` +
+		`printf 'configured\0%s\0%s' "$remote" "$merge"`
 	out, err := c.runCmd(ctx, "", c.SSHCommand(nil, command))
 	if err != nil {
-		return branchUpstreamSpec{}, fmt.Errorf("container branch %q has no configured upstream; run md pull or md push to synchronize it: %w", branch, err)
+		return branchUpstreamSpec{}, fmt.Errorf("inspecting upstream for branch %q in repository %q via SSH to container %q: %w", branch, r.ContainerPath, c.Name, err)
+	}
+	if out == "missing" {
+		return branchUpstreamSpec{}, fmt.Errorf("container branch %q has no configured upstream; run md pull or md push to synchronize it", branch)
 	}
 	fields := strings.Split(out, "\x00")
-	if len(fields) != 2 || fields[0] == "" {
-		return branchUpstreamSpec{}, fmt.Errorf("invalid container upstream for mapped branch %q: %q", branch, out)
+	if len(fields) != 3 || fields[0] != "configured" || fields[1] == "" {
+		return branchUpstreamSpec{}, fmt.Errorf("invalid container upstream for mapped branch %q: %q; run md pull or md push to synchronize it", branch, out)
 	}
-	upstreamBranch, ok := strings.CutPrefix(fields[1], "refs/heads/")
+	upstreamBranch, ok := strings.CutPrefix(fields[2], "refs/heads/")
 	if !ok || upstreamBranch == "" {
-		return branchUpstreamSpec{}, fmt.Errorf("invalid container upstream ref for mapped branch %q: %q", branch, fields[1])
+		return branchUpstreamSpec{}, fmt.Errorf("invalid container upstream ref for mapped branch %q: %q; run md pull or md push to synchronize it", branch, fields[2])
 	}
-	return branchUpstreamSpec{remote: fields[0], branch: upstreamBranch}, nil
+	return branchUpstreamSpec{remote: fields[1], branch: upstreamBranch}, nil
 }
 
 func (c *Container) validateContainerBranchUpstreams(ctx context.Context, repoIdx int) error {
@@ -2362,7 +2378,11 @@ func (c *Container) pushContainerRefs(ctx context.Context, r *Repo, refspecs []s
 	if len(refspecs) == 0 {
 		return nil
 	}
-	return c.pushRefspecs(ctx, r.GitRoot, c.Name, refspecs, true, io.Discard, io.Discard)
+	var stderr bytes.Buffer
+	if err := c.pushRefspecs(ctx, r.GitRoot, c.Name, refspecs, true, io.Discard, &stderr); err != nil {
+		return commandErrorWithStderr("pushing refs", err, stderr.String())
+	}
+	return nil
 }
 
 // pushRefspecs pushes refspecs in command-line-size-bounded batches. It
@@ -2776,8 +2796,17 @@ func (c *Container) gatherGitDiff(ctx context.Context, r *Repo) string {
 }
 
 func (c *Container) checkContainerState(ctx context.Context) error {
-	_, containerErr := c.Runtime.Run(ctx, "", "inspect", c.Name)
-	containerExists := containerErr == nil
+	inspectOutput, err := c.Runtime.Run(ctx, "", "inspect", c.Name)
+	if err != nil {
+		return fmt.Errorf("inspecting container %q with %s: %w", c.Name, c.Runtime.Name(), err)
+	}
+	state := c.State
+	if inspected, err := containers.ParseInspectContainer([]byte(inspectOutput)); err == nil {
+		state = inspected.State
+	}
+	if state != "" && state != "running" {
+		return fmt.Errorf("Container %s is stopped. Restart it with: md start", c.Name)
+	}
 	var remoteExists bool
 	if len(c.Repos) > 0 {
 		_, remoteErr := c.runCmd(ctx, c.Repos[0].GitRoot, []string{"git", "remote", "get-url", c.Name})
@@ -2787,16 +2816,7 @@ func (c *Container) checkContainerState(ctx context.Context) error {
 	_, sshErr := os.Stat(filepath.Join(sshConfigDir, c.Name+".conf"))
 	sshExists := sshErr == nil
 
-	if !containerExists && !remoteExists && !sshExists {
-		if len(c.Repos) > 0 {
-			return fmt.Errorf("no container running for branch '%s'.\nStart a container with: md start", c.Repos[0].Branches[0])
-		}
-		return fmt.Errorf("container %s not found.\nStart a container with: md start", c.Name)
-	}
 	var issues []string
-	if !containerExists {
-		issues = append(issues, "Docker container is not running")
-	}
 	if len(c.Repos) > 0 && !remoteExists {
 		issues = append(issues, "Git remote is missing")
 	}
@@ -2884,7 +2904,12 @@ func (c *Container) runCmd(ctx context.Context, dir string, args []string) (stri
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...) //nolint:gosec // args are from trusted callers
 	cmd.Dir = dir
 	cmd.Env = c.commandEnv("LANG=C")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 	out, err := cmd.Output()
+	if err != nil {
+		err = commandErrorWithStderr("", err, stderr.String())
+	}
 	return strings.TrimSpace(string(out)), err
 }
 
