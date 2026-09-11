@@ -124,6 +124,7 @@ func gitDiffBaseRefCommand(primaryBranch, defaultRemote, defaultBranch string) s
 	return gitBaseRefCommandPrefix + `	current_branch=$(git branch --show-current)
 	if [ -z "$current_branch" ]; then
 		echo 'cannot run md diff: HEAD is detached and has no upstream branch configured' >&2
+		echo ` + shellQuote("Switch to the container's primary branch: git switch "+primaryBranchCommand) + ` >&2
 	elif [ "$current_branch" = ` + primaryBranchRef + ` ]; then
 		echo ` + shellQuote(`primary branch "`+primaryBranch+`" has no upstream branch configured`) + ` >&2
 		echo ` + shellQuote("Configure it: git branch --set-upstream-to="+defaultBranchCommand+" "+primaryBranchCommand) + ` >&2
@@ -300,13 +301,15 @@ func (r *Repo) resolveDefaults(ctx context.Context, logger *slog.Logger) error {
 			return err
 		}
 	}
+	var upstreamEvidenceErr error
 	if r.DefaultRemote == "" {
 		// A local default branch's upstream is stronger evidence of the
 		// canonical remote than the conventional "origin", especially for forks.
 		for _, branch := range []string{"main", "master"} {
 			remote, _, ok, err := r.branchUpstream(ctx, logger, branch)
 			if err != nil {
-				return fmt.Errorf("read upstream for default branch %q: %w", branch, err)
+				upstreamEvidenceErr = errors.Join(upstreamEvidenceErr, fmt.Errorf("read upstream for default branch %q: %w", branch, err))
+				continue
 			}
 			if ok && remote != "." && slices.Contains(r.Remotes, remote) {
 				r.DefaultRemote = remote
@@ -321,7 +324,7 @@ func (r *Repo) resolveDefaults(ctx context.Context, logger *slog.Logger) error {
 		case slices.Contains(r.Remotes, "origin"):
 			r.DefaultRemote = "origin"
 		default:
-			return fmt.Errorf("multiple remotes and no %q", "origin")
+			return errors.Join(fmt.Errorf("multiple remotes and no %q", "origin"), upstreamEvidenceErr)
 		}
 	}
 	if len(r.Remotes) == 0 {
@@ -333,7 +336,9 @@ func (r *Repo) resolveDefaults(ctx context.Context, logger *slog.Logger) error {
 	for _, branch := range r.Branches {
 		remote, _, ok, err := r.branchUpstream(ctx, logger, branch)
 		if err != nil {
-			return err
+			// Mapped-branch validation reports malformed upstream metadata with
+			// repository-default repair guidance after defaults are resolved.
+			continue
 		}
 		if ok && remote != "." && !slices.Contains(r.Remotes, remote) && !r.isMDTransportRemote(ctx, g, remote) {
 			r.Remotes = append(r.Remotes, remote)
@@ -409,7 +414,7 @@ func (r *Repo) containerSyncRefspecs(ctx context.Context, logger *slog.Logger) (
 			return nil, fmt.Errorf("check local upstream for mapped branch %q: %w", branch, err)
 		}
 		if !exists {
-			return nil, fmt.Errorf("mapped host branch %q tracks missing local branch %q", branch, upstreamBranch)
+			return nil, r.upstreamRepairError(ctx, g, branch, fmt.Sprintf("mapped host branch %q tracks missing local branch %q", branch, upstreamBranch))
 		}
 		refspecs = appendUniqueRefspecs(refspecs, upstreamRef+":"+upstreamRef)
 	}
@@ -518,23 +523,67 @@ func (r *Repo) requiredMappedBranchUpstream(ctx context.Context, logger *slog.Lo
 		return "", "", fmt.Errorf("checking mapped host branch %q: %w", branch, err)
 	}
 	if !exists {
-		return "", "", fmt.Errorf("mapped host branch %q no longer exists; recreate it or remove the mapping before using md", branch)
+		problem := fmt.Sprintf("mapped host branch %q no longer exists", branch)
+		if command, reason, ok := r.defaultBranchCommand(ctx, g, branch); ok {
+			return "", "", fmt.Errorf("%s; recreate it from the repository default with: %s", problem, command)
+		} else {
+			return "", "", fmt.Errorf("%s; cannot derive a safe start point because %s; choose a start point and recreate the branch before using md", problem, reason)
+		}
 	}
 	remote, upstreamBranch, ok, err := r.branchUpstream(ctx, logger, branch)
 	if err != nil {
-		return "", "", err
+		return "", "", r.upstreamRepairError(ctx, g, branch, err.Error())
 	}
 	if !ok {
-		return "", "", fmt.Errorf("mapped host branch %q has no upstream; configure an upstream before using md", branch)
+		return "", "", r.upstreamRepairError(ctx, g, branch, fmt.Sprintf("mapped host branch %q has no upstream", branch))
 	}
 	if r.isMDTransportRemote(ctx, g, remote) {
-		command := shellQuoteArgs([]string{"git", "branch", "--set-upstream-to=" + r.DefaultRemote + "/" + r.DefaultBranch, branch})
-		return "", "", fmt.Errorf("mapped host branch %q tracks md container remote %q; to track the repository's default branch instead, run: %s", branch, remote, command)
+		return "", "", r.upstreamRepairError(ctx, g, branch, fmt.Sprintf("mapped host branch %q tracks md container remote %q", branch, remote))
 	}
 	if len(r.Branches) > 1 && branch != r.Branches[0] && remote == "." && upstreamBranch == r.Branches[0] {
-		return "", "", fmt.Errorf("mapped host branch %q tracks primary branch %q locally; configure a different upstream before using md", branch, r.Branches[0])
+		return "", "", r.upstreamRepairError(ctx, g, branch, fmt.Sprintf("mapped host branch %q tracks primary branch %q locally", branch, r.Branches[0]))
 	}
 	return remote, upstreamBranch, nil
+}
+
+func (r *Repo) usableDefaultUpstream(ctx context.Context, g *git.Checkout) (upstream, reason string, ok bool) {
+	if r.DefaultRemote == "" || r.DefaultBranch == "" {
+		return "", "the repository default is incomplete", false
+	}
+	remotes, err := g.Remotes(ctx)
+	if err != nil {
+		return "", fmt.Sprintf("configured remotes could not be read: %v", err), false
+	}
+	if !slices.Contains(remotes, r.DefaultRemote) {
+		return "", fmt.Sprintf("the recorded default remote %q is not configured", r.DefaultRemote), false
+	}
+	upstream = r.DefaultRemote + "/" + r.DefaultBranch
+	exists, err := g.RefExists(ctx, remoteTrackingRef(r.DefaultRemote, r.DefaultBranch))
+	if err != nil {
+		return "", fmt.Sprintf("the default remote-tracking branch %q could not be checked: %v", upstream, err), false
+	}
+	if !exists {
+		return "", fmt.Sprintf("the default remote-tracking branch %q does not exist", upstream), false
+	}
+	return upstream, "", true
+}
+
+func (r *Repo) defaultBranchCommand(ctx context.Context, g *git.Checkout, branch string) (command, reason string, ok bool) {
+	upstream, reason, ok := r.usableDefaultUpstream(ctx, g)
+	if !ok {
+		return "", reason, false
+	}
+	command = shellQuoteArgs([]string{"git", "-C", r.GitRoot, "branch", "--track", branch, upstream})
+	return command, "", true
+}
+
+func (r *Repo) upstreamRepairError(ctx context.Context, g *git.Checkout, branch, problem string) error {
+	upstream, reason, ok := r.usableDefaultUpstream(ctx, g)
+	if !ok {
+		return fmt.Errorf("%s; cannot derive a safe upstream because %s; choose a remote branch and configure it as the upstream before using md", problem, reason)
+	}
+	command := shellQuoteArgs([]string{"git", "-C", r.GitRoot, "branch", "--set-upstream-to=" + upstream, branch})
+	return fmt.Errorf("%s; to track the repository default %q instead, run: %s", problem, upstream, command)
 }
 
 func (r *Repo) validateMappedBranchUpstreams(ctx context.Context, logger *slog.Logger) error {
@@ -1523,7 +1572,12 @@ func (c *Container) Diff(ctx context.Context, stdout, stderr io.Writer, repoIdx 
 	if err := c.checkContainerState(ctx); err != nil {
 		return err
 	}
-	repo := c.Repos[repoIdx]
+	repo := &c.Repos[repoIdx]
+	if repo.DefaultRemote == "" || repo.DefaultBranch == "" {
+		if err := repo.resolveDefaults(ctx, c.Logger); err != nil {
+			return fmt.Errorf("resolving repository defaults for %q: %w", repo.GitRoot, err)
+		}
+	}
 	if err := c.validateContainerBranchUpstreams(ctx, repoIdx); err != nil {
 		return err
 	}

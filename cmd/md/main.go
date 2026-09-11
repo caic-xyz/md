@@ -279,8 +279,9 @@ func (a *app) availableRuntimes() ([]containers.Runtime, error) {
 // findContainerAndRepo searches all containers for one that contains the
 // repo identified by cf (defaults to cwd). Returns the container and the
 // index of the matched repo within it. If cf.branch is set, it is used to
-// disambiguate when multiple containers share the same git root.
-func (a *app) findContainerAndRepo(ctx context.Context, cf *containerFlags) (*md.Container, int, error) {
+// disambiguate when multiple containers share the same git root. command is
+// the calling subcommand and is used only for recovery guidance.
+func (a *app) findContainerAndRepo(ctx context.Context, cf *containerFlags, command string) (*md.Container, int, error) {
 	c, err := a.newClient()
 	if err != nil {
 		return nil, 0, err
@@ -326,7 +327,14 @@ func (a *app) findContainerAndRepo(ctx context.Context, cf *containerFlags) (*md
 	}
 	switch len(matched) {
 	case 0:
-		return nil, 0, fmt.Errorf("no container found for %s", g.Root)
+		branchExists := false
+		if branch != "" {
+			branchExists, err = g.RefExists(ctx, "refs/heads/"+branch)
+			if err != nil {
+				return nil, 0, fmt.Errorf("checking local branch %q: %w", branch, err)
+			}
+		}
+		return nil, 0, noMatchingContainerError(g.Root, branch, branchExists, command, cts)
 	case 1:
 		return matched[0], matchedIdx[0], nil
 	default:
@@ -336,6 +344,41 @@ func (a *app) findContainerAndRepo(ctx context.Context, cf *containerFlags) (*md
 		}
 		return nil, 0, fmt.Errorf("multiple containers match %s: %s; use -branch to disambiguate", g.Root, strings.Join(names, ", "))
 	}
+}
+
+func noMatchingContainerError(gitRoot, branch string, branchExists bool, command string, cts []*md.Container) error {
+	mappedSet := map[string]struct{}{}
+	for _, ct := range cts {
+		for i := range ct.Repos {
+			repo := &ct.Repos[i]
+			if repo.GitRoot != gitRoot {
+				continue
+			}
+			for _, mappedBranch := range repo.Branches {
+				mappedSet[mappedBranch] = struct{}{}
+			}
+		}
+	}
+	prefix := fmt.Sprintf("no container found for repository %q", gitRoot)
+	if branch != "" {
+		prefix += fmt.Sprintf(" and branch %q", branch)
+	}
+	if len(mappedSet) == 0 {
+		if branch == "" {
+			return fmt.Errorf("%s; HEAD is detached, so switch to or specify an existing local branch before starting a container", prefix)
+		}
+		if !branchExists {
+			return fmt.Errorf("%s; local branch %q does not exist; create it or choose an existing branch before starting a container", prefix, branch)
+		}
+		args := []string{"md", "start", "-repo=" + gitRoot, "-branch=" + branch}
+		return fmt.Errorf("%s; start one with: %s", prefix, shellQuoteArgs(args))
+	}
+	mapped := slices.Sorted(maps.Keys(mappedSet))
+	commands := make([]string, len(mapped))
+	for i, mappedBranch := range mapped {
+		commands[i] = shellQuoteArgs([]string{"md", command, "-repo=" + gitRoot, "-branch=" + mappedBranch})
+	}
+	return fmt.Errorf("%s; containers exist for other mapped branches; choose one with:\n  %s", prefix, strings.Join(commands, "\n  "))
 }
 
 // newContainer resolves a Container from flags. extraRepoSpecs holds
@@ -1070,7 +1113,7 @@ func (a *app) cmdStop(ctx context.Context, args []string) error {
 		}
 		return ct.Stop(ctx)
 	}
-	ct, _, err := a.findContainerAndRepo(ctx, cf)
+	ct, _, err := a.findContainerAndRepo(ctx, cf, "stop")
 	if err != nil {
 		return err
 	}
@@ -1101,7 +1144,7 @@ func (a *app) cmdPurge(ctx context.Context, args []string) error {
 		}
 		return ct.Purge(ctx, os.Stdout, os.Stderr)
 	}
-	ct, _, err := a.findContainerAndRepo(ctx, cf)
+	ct, _, err := a.findContainerAndRepo(ctx, cf, "purge")
 	if err != nil {
 		return err
 	}
@@ -1120,7 +1163,7 @@ func (a *app) cmdPush(ctx context.Context, args []string) error {
 	if err := checkArgs(fs, 0); err != nil {
 		return err
 	}
-	ct, repoIdx, err := a.findContainerAndRepo(ctx, cf)
+	ct, repoIdx, err := a.findContainerAndRepo(ctx, cf, "push")
 	if err != nil {
 		return err
 	}
@@ -1169,7 +1212,7 @@ func (a *app) cmdPull(ctx context.Context, args []string) error {
 	if err := checkArgs(fs, 0); err != nil {
 		return err
 	}
-	ct, repoIdx, err := a.findContainerAndRepo(ctx, cf)
+	ct, repoIdx, err := a.findContainerAndRepo(ctx, cf, "pull")
 	if err != nil {
 		return err
 	}
@@ -1228,7 +1271,7 @@ func (a *app) cmdDiff(ctx context.Context, args []string) error {
 		return err
 	}
 	initLogging(*verbose)
-	ct, repoIdx, err := a.findContainerAndRepo(ctx, cf)
+	ct, repoIdx, err := a.findContainerAndRepo(ctx, cf, "diff")
 	if err != nil {
 		return err
 	}
@@ -1334,7 +1377,7 @@ func (a *app) cmdFork(ctx context.Context, args []string) error {
 		}
 	} else {
 		var err error
-		sourceCt, _, err = a.findContainerAndRepo(ctx, cf)
+		sourceCt, _, err = a.findContainerAndRepo(ctx, cf, "fork")
 		if err != nil {
 			return err
 		}
@@ -1439,7 +1482,7 @@ func (a *app) cmdVNC(ctx context.Context, args []string) error {
 		}
 	} else {
 		var err error
-		ct, _, err = a.findContainerAndRepo(ctx, cf)
+		ct, _, err = a.findContainerAndRepo(ctx, cf, "vnc")
 		if err != nil {
 			return err
 		}
@@ -1512,7 +1555,7 @@ func (a *app) cmdSudoPassword(ctx context.Context, args []string) error {
 		}
 	} else {
 		var err error
-		ct, _, err = a.findContainerAndRepo(ctx, cf)
+		ct, _, err = a.findContainerAndRepo(ctx, cf, "sudo-password")
 		if err != nil {
 			return err
 		}

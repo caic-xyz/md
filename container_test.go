@@ -515,6 +515,30 @@ func TestDiff(t *testing.T) {
 			}
 		}
 	})
+	t.Run("error_detached_head_suggests_primary_branch", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		dir := t.TempDir()
+		runTestGit(t, ctx, dir, "init", "-q", "--initial-branch=caic-1")
+		runTestGit(t, ctx, dir, "commit", "-q", "--allow-empty", "-m", "base")
+		runTestGit(t, ctx, dir, "switch", "-q", "--detach")
+
+		cmd := exec.CommandContext(ctx, "bash", "-c", gitDiffCommand(dir, "caic-1", "origin", "main", nil, false)) //nolint:gosec // repo path is a test temp dir
+		cmd.Env = append(os.Environ(), "LANG=C")
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err == nil {
+			t.Fatal("diff command unexpectedly succeeded")
+		}
+		for _, want := range []string{
+			"HEAD is detached",
+			"git switch caic-1",
+		} {
+			if !strings.Contains(stderr.String(), want) {
+				t.Errorf("error missing %q:\n%s", want, stderr.String())
+			}
+		}
+	})
 }
 
 func TestPlanFork(t *testing.T) {
@@ -759,8 +783,189 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 		runTestGit(t, ctx, hostDir, "branch", "--unset-upstream", "main")
 
 		err := ct.Diff(ctx, io.Discard, io.Discard, 0, nil)
-		if err == nil || !strings.Contains(err.Error(), `mapped host branch "main" has no upstream`) {
-			t.Fatalf("Diff error = %v, want missing host upstream error", err)
+		if err == nil || !strings.Contains(err.Error(), `mapped host branch "main" has no upstream`) || !strings.Contains(err.Error(), "git -C "+shellQuote(hostDir)+" branch --set-upstream-to=origin/main main") {
+			t.Fatalf("Diff error = %v, want missing host upstream repair command", err)
+		}
+	})
+	t.Run("host_upstream_repair_command_targets_mapped_repo", func(t *testing.T) { //nolint:paralleltest // setupPullTest uses t.Setenv.
+		ct, hostDir, _ := setupPullTest(t)
+		runTestGit(t, t.Context(), hostDir, "branch", "--unset-upstream", "main")
+
+		_, _, err := ct.Repos[0].requiredMappedBranchUpstream(t.Context(), ct.Logger, "main")
+		if err == nil {
+			t.Fatal("requiredMappedBranchUpstream error = nil, want repair guidance")
+		}
+		_, command, ok := strings.Cut(err.Error(), "run: ")
+		if !ok {
+			t.Fatalf("repair command missing from error: %v", err)
+		}
+		cmd := exec.CommandContext(t.Context(), "bash", "-c", command) //nolint:gosec // generated command is the value under test.
+		cmd.Dir = t.TempDir()
+		if out, runErr := cmd.CombinedOutput(); runErr != nil {
+			t.Fatalf("repair command failed outside mapped repo: %v\n%s", runErr, out)
+		}
+		if got := runTestGit(t, t.Context(), hostDir, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "main@{upstream}"); got != "origin/main" {
+			t.Fatalf("repaired upstream = %q, want origin/main", got)
+		}
+	})
+	t.Run("host_upstream_repair_requires_usable_default", func(t *testing.T) {
+		t.Parallel()
+		for _, test := range []struct {
+			name        string
+			configure   func(*testing.T, string)
+			wantProblem string
+		}{
+			{
+				name:        "recorded_remote_missing",
+				configure:   func(*testing.T, string) {},
+				wantProblem: "no git remotes configured",
+			},
+			{
+				name: "remote_tracking_ref_missing",
+				configure: func(t *testing.T, dir string) {
+					runTestGit(t, t.Context(), dir, "remote", "add", "origin", "/dev/null")
+				},
+				wantProblem: "does not exist",
+			},
+		} {
+			t.Run(test.name, func(t *testing.T) {
+				t.Parallel()
+				dir := t.TempDir()
+				runTestGit(t, t.Context(), dir, "init", "-q", "--initial-branch=main")
+				runTestGit(t, t.Context(), dir, "commit", "-q", "--allow-empty", "-m", "main")
+				test.configure(t, dir)
+				repo := Repo{
+					GitRoot:       dir,
+					Branches:      []string{"main"},
+					Remotes:       []string{"origin"},
+					DefaultRemote: "origin",
+					DefaultBranch: "main",
+				}
+
+				_, _, err := repo.requiredMappedBranchUpstream(t.Context(), testLogger(t), "main")
+				if err == nil || !strings.Contains(err.Error(), test.wantProblem) || !strings.Contains(err.Error(), "choose a remote branch") {
+					t.Fatalf("requiredMappedBranchUpstream error = %v, want %q and explicit choice", err, test.wantProblem)
+				}
+				if strings.Contains(err.Error(), "run:") {
+					t.Fatalf("error suggests an unusable command: %v", err)
+				}
+			})
+		}
+	})
+	t.Run("diff_guides_mapped_host_branch_repairs", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
+		for _, test := range []struct {
+			name        string
+			setup       func(*testing.T, *Container, string, string)
+			wantProblem string
+			commandArgs []string
+		}{
+			{
+				name: "deleted_branch",
+				setup: func(t *testing.T, _ *Container, hostDir, _ string) {
+					runTestGit(t, t.Context(), hostDir, "switch", "-q", "--detach")
+					runTestGit(t, t.Context(), hostDir, "branch", "-D", "main")
+				},
+				wantProblem: `mapped host branch "main" no longer exists`,
+				commandArgs: []string{"branch", "--track", "main", "origin/main"},
+			},
+			{
+				name: "incomplete_upstream",
+				setup: func(t *testing.T, ct *Container, hostDir, _ string) {
+					ct.Repos[0].Remotes = nil
+					ct.Repos[0].DefaultRemote = ""
+					ct.Repos[0].DefaultBranch = ""
+					runTestGit(t, t.Context(), hostDir, "config", "--unset", "branch.main.merge")
+				},
+				wantProblem: `incomplete upstream configuration for branch "main"`,
+				commandArgs: []string{"branch", "--set-upstream-to=origin/main", "main"},
+			},
+			{
+				name: "invalid_upstream",
+				setup: func(t *testing.T, ct *Container, hostDir, _ string) {
+					ct.Repos[0].Remotes = nil
+					ct.Repos[0].DefaultRemote = ""
+					ct.Repos[0].DefaultBranch = ""
+					runTestGit(t, t.Context(), hostDir, "config", "branch.main.merge", "refs/tags/main")
+				},
+				wantProblem: `invalid upstream ref for branch "main": "refs/tags/main"`,
+				commandArgs: []string{"branch", "--set-upstream-to=origin/main", "main"},
+			},
+			{
+				name: "md_transport_upstream",
+				setup: func(t *testing.T, ct *Container, hostDir, _ string) {
+					runTestGit(t, t.Context(), hostDir, "config", "branch.main.remote", "md-test")
+					runTestGit(t, t.Context(), hostDir, "remote", "set-url", "md-test", "user@md-test:"+ct.Repos[0].ContainerPath)
+				},
+				wantProblem: `mapped host branch "main" tracks md container remote "md-test"`,
+				commandArgs: []string{"branch", "--set-upstream-to=origin/main", "main"},
+			},
+			{
+				name: "missing_local_upstream",
+				setup: func(t *testing.T, _ *Container, hostDir, containerDir string) {
+					for _, dir := range []string{hostDir, containerDir} {
+						runTestGit(t, t.Context(), dir, "config", "branch.main.remote", ".")
+						runTestGit(t, t.Context(), dir, "config", "branch.main.merge", "refs/heads/missing")
+					}
+				},
+				wantProblem: `mapped host branch "main" tracks missing local branch "missing"`,
+				commandArgs: []string{"branch", "--set-upstream-to=origin/main", "main"},
+			},
+		} {
+			t.Run(test.name, func(t *testing.T) { //nolint:paralleltest // setupPullTest uses t.Setenv.
+				ct, hostDir, containerDir := setupPullTest(t)
+				test.setup(t, ct, hostDir, containerDir)
+				err := ct.Diff(t.Context(), io.Discard, io.Discard, 0, nil)
+				wantCommand := shellQuoteArgs(append([]string{"git", "-C", hostDir}, test.commandArgs...))
+				if err == nil || !strings.Contains(err.Error(), test.wantProblem) || !strings.Contains(err.Error(), wantCommand) {
+					t.Fatalf("Diff error = %v, want problem %q and command %q", err, test.wantProblem, wantCommand)
+				}
+			})
+		}
+	})
+	t.Run("diff_guides_secondary_branch_away_from_primary", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
+		ct, hostDir, _ := setupMultiBranchPullTest(t)
+		runTestGit(t, t.Context(), hostDir, "config", "branch.feature.remote", ".")
+		runTestGit(t, t.Context(), hostDir, "config", "branch.feature.merge", "refs/heads/main")
+
+		err := ct.Diff(t.Context(), io.Discard, io.Discard, 0, nil)
+		wantCommand := shellQuoteArgs([]string{"git", "-C", hostDir, "branch", "--set-upstream-to=origin/main", "feature"})
+		if err == nil || !strings.Contains(err.Error(), `mapped host branch "feature" tracks primary branch "main" locally`) || !strings.Contains(err.Error(), wantCommand) {
+			t.Fatalf("Diff error = %v, want local-primary repair command", err)
+		}
+	})
+	t.Run("diff_resolves_legacy_defaults_before_host_upstream_validation", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
+		ct, hostDir, _ := setupPullTest(t)
+		ct.Repos[0].Remotes = nil
+		ct.Repos[0].DefaultRemote = ""
+		ct.Repos[0].DefaultBranch = ""
+		runTestGit(t, t.Context(), hostDir, "config", "branch.main.remote", "md-test")
+		runTestGit(t, t.Context(), hostDir, "remote", "set-url", "md-test", "user@md-test:"+ct.Repos[0].ContainerPath)
+
+		err := ct.Diff(t.Context(), io.Discard, io.Discard, 0, nil)
+		wantCommand := shellQuoteArgs([]string{"git", "-C", hostDir, "branch", "--set-upstream-to=origin/main", "main"})
+		if err == nil || !strings.Contains(err.Error(), wantCommand) {
+			t.Fatalf("Diff error = %v, want resolved legacy default repair command", err)
+		}
+		if strings.Contains(err.Error(), "--set-upstream-to=/") {
+			t.Fatalf("Diff error contains malformed repair command: %v", err)
+		}
+	})
+	t.Run("diff_preserves_ambiguous_legacy_default_diagnostic", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
+		ct, hostDir, _ := setupPullTest(t)
+		runTestGit(t, t.Context(), hostDir, "remote", "rename", "origin", "first")
+		runTestGit(t, t.Context(), hostDir, "remote", "add", "second", "/dev/null")
+		runTestGit(t, t.Context(), hostDir, "config", "branch.main.remote", "md-test")
+		runTestGit(t, t.Context(), hostDir, "remote", "set-url", "md-test", "user@md-test:"+ct.Repos[0].ContainerPath)
+		ct.Repos[0].Remotes = nil
+		ct.Repos[0].DefaultRemote = ""
+		ct.Repos[0].DefaultBranch = ""
+
+		err := ct.Diff(t.Context(), io.Discard, io.Discard, 0, nil)
+		if err == nil || !strings.Contains(err.Error(), `multiple remotes and no "origin"`) {
+			t.Fatalf("Diff error = %v, want ambiguous default diagnostic", err)
+		}
+		if strings.Contains(err.Error(), "--set-upstream-to=/") {
+			t.Fatalf("Diff error contains malformed repair command: %v", err)
 		}
 	})
 	t.Run("diff_reports_stopped_container", func(t *testing.T) {
@@ -3202,7 +3407,8 @@ func TestRepo(t *testing.T) {
 			if want := []string{"origin"}; !slices.Equal(repo.Remotes, want) {
 				t.Fatalf("remotes = %v, want %v", repo.Remotes, want)
 			}
-			if _, err := repo.resolveContainerBranchBase(ctx, testLogger(t), "master"); err == nil || !strings.Contains(err.Error(), "git branch --set-upstream-to=origin/main master") {
+			wantCommand := shellQuoteArgs([]string{"git", "-C", dir, "branch", "--set-upstream-to=origin/main", "master"})
+			if _, err := repo.resolveContainerBranchBase(ctx, testLogger(t), "master"); err == nil || !strings.Contains(err.Error(), wantCommand) {
 				t.Fatalf("resolveContainerBranchBase error = %v, want upstream repair command", err)
 			}
 		})

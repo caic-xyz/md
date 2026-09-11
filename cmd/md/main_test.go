@@ -379,6 +379,62 @@ func TestValidateBranchesExist(t *testing.T) {
 	}
 }
 
+func TestNoMatchingContainerError(t *testing.T) {
+	t.Parallel()
+
+	t.Run("no_repository_mapping_suggests_start", func(t *testing.T) {
+		t.Parallel()
+		err := noMatchingContainerError("/src/project with spaces", "feature-$(touch-pwn)", true, "diff", []*md.Container{
+			{Repos: []md.Repo{{GitRoot: "/src/other", Branches: []string{"main"}}}},
+		})
+		for _, want := range []string{
+			`no container found for repository "/src/project with spaces" and branch "feature-$(touch-pwn)"`,
+			`md start '-repo=/src/project with spaces' '-branch=feature-$(touch-pwn)'`,
+		} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error missing %q: %v", want, err)
+			}
+		}
+	})
+
+	t.Run("missing_explicit_branch_requires_a_choice", func(t *testing.T) {
+		t.Parallel()
+		err := noMatchingContainerError("/src/project", "typo", false, "diff", nil)
+		for _, want := range []string{
+			`local branch "typo" does not exist`,
+			"create it or choose an existing branch before starting a container",
+		} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error missing %q: %v", want, err)
+			}
+		}
+		if strings.Contains(err.Error(), "md start") {
+			t.Fatalf("error suggests a start command that cannot work: %v", err)
+		}
+	})
+
+	t.Run("other_mapped_branches_suggest_diff_choices", func(t *testing.T) {
+		t.Parallel()
+		err := noMatchingContainerError("/src/project with spaces", "missing", false, "diff", []*md.Container{
+			{Repos: []md.Repo{{GitRoot: "/src/project with spaces", Branches: []string{"main", "feature-$(touch-pwn)"}}}},
+			{Repos: []md.Repo{{GitRoot: "/src/project with spaces", Branches: []string{"main"}}}},
+		})
+		for _, want := range []string{
+			`no container found for repository "/src/project with spaces" and branch "missing"`,
+			`containers exist for other mapped branches`,
+			`md diff '-repo=/src/project with spaces' '-branch=feature-$(touch-pwn)'`,
+			`md diff '-repo=/src/project with spaces' -branch=main`,
+		} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error missing %q: %v", want, err)
+			}
+		}
+		if strings.Count(err.Error(), "-branch=main") != 1 {
+			t.Fatalf("error repeats mapped branch choice: %v", err)
+		}
+	})
+}
+
 func TestResolveCaches(t *testing.T) {
 	t.Parallel()
 	allNames := func(caches []md.CacheMount) []string {
