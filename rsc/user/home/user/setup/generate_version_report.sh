@@ -62,6 +62,7 @@
 
 	# Utilities
 	check_version "bc" "bc" "--version"
+	check_version "GNU time" "/usr/bin/time" "--version"
 	check_version "shellcheck" "shellcheck" "--version" "^version:"
 	check_version "tokei" "tokei" "--version"
 	check_version "shfmt" "shfmt" "--version"

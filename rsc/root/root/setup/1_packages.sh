@@ -118,6 +118,7 @@ apt-get install -qq -y --no-install-recommends \
 	tigervnc-standalone-server \
 	tigervnc-tools \
 	tigervnc-viewer \
+	time \
 	tmux \
 	tokei \
 	uidmap \
