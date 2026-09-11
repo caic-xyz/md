@@ -602,11 +602,9 @@ func printContainerSummary(ctx context.Context, ct *md.Container, r *md.StartRes
 		}
 	}
 	if len(ct.Repos) > 0 {
-		hasExtraBranches := false
 		for i := range ct.Repos {
 			r := &ct.Repos[i]
 			if len(r.Branches) > 1 {
-				hasExtraBranches = true
 				fmt.Printf("  > Repo %s on branch '%s' (+%s)\n", filepath.Base(r.ContainerPath), r.Branches[0], strings.Join(r.Branches[1:], ", "))
 			} else {
 				fmt.Printf("  > Repo %s on branch '%s'\n", filepath.Base(r.ContainerPath), r.Branches[0])
@@ -614,11 +612,7 @@ func printContainerSummary(ctx context.Context, ct *md.Container, r *md.StartRes
 		}
 		fmt.Println("  > Host state is mapped to the branch upstream")
 		fmt.Println("  > See changes (in container): git diff @{upstream}")
-		if hasExtraBranches {
-			fmt.Println("  > See changes (on host)     : md diff (primary branch only)")
-		} else {
-			fmt.Println("  > See changes (on host)     : md diff")
-		}
+		fmt.Println("  > See changes (on host)     : md diff (checked-out branch)")
 	}
 	fmt.Println("  > Stop container            : md stop")
 	fmt.Println("  > Purge container           : md purge")

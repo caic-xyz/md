@@ -676,7 +676,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 				ContainerPath: filepath.ToSlash(containerDir),
 			}},
 		}
-		if err := ct.configureContainerRemotes(ctx, io.Discard, io.Discard, 0, false); err != nil {
+		if err := ct.configureContainerRemotes(ctx, io.Discard, io.Discard, 0, false, true); err != nil {
 			t.Fatal(err)
 		}
 		if got := runTestGit(t, ctx, containerDir, "config", "--local", "user.name"); got != "Marc-Antoine Ruel" {
@@ -684,6 +684,161 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 		}
 		if got := runTestGit(t, ctx, containerDir, "config", "--local", "user.email"); got != "maruel@example.com" {
 			t.Errorf("container user.email = %q, want maruel@example.com", got)
+		}
+	})
+	t.Run("launch_rejects_extra_branch_tracking_primary_before_runtime_mutation", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		hostDir := t.TempDir()
+		originDir := filepath.Join(t.TempDir(), "origin.git")
+		runTestGit(t, ctx, "", "init", "-q", "--bare", "--initial-branch=main", originDir)
+		runTestGit(t, ctx, hostDir, "init", "-q", "--initial-branch=main")
+		runTestGit(t, ctx, hostDir, "commit", "-q", "--allow-empty", "-m", "main")
+		runTestGit(t, ctx, hostDir, "remote", "add", "origin", originDir)
+		runTestGit(t, ctx, hostDir, "push", "-q", "-u", "origin", "main")
+		runTestGit(t, ctx, hostDir, "remote", "set-head", "origin", "main")
+		runTestGit(t, ctx, hostDir, "branch", "feature")
+		runTestGit(t, ctx, hostDir, "config", "branch.feature.remote", ".")
+		runTestGit(t, ctx, hostDir, "config", "branch.feature.merge", "refs/heads/main")
+
+		exe, err := os.Executable()
+		if err != nil {
+			t.Fatal(err)
+		}
+		logPath := filepath.Join(t.TempDir(), "runtime.log")
+		env := []string{fakeRuntimeEnv + "=1", fakeRuntimeLogEnv + "=" + logPath}
+		logger := testLogger(t)
+		ct := &Container{
+			Client: &Client{Logger: logger, Runtime: testRuntime(t, exe, logger, env), env: env},
+			Logger: logger,
+			Name:   "md-test",
+			Repos: []Repo{{
+				GitRoot:  hostDir,
+				Branches: []string{"main", "feature"},
+			}},
+		}
+		err = ct.Launch(ctx, io.Discard, io.Discard, &StartOpts{Quiet: true})
+		if err == nil || !strings.Contains(err.Error(), `mapped host branch "feature" tracks primary branch "main" locally`) {
+			t.Fatalf("Launch error = %v, want local primary-upstream error", err)
+		}
+		logData, readErr := os.ReadFile(logPath) //nolint:gosec // private test log.
+		if readErr != nil && !os.IsNotExist(readErr) {
+			t.Fatal(readErr)
+		}
+		if len(logData) != 0 {
+			t.Fatalf("Launch invoked runtime before branch validation:\n%s", logData)
+		}
+	})
+	t.Run("operations_reject_extra_branch_tracking_primary", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
+		ctx := t.Context()
+		ct, hostDir, _ := setupMultiBranchPullTest(t)
+		runTestGit(t, ctx, hostDir, "config", "branch.feature.remote", ".")
+		runTestGit(t, ctx, hostDir, "config", "branch.feature.merge", "refs/heads/main")
+
+		for _, op := range []struct {
+			name string
+			run  func() error
+		}{
+			{name: "Diff", run: func() error { return ct.Diff(ctx, io.Discard, io.Discard, 0, nil) }},
+			{name: "Pull", run: func() error { return ct.Pull(ctx, io.Discard, io.Discard, 0, nil) }},
+			{name: "Push", run: func() error {
+				_, err := ct.Push(ctx, io.Discard, io.Discard, 0)
+				return err
+			}},
+		} {
+			err := op.run()
+			if err == nil || !strings.Contains(err.Error(), `mapped host branch "feature" tracks primary branch "main" locally`) {
+				t.Errorf("%s error = %v, want local primary-upstream error", op.name, err)
+			}
+		}
+	})
+	t.Run("diff_rejects_host_branch_without_upstream", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
+		ctx := t.Context()
+		ct, hostDir, _ := setupPullTest(t)
+		runTestGit(t, ctx, hostDir, "branch", "--unset-upstream", "main")
+
+		err := ct.Diff(ctx, io.Discard, io.Discard, 0, nil)
+		if err == nil || !strings.Contains(err.Error(), `mapped host branch "main" has no upstream`) {
+			t.Fatalf("Diff error = %v, want missing host upstream error", err)
+		}
+	})
+	t.Run("diff_rejects_changed_host_branch_upstream", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
+		ctx := t.Context()
+		ct, hostDir, containerDir := setupPullTest(t)
+		runTestGit(t, ctx, hostDir, "push", "-q", "origin", "main:release")
+		runTestGit(t, ctx, hostDir, "fetch", "-q", "origin", "release")
+		runTestGit(t, ctx, hostDir, "branch", "--set-upstream-to=origin/release", "main")
+
+		err := ct.Diff(ctx, io.Discard, io.Discard, 0, nil)
+		if err == nil || !strings.Contains(err.Error(), `upstream changed from "origin/main" in the container to "origin/release" on the host`) || !strings.Contains(err.Error(), "run md pull or md push") {
+			t.Fatalf("Diff error = %v, want changed upstream guidance", err)
+		}
+		if got := runTestGit(t, ctx, containerDir, "config", "--get", "branch.main.merge"); got != "refs/heads/main" {
+			t.Fatalf("container branch merge ref after Diff = %q, want unchanged refs/heads/main", got)
+		}
+		if err := ct.Pull(ctx, io.Discard, io.Discard, 0, nil); err != nil {
+			t.Fatalf("Pull after upstream change: %v", err)
+		}
+		if got := runTestGit(t, ctx, containerDir, "config", "--get", "branch.main.remote"); got != "origin" {
+			t.Errorf("container branch remote = %q, want origin", got)
+		}
+		if got := runTestGit(t, ctx, containerDir, "config", "--get", "branch.main.merge"); got != "refs/heads/release" {
+			t.Errorf("container branch merge ref = %q, want refs/heads/release", got)
+		}
+	})
+	t.Run("diff_rejects_changed_extra_branch_upstream", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
+		ctx := t.Context()
+		ct, hostDir, containerDir := setupMultiBranchPullTest(t)
+		runTestGit(t, ctx, containerDir, "switch", "-q", "-c", "feature", "origin/feature")
+		runTestGit(t, ctx, hostDir, "push", "-q", "origin", "feature:release")
+		runTestGit(t, ctx, hostDir, "fetch", "-q", "origin", "release")
+		runTestGit(t, ctx, hostDir, "branch", "--set-upstream-to=origin/release", "feature")
+
+		err := ct.Diff(ctx, io.Discard, io.Discard, 0, nil)
+		if err == nil || !strings.Contains(err.Error(), `mapped branch "feature" upstream changed`) || !strings.Contains(err.Error(), "run md pull or md push") {
+			t.Fatalf("Diff error = %v, want changed extra-branch upstream guidance", err)
+		}
+		if got := runTestGit(t, ctx, containerDir, "config", "--get", "branch.feature.merge"); got != "refs/heads/feature" {
+			t.Fatalf("container feature merge ref after Diff = %q, want unchanged refs/heads/feature", got)
+		}
+	})
+	t.Run("diff_syncs_local_branch_upstream", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
+		ctx := t.Context()
+		ct, hostDir, containerDir := setupPullTest(t)
+		runTestGit(t, ctx, hostDir, "branch", "migration", "origin/main")
+		runTestGit(t, ctx, hostDir, "config", "branch.main.remote", ".")
+		runTestGit(t, ctx, hostDir, "config", "branch.main.merge", "refs/heads/migration")
+
+		if err := ct.Pull(ctx, io.Discard, io.Discard, 0, nil); err != nil {
+			t.Fatalf("Pull after local upstream change: %v", err)
+		}
+		var stdout bytes.Buffer
+		if err := ct.Diff(ctx, &stdout, io.Discard, 0, []string{"--name-only"}); err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.TrimSpace(stdout.String()); got != "shared.txt" {
+			t.Fatalf("diff --name-only = %q, want shared.txt", got)
+		}
+		if got := runTestGit(t, ctx, containerDir, "rev-parse", "migration"); got != runTestGit(t, ctx, hostDir, "rev-parse", "migration") {
+			t.Errorf("container migration = %q, want host migration", got)
+		}
+		if got := runTestGit(t, ctx, containerDir, "config", "--get", "branch.main.remote"); got != "." {
+			t.Errorf("container branch remote = %q, want .", got)
+		}
+	})
+	t.Run("pull_refreshes_changed_push_remote", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
+		ctx := t.Context()
+		ct, hostDir, containerDir := setupPullTest(t)
+		publishDir := filepath.Join(t.TempDir(), "publish.git")
+		runTestGit(t, ctx, "", "init", "-q", "--bare", publishDir)
+		runTestGit(t, ctx, hostDir, "remote", "add", "publish", publishDir)
+		runTestGit(t, ctx, hostDir, "config", "branch.main.pushRemote", "publish")
+
+		if err := ct.Pull(ctx, io.Discard, io.Discard, 0, nil); err != nil {
+			t.Fatalf("Pull after push remote change: %v", err)
+		}
+		if got := runTestGit(t, ctx, containerDir, "config", "--get", "branch.main.pushRemote"); got != "publish" {
+			t.Fatalf("container branch push remote = %q, want publish", got)
 		}
 	})
 	t.Run("command_logs_redact_sensitive_values", func(t *testing.T) {
@@ -836,6 +991,8 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			runTestGit(t, ctx, dir, "checkout", "-q", "-b", "caic-1")
 			writeTestFile(t, filepath.Join(dir, "tracked.txt"), "task\n")
 			runTestGit(t, ctx, dir, "commit", "-q", "-am", "task")
+			runTestGit(t, ctx, dir, "config", "branch.caic-1.remote", ".")
+			runTestGit(t, ctx, dir, "config", "branch.caic-1.merge", "refs/heads/migration")
 
 			ct := &Container{
 				Client: testClient(t),
@@ -890,6 +1047,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			runTestGit(t, ctx, dir, "add", ".")
 			runTestGit(t, ctx, dir, "commit", "-q", "-m", "release")
 			runTestGit(t, ctx, dir, "push", "-q", "upstream", "release")
+			runTestGit(t, ctx, dir, "branch", "--set-upstream-to=upstream/release", "release")
 			runTestGit(t, ctx, dir, "remote", "set-url", "--push", "upstream", upstreamPushDir)
 			runTestGit(t, ctx, dir, "tag", "release-1")
 			runTestGit(t, ctx, dir, "tag", "internal-1", "main")
@@ -921,7 +1079,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			}
 			commands := containerRemoteConfigCommands(&repo, configs, false)
 			commands = append(commands, containerBranchSetupCommands(
-				[]containerBranchBase{{branch: "release", ref: "upstream/release", pushRemote: "origin"}},
+				[]containerBranchBase{{branch: "release", ref: "upstream/release", upstreamRemote: "upstream", upstreamBranch: "release", pushRemote: "origin"}},
 			)...)
 			cmd := exec.CommandContext(ctx, "bash", "-c", strings.Join(commands, " && ")) //nolint:gosec // commands are generated from test temp paths
 			if out, err := cmd.CombinedOutput(); err != nil {
@@ -1113,7 +1271,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 				t.Errorf("pushed origin/feature = local unpushed commit %q", gotFeatureCommit)
 			}
 		})
-		t.Run("missing_recorded_default_branch", func(t *testing.T) {
+		t.Run("missing_mapped_branch_is_rejected", func(t *testing.T) {
 			t.Parallel()
 			ctx := t.Context()
 			dir := t.TempDir()
@@ -1143,8 +1301,9 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 					DefaultBranch: "multiple_branches",
 				}},
 			}
-			if err := ct.SyncDefaultBranch(ctx, 0); err != nil {
-				t.Fatalf("SyncDefaultBranch with deleted recorded default branch: %v", err)
+			err := ct.SyncDefaultBranch(ctx, 0)
+			if err == nil || !strings.Contains(err.Error(), `mapped host branch "multiple_branches" no longer exists`) {
+				t.Fatalf("SyncDefaultBranch error = %v, want deleted host branch error", err)
 			}
 		})
 	})
@@ -1189,7 +1348,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 		if err != nil {
 			t.Fatal(err)
 		}
-		if extraBase.branch != "main-0" || extraBase.ref != "host/main-0" || extraBase.upstreamRef != "upstream/main" || extraBase.pushRemote != "origin" {
+		if extraBase.branch != "main-0" || extraBase.ref != "host/main-0" || extraBase.upstreamRemote != "upstream" || extraBase.upstreamBranch != "main" || extraBase.pushRemote != "origin" {
 			t.Fatalf("fork extra base = %+v, want host/main-0 with upstream/main and origin push remote", extraBase)
 		}
 
@@ -1199,8 +1358,13 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 		if err != nil {
 			t.Fatal(err)
 		}
-		if base.ref != "host/main" || !base.useHost || base.destination != "refs/remotes/host/main" {
-			t.Fatalf("local base = %+v, want host/main", base)
+		if base.ref != "host/main" || base.upstreamRemote != "upstream" || base.upstreamBranch != "main" || !base.useHost || base.destination != "refs/remotes/host/main" {
+			t.Fatalf("local base = %+v, want host/main tracking upstream/main", base)
+		}
+
+		runTestGit(t, ctx, dir, "branch", "--unset-upstream", "main")
+		if _, err := repo.resolveContainerBranchBase(ctx, logger, "main"); err == nil || !strings.Contains(err.Error(), `mapped host branch "main" has no upstream`) {
+			t.Fatalf("resolveContainerBranchBase error = %v, want missing upstream error", err)
 		}
 	})
 	t.Run("Pull", func(t *testing.T) {
@@ -1680,7 +1844,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 				t.Fatalf("tracked status after partial Pull = %q, want clean checkout", got)
 			}
 		})
-		t.Run("deleted_source_branch", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
+		t.Run("deleted_source_branch_is_rejected", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
 			ctx := t.Context()
 			fakeSSH(t)
 			home := t.TempDir()
@@ -1728,24 +1892,17 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 					DefaultBranch: branch,
 				}},
 			}
-			var stdout, stderr bytes.Buffer
-			if err := ct.Diff(ctx, &stdout, &stderr, 0, []string{"--name-only"}); err != nil {
-				t.Fatalf("Diff: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
-			}
-			if got := strings.TrimSpace(stdout.String()); got != "container.txt" {
-				t.Fatalf("diff --name-only = %q, want container.txt", got)
-			}
-
-			stdout.Reset()
-			stderr.Reset()
-			if err := ct.Pull(ctx, &stdout, &stderr, 0, nil); err != nil {
-				t.Fatalf("Pull: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
-			}
-			if got := runTestGit(t, ctx, hostDir, "show", branch+":container.txt"); got != "container" {
-				t.Fatalf("pulled container.txt = %q, want container", got)
-			}
-			if got := runTestGit(t, ctx, hostDir, "branch", "--show-current"); got != "main" {
-				t.Fatalf("current branch = %q, want main", got)
+			for _, op := range []struct {
+				name string
+				run  func() error
+			}{
+				{name: "Diff", run: func() error { return ct.Diff(ctx, io.Discard, io.Discard, 0, nil) }},
+				{name: "Pull", run: func() error { return ct.Pull(ctx, io.Discard, io.Discard, 0, nil) }},
+			} {
+				err := op.run()
+				if err == nil || !strings.Contains(err.Error(), `mapped host branch "multiple_branches" no longer exists`) {
+					t.Errorf("%s error = %v, want deleted host branch error", op.name, err)
+				}
 			}
 		})
 	})
@@ -1793,6 +1950,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			runTestGit(t, ctx, hostDir, "checkout", "-q", "-b", "feature")
 			writeTestFile(t, filepath.Join(hostDir, "tracked.txt"), "feature host\n")
 			runTestGit(t, ctx, hostDir, "commit", "-q", "-am", "feature host")
+			runTestGit(t, ctx, hostDir, "push", "-q", "-u", "origin", "feature")
 
 			runTestGit(t, ctx, "", "clone", "-q", "--no-checkout", hostDir, containerDir)
 			runTestGit(t, ctx, containerDir, "config", "user.name", "Test")
@@ -1846,7 +2004,6 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			}{
 				{name: "remote_branch", sourceRemote: "fork", sourceMergeRef: "refs/heads/main", sourcePushRemote: "origin", wantRemote: "fork", wantMergeRef: "refs/heads/main", wantPushRemote: "origin"},
 				{name: "local_branch", sourceRemote: ".", sourceMergeRef: "refs/heads/main", wantRemote: ".", wantMergeRef: "refs/heads/main", wantPushRemote: "."},
-				{name: "no_upstream", wantRemote: "origin", wantMergeRef: "refs/heads/main"},
 			}
 			for _, tt := range tests {
 				t.Run(tt.name, func(t *testing.T) {
@@ -1874,7 +2031,8 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 					}
 
 					repo := &Repo{GitRoot: dir, DefaultRemote: "origin", DefaultBranch: "main"}
-					if err := repo.createForkHostBranch(ctx, testLogger(t), "source", "source-0", "fork/source"); err != nil {
+					err := repo.createForkHostBranch(ctx, testLogger(t), "source-0", "fork/source", branchUpstreamSpec{remote: tt.wantRemote, branch: strings.TrimPrefix(tt.wantMergeRef, "refs/heads/"), pushRemote: tt.wantPushRemote})
+					if err != nil {
 						t.Fatal(err)
 					}
 					if got := runTestGit(t, ctx, dir, "rev-parse", "source-0"); got != runTestGit(t, ctx, dir, "rev-parse", "fork/source") {
@@ -1890,6 +2048,10 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 					if gotPushRemote != tt.wantPushRemote {
 						t.Errorf("fork push remote = %q, want %q", gotPushRemote, tt.wantPushRemote)
 					}
+					repo.Branches = []string{"source-0"}
+					if _, err := repo.containerSyncRefspecs(ctx, testLogger(t)); err != nil {
+						t.Fatalf("syncing fork host destination branch: %v", err)
+					}
 				})
 			}
 		})
@@ -1898,6 +2060,102 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 
 func TestFork(t *testing.T) {
 	t.Parallel()
+
+	t.Run("local_primary_upstream_fails_before_runtime_mutation", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		dir := t.TempDir()
+		originDir := filepath.Join(t.TempDir(), "origin.git")
+		runTestGit(t, ctx, "", "init", "-q", "--bare", "--initial-branch=main", originDir)
+		runTestGit(t, ctx, dir, "init", "-q", "--initial-branch=main")
+		runTestGit(t, ctx, dir, "commit", "-q", "--allow-empty", "-m", "main")
+		runTestGit(t, ctx, dir, "remote", "add", "origin", originDir)
+		runTestGit(t, ctx, dir, "push", "-q", "-u", "origin", "main")
+		runTestGit(t, ctx, dir, "branch", "feature")
+		runTestGit(t, ctx, dir, "config", "branch.feature.remote", ".")
+		runTestGit(t, ctx, dir, "config", "branch.feature.merge", "refs/heads/main")
+		runTestGit(t, ctx, dir, "remote", "add", "md-test", "/dev/null")
+
+		home := t.TempDir()
+		writeTestSSHConfig(t, home)
+		exe, err := os.Executable()
+		if err != nil {
+			t.Fatal(err)
+		}
+		logPath := filepath.Join(t.TempDir(), "runtime.log")
+		env := []string{fakeRuntimeEnv + "=1", fakeRuntimeLogEnv + "=" + logPath}
+		logger := testLogger(t)
+		ct := &Container{
+			Client: &Client{Home: home, Logger: logger, Runtime: testRuntime(t, exe, logger, env), env: env},
+			Logger: logger,
+			Name:   "md-test",
+			Repos: []Repo{{
+				GitRoot:       dir,
+				Branches:      []string{"main", "feature"},
+				ContainerPath: "/home/user/src/repo",
+				DefaultRemote: "origin",
+				DefaultBranch: "main",
+			}},
+		}
+		_, err = ct.Fork(ctx, io.Discard, io.Discard, &ForkOpts{
+			Quiet: true,
+			Repos: []ForkRepo{{GitRoot: dir, DestPrimary: "main-0"}},
+		})
+		if err == nil || !strings.Contains(err.Error(), `mapped host branch "feature" tracks primary branch "main" locally`) {
+			t.Fatalf("Fork error = %v, want local primary-upstream error", err)
+		}
+		logData, readErr := os.ReadFile(logPath) //nolint:gosec // private test log.
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if strings.Contains(string(logData), "commit") || strings.Contains(string(logData), "create") || strings.Contains(string(logData), "run") {
+			t.Fatalf("Fork mutated runtime before preflight failure:\n%s", logData)
+		}
+	})
+
+	t.Run("missing_branch_fails_before_runtime_mutation", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		dir := t.TempDir()
+		runTestGit(t, ctx, dir, "init", "-q", "--initial-branch=main")
+		runTestGit(t, ctx, dir, "commit", "-q", "--allow-empty", "-m", "main")
+		runTestGit(t, ctx, dir, "remote", "add", "md-test", "/dev/null")
+		home := t.TempDir()
+		writeTestSSHConfig(t, home)
+		exe, err := os.Executable()
+		if err != nil {
+			t.Fatal(err)
+		}
+		logPath := filepath.Join(t.TempDir(), "runtime.log")
+		env := []string{fakeRuntimeEnv + "=1", fakeRuntimeLogEnv + "=" + logPath}
+		logger := testLogger(t)
+		ct := &Container{
+			Client: &Client{Home: home, Logger: logger, Runtime: testRuntime(t, exe, logger, env), env: env},
+			Logger: logger,
+			Name:   "md-test",
+			Repos: []Repo{{
+				GitRoot:       dir,
+				Branches:      []string{"missing"},
+				ContainerPath: "/home/user/src/repo",
+				DefaultRemote: "origin",
+				DefaultBranch: "main",
+			}},
+		}
+		_, err = ct.Fork(ctx, io.Discard, io.Discard, &ForkOpts{
+			Quiet: true,
+			Repos: []ForkRepo{{GitRoot: dir, DestPrimary: "missing-0"}},
+		})
+		if err == nil || !strings.Contains(err.Error(), `mapped host branch "missing" no longer exists`) {
+			t.Fatalf("Fork error = %v, want missing branch preflight error", err)
+		}
+		logData, readErr := os.ReadFile(logPath) //nolint:gosec // private test log.
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if strings.Contains(string(logData), "commit") || strings.Contains(string(logData), "create") || strings.Contains(string(logData), "run") {
+			t.Fatalf("fork mutated runtime before preflight failure:\n%s", logData)
+		}
+	})
 
 	t.Run("valid_options_do_not_inherit_privileges", func(t *testing.T) {
 		t.Parallel()
@@ -2790,12 +3048,8 @@ func TestRepo(t *testing.T) {
 			if want := []string{"origin"}; !slices.Equal(repo.Remotes, want) {
 				t.Fatalf("remotes = %v, want %v", repo.Remotes, want)
 			}
-			base, err := repo.resolveContainerBranchBase(ctx, testLogger(t), "master")
-			if err != nil {
-				t.Fatal(err)
-			}
-			if base.ref != "host/master" {
-				t.Fatalf("master base = %q, want host/master", base.ref)
+			if _, err := repo.resolveContainerBranchBase(ctx, testLogger(t), "master"); err == nil || !strings.Contains(err.Error(), "tracks md container remote") {
+				t.Fatalf("resolveContainerBranchBase error = %v, want synthetic upstream error", err)
 			}
 		})
 		t.Run("default_branch_comes_from_remote", func(t *testing.T) {

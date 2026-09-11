@@ -36,6 +36,13 @@ The test requires a container runtime (docker or podman) in PATH. Nested podman 
 
 ## md Tool: Image Build and Cache Injection
 
+### Mapped branch tracking
+
+Every mapped branch must exist and have an upstream. A non-primary mapped
+branch must not track the primary mapped branch through Git's local `.` remote;
+reject that topology before starting, reviving, synchronizing, or forking a
+container.
+
 ### Image hierarchy
 
 - **`md-root-local`** — root image built locally from `rsc/root/Dockerfile` via `md build-image` (first step). `md build-image --platform` can build it for `linux/amd64` or `linux/arm64`; the local tag is overwritten by the requested platform build.
