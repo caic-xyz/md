@@ -45,7 +45,17 @@ import (
 // DefaultBaseImage is the base image used when none is specified.
 const DefaultBaseImage = "ghcr.io/caic-xyz/md-user"
 
-const maxPushRefspecBytes = 16 * 1024
+// ErrDiffFound is returned by Container.Diff when its Git arguments request an
+// exit status for differences and at least one difference is found.
+var ErrDiffFound = errors.New("differences found")
+
+const (
+	// gitDiffCommand reserves this remote exit status so Container.Diff can
+	// distinguish differences from command failures, including failures that
+	// happen to exit with Git's ordinary difference status of 1.
+	diffFoundSSHExitCode = 79
+	maxPushRefspecBytes  = 16 * 1024
+)
 
 // Values for the "md.image_type" label, which tags md-built images with their
 // role so they can be found for pruning, including after they are untagged.
@@ -1608,6 +1618,9 @@ func (c *Container) Diff(ctx context.Context, stdout, stderr io.Writer, repoIdx 
 	var sshStderr bytes.Buffer
 	cmd.Stderr = &sshStderr
 	if err := cmd.Run(); err != nil {
+		if exitErr, ok := errors.AsType[*exec.ExitError](err); ok && exitErr.ExitCode() == diffFoundSSHExitCode {
+			return ErrDiffFound
+		}
 		return commandErrorWithStderr(fmt.Sprintf("running diff in container %q over SSH", c.Name), err, sshStderr.String())
 	}
 	if stderr != nil {
@@ -1632,21 +1645,21 @@ func gitDiffCommand(repo, primaryBranch, defaultRemote, defaultBranch string, ex
 		exitOnDiffFlag = "1"
 	}
 	commands := []string{
-		"cd " + shellQuote(repo),
+		"cd " + shellQuote(repo) + " || exit 2",
 		gitDiffBaseRefCommand(primaryBranch, defaultRemote, defaultBranch),
 		"export GIT_OPTIONAL_LOCKS=0",
-		`index_path=$(git rev-parse --git-path index) || exit $?`,
-		`tmp_index=$(mktemp) || exit $?`,
-		`untracked_paths=$(mktemp) || exit $?`,
+		`index_path=$(git rev-parse --git-path index) || exit 2`,
+		`tmp_index=$(mktemp) || exit 2`,
+		`untracked_paths=$(mktemp) || exit 2`,
 		// Preserve the index timestamp so Git keeps its racy-clean checks valid.
-		`cp -p "$index_path" "$tmp_index" || exit $?`,
+		`cp -p "$index_path" "$tmp_index" || exit 2`,
 		`trap 'rm -f "$tmp_index" "$untracked_paths"' EXIT`,
-		`git ls-files -z --others --exclude-standard -- . > "$untracked_paths" || exit $?`,
-		`while IFS= read -r -d '' path; do GIT_INDEX_FILE="$tmp_index" git add -N -- "$path" || exit $?; done < "$untracked_paths"`,
+		`git ls-files -z --others --exclude-standard -- . > "$untracked_paths" || exit 2`,
+		`while IFS= read -r -d '' path; do GIT_INDEX_FILE="$tmp_index" git add -N -- "$path" || exit 2; done < "$untracked_paths"`,
 		"diff_status=0",
 		`GIT_INDEX_FILE="$tmp_index" git diff "$diff_base_ref"` + diffArgs + ` -- . || diff_status=$?`,
-		`if [ "$diff_status" -gt 1 ]; then exit "$diff_status"; fi`,
-		"if [ " + exitOnDiffFlag + ` -eq 1 ]; then exit "$diff_status"; fi`,
+		`if [ "$diff_status" -gt 1 ]; then exit 2; fi`,
+		"if [ " + exitOnDiffFlag + ` -eq 1 ] && [ "$diff_status" -eq 1 ]; then exit ` + strconv.Itoa(diffFoundSSHExitCode) + `; fi`,
 	}
 	return strings.Join(commands, "; ")
 }

@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -36,6 +37,7 @@ const (
 	fakeRuntimeLogEnv       = "MD_TEST_FAKE_RUNTIME_LOG"
 	fakeSSHEnv              = "MD_TEST_FAKE_SSH"
 	fakeSSHFailureMatchEnv  = "MD_TEST_FAKE_SSH_FAILURE_MATCH"
+	fakeSSHFailureStatusEnv = "MD_TEST_FAKE_SSH_FAILURE_STATUS"
 	fakeSSHFailureTextEnv   = "MD_TEST_FAKE_SSH_FAILURE_TEXT"
 	fakeSSHLogEnv           = "MD_TEST_FAKE_SSH_LOG"
 )
@@ -876,7 +878,16 @@ func runFakeSSH(args []string) int {
 	}
 	if match := os.Getenv(fakeSSHFailureMatchEnv); match != "" && strings.Contains(strings.Join(args[hostIndex+1:], " "), match) {
 		_, _ = fmt.Fprintln(os.Stderr, os.Getenv(fakeSSHFailureTextEnv))
-		return 255
+		status := 255
+		if value := os.Getenv(fakeSSHFailureStatusEnv); value != "" {
+			parsed, err := strconv.Atoi(value)
+			if err != nil {
+				_, _ = fmt.Fprintf(os.Stderr, "invalid fake SSH failure status %q: %v\n", value, err)
+				return 1
+			}
+			status = parsed
+		}
+		return status
 	}
 	cmd := exec.CommandContext(ctx, "bash", "-c", strings.Join(args[hostIndex+1:], " ")) //nolint:gosec // test fake executes trusted test commands.
 	cmd.Env = append(os.Environ(), "LANG=C")

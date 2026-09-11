@@ -1287,10 +1287,17 @@ func (a *app) cmdDiff(ctx context.Context, args []string) error {
 			fmt.Printf("=== %s ===\n", filepath.Base(ct.Repos[i].GitRoot))
 		}
 		if err := ct.Diff(ctx, os.Stdout, os.Stderr, i, gitArgs); err != nil {
-			return err
+			return diffCommandError(err)
 		}
 	}
 	return nil
+}
+
+func diffCommandError(err error) error {
+	if errors.Is(err, md.ErrDiffFound) {
+		return &exitCodeError{code: 1}
+	}
+	return err
 }
 
 // allocateForkBranch returns an unused "<primary>-<n>" branch name for the repo

@@ -435,6 +435,25 @@ func TestNoMatchingContainerError(t *testing.T) {
 	})
 }
 
+func TestDiffCommandError(t *testing.T) {
+	t.Parallel()
+	t.Run("differences", func(t *testing.T) {
+		t.Parallel()
+		err := diffCommandError(fmt.Errorf("repository: %w", md.ErrDiffFound))
+		exitErr, ok := errors.AsType[*exitCodeError](err)
+		if !ok || exitErr.code != 1 {
+			t.Fatalf("diffCommandError() = %v, want silent exit code 1", err)
+		}
+	})
+	t.Run("failure", func(t *testing.T) {
+		t.Parallel()
+		want := errors.New("remote Git failed")
+		if got := diffCommandError(want); !errors.Is(got, want) {
+			t.Fatalf("diffCommandError() = %v, want original error", got)
+		}
+	})
+}
+
 func TestResolveCaches(t *testing.T) {
 	t.Parallel()
 	allNames := func(caches []md.CacheMount) []string {

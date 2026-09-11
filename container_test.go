@@ -787,6 +787,41 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			t.Fatalf("Diff error = %v, want missing host upstream repair command", err)
 		}
 	})
+	t.Run("diff_exit_status_flags_report_differences", func(t *testing.T) { //nolint:paralleltest // setupPullTest uses t.Setenv.
+		for _, test := range []struct {
+			name       string
+			args       []string
+			dirty      bool
+			wantErr    bool
+			wantOutput string
+		}{
+			{name: "exit_code", args: []string{"--exit-code", "--name-only"}, dirty: true, wantErr: true, wantOutput: "shared.txt"},
+			{name: "quiet", args: []string{"--quiet"}, dirty: true, wantErr: true},
+			{name: "no_differences", args: []string{"--exit-code"}},
+		} {
+			t.Run(test.name, func(t *testing.T) { //nolint:paralleltest // setupPullTest uses t.Setenv.
+				ct, hostDir, containerDir := setupPullTest(t)
+				if test.dirty {
+					writeTestFile(t, filepath.Join(containerDir, "shared.txt"), "different\n")
+				} else {
+					runTestGit(t, t.Context(), hostDir, "push", "-q", "origin", "main")
+				}
+				var stdout, stderr bytes.Buffer
+				err := ct.Diff(t.Context(), &stdout, &stderr, 0, test.args)
+				if got := errors.Is(err, ErrDiffFound); got != test.wantErr {
+					t.Fatalf("Diff error is ErrDiffFound = %v, want %v: %v", got, test.wantErr, err)
+				} else if !test.wantErr && err != nil {
+					t.Fatalf("Diff error = %v, want nil", err)
+				}
+				if got := strings.TrimSpace(stdout.String()); got != test.wantOutput {
+					t.Errorf("Diff output = %q, want %q", got, test.wantOutput)
+				}
+				if stderr.Len() != 0 {
+					t.Errorf("Diff stderr = %q, want empty", stderr.String())
+				}
+			})
+		}
+	})
 	t.Run("host_upstream_repair_command_targets_mapped_repo", func(t *testing.T) { //nolint:paralleltest // setupPullTest uses t.Setenv.
 		ct, hostDir, _ := setupPullTest(t)
 		runTestGit(t, t.Context(), hostDir, "branch", "--unset-upstream", "main")
@@ -1070,6 +1105,20 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 		}
 		if exitErr, ok := errors.AsType[*exec.ExitError](err); !ok || exitErr.ExitCode() != 255 {
 			t.Fatalf("Diff error = %v, want wrapped SSH exit status 255", err)
+		}
+	})
+	t.Run("diff_preserves_final_ssh_exit_one_diagnostic", func(t *testing.T) {
+		ct, _, _ := setupPullTest(t)
+		t.Setenv(fakeSSHFailureMatchEnv, "GIT_OPTIONAL_LOCKS=0")
+		t.Setenv(fakeSSHFailureStatusEnv, "1")
+		t.Setenv(fakeSSHFailureTextEnv, "fatal: simulated remote Git failure")
+
+		err := ct.Diff(t.Context(), io.Discard, io.Discard, 0, []string{"--exit-code"})
+		if err == nil || errors.Is(err, ErrDiffFound) || !strings.Contains(err.Error(), `running diff in container "md-test" over SSH`) || !strings.Contains(err.Error(), "fatal: simulated remote Git failure") {
+			t.Fatalf("Diff error = %v, want wrapped remote Git diagnostic", err)
+		}
+		if exitErr, ok := errors.AsType[*exec.ExitError](err); !ok || exitErr.ExitCode() != 1 {
+			t.Fatalf("Diff error = %v, want wrapped SSH exit status 1", err)
 		}
 	})
 	t.Run("diff_rejects_changed_host_branch_upstream", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
