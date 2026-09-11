@@ -1934,7 +1934,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 				t.Fatalf("container.txt = %q, want integrated container commit", got)
 			}
 		})
-		t.Run("aborts_conflicting_rebase_and_restores_checkout", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
+		t.Run("leaves_conflicting_rebase_for_manual_resolution", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
 			ctx := t.Context()
 			ct, hostDir, containerDir := setupPullTest(t)
 			writeTestFile(t, filepath.Join(hostDir, "shared.txt"), "host\n")
@@ -1949,14 +1949,19 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			if err == nil || !strings.Contains(err.Error(), "rebasing branch main") {
 				t.Fatalf("Pull error = %v, want named rebase failure; stderr:\n%s", err, stderr.String())
 			}
-			if got := runTestGit(t, ctx, hostDir, "branch", "--show-current"); got != "other" {
-				t.Fatalf("current branch = %q, want restored other", got)
+			if active, checkErr := gitRebaseInProgress(ctx, &git.Checkout{Root: hostDir, Logger: ct.Logger}); checkErr != nil {
+				t.Fatal(checkErr)
+			} else if !active {
+				t.Fatal("failed Pull aborted the conflicting rebase")
+			}
+			if got := runTestGit(t, ctx, hostDir, "branch", "--show-current"); got != "" {
+				t.Fatalf("current branch = %q, want detached rebase checkout", got)
 			}
 			if got := runTestGit(t, ctx, hostDir, "rev-parse", "refs/heads/main"); got != hostTip {
-				t.Fatalf("main tip = %q, want pre-rebase host tip %q", got, hostTip)
+				t.Fatalf("main tip = %q, want unresolved rebase branch tip %q", got, hostTip)
 			}
-			if got := runTestGit(t, ctx, hostDir, "status", "--porcelain", "--untracked-files=no"); got != "" {
-				t.Fatalf("tracked status after failed Pull = %q, want clean checkout", got)
+			if got := runTestGit(t, ctx, hostDir, "status", "--porcelain", "--untracked-files=no"); got != "UU shared.txt" {
+				t.Fatalf("tracked status after failed Pull = %q, want unresolved shared.txt conflict", got)
 			}
 		})
 		t.Run("integrates_unchanged_tracking_tip_after_host_reset", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
@@ -2227,7 +2232,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 				t.Fatalf("current branch = %q, want main", got)
 			}
 		})
-		t.Run("preserves_completed_branches_after_later_branch_failure", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
+		t.Run("preserves_completed_branches_and_later_conflicting_rebase", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
 			ctx := t.Context()
 			ct, hostDir, containerDir := setupMultiBranchPullTest(t)
 
@@ -2261,11 +2266,16 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			if got := runTestGit(t, ctx, hostDir, "rev-parse", "refs/remotes/md-test/feature"); got != containerFeatureTip {
 				t.Fatalf("feature tracking tip = %q, want fetched container tip %q", got, containerFeatureTip)
 			}
-			if got := runTestGit(t, ctx, hostDir, "branch", "--show-current"); got != "main" {
-				t.Fatalf("current branch = %q, want restored main", got)
+			if active, checkErr := gitRebaseInProgress(ctx, &git.Checkout{Root: hostDir, Logger: ct.Logger}); checkErr != nil {
+				t.Fatal(checkErr)
+			} else if !active {
+				t.Fatal("failed Pull aborted the feature rebase")
 			}
-			if got := runTestGit(t, ctx, hostDir, "status", "--porcelain", "--untracked-files=no"); got != "" {
-				t.Fatalf("tracked status after partial Pull = %q, want clean checkout", got)
+			if got := runTestGit(t, ctx, hostDir, "branch", "--show-current"); got != "" {
+				t.Fatalf("current branch = %q, want detached feature rebase checkout", got)
+			}
+			if got := runTestGit(t, ctx, hostDir, "status", "--porcelain", "--untracked-files=no"); got != "UU feature.txt" {
+				t.Fatalf("tracked status after partial Pull = %q, want unresolved feature.txt conflict", got)
 			}
 		})
 		t.Run("deleted_source_branch_is_rejected", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.

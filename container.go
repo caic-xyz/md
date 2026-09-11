@@ -2260,13 +2260,12 @@ func (c *Container) restorePullCheckout(ctx context.Context, stdout, stderr io.W
 func (c *Container) recoverPullCheckout(ctx context.Context, stdout, stderr io.Writer, g *git.Checkout, originalBranch, originalCommit string) error {
 	rebaseActive, err := gitRebaseInProgress(ctx, g)
 	if err != nil {
-		err = fmt.Errorf("checking for an interrupted rebase: %w", err)
-	} else if rebaseActive {
-		if abortErr := c.runCmdOut(ctx, g.Root, []string{"git", "rebase", "--abort"}, stdout, stderr); abortErr != nil {
-			err = fmt.Errorf("aborting failed rebase: %w", abortErr)
-		}
+		return errors.Join(fmt.Errorf("checking for an interrupted rebase: %w", err), c.restorePullCheckout(ctx, stdout, stderr, g, originalBranch, originalCommit))
 	}
-	return errors.Join(err, c.restorePullCheckout(ctx, stdout, stderr, g, originalBranch, originalCommit))
+	if rebaseActive {
+		return nil
+	}
+	return c.restorePullCheckout(ctx, stdout, stderr, g, originalBranch, originalCommit)
 }
 
 func (c *Container) untagImage(ctx context.Context, image string) error {
