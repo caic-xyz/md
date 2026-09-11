@@ -48,6 +48,9 @@ func main() {
 	if err := mainImpl(); err != nil {
 		ec, ok := errors.AsType[*exitCodeError](err)
 		if ok {
+			if ec.err != nil {
+				fmt.Fprintf(os.Stderr, "md: %v\n", err)
+			}
 			os.Exit(ec.code)
 		}
 		fmt.Fprintf(os.Stderr, "md: %v\n", err)
@@ -1271,31 +1274,46 @@ func (a *app) cmdDiff(ctx context.Context, args []string) error {
 		return err
 	}
 	initLogging(*verbose)
+	exitOnDiff := slices.Contains(gitArgs, "--exit-code") || slices.Contains(gitArgs, "--quiet")
 	ct, repoIdx, err := a.findContainerAndRepo(ctx, cf, "diff")
 	if err != nil {
-		return err
+		return diffCommandError(err, exitOnDiff)
 	}
+	return diffContainerRepos(ctx, os.Stdout, os.Stderr, ct, repoIdx, *all, gitArgs, exitOnDiff)
+}
+
+func diffContainerRepos(ctx context.Context, stdout, stderr io.Writer, ct *md.Container, repoIdx int, all bool, gitArgs []string, exitOnDiff bool) error {
 	indices := []int{repoIdx}
-	if *all {
+	if all {
 		indices = make([]int, len(ct.Repos))
 		for i := range ct.Repos {
 			indices[i] = i
 		}
 	}
+	quiet := slices.Contains(gitArgs, "--quiet")
+	differencesFound := false
 	for _, i := range indices {
-		if *all && len(ct.Repos) > 1 {
-			fmt.Printf("=== %s ===\n", filepath.Base(ct.Repos[i].GitRoot))
+		if all && len(ct.Repos) > 1 && !quiet {
+			_, _ = fmt.Fprintf(stdout, "=== %s ===\n", filepath.Base(ct.Repos[i].GitRoot))
 		}
-		if err := ct.Diff(ctx, os.Stdout, os.Stderr, i, gitArgs); err != nil {
-			return diffCommandError(err)
+		if err := ct.Diff(ctx, stdout, stderr, i, gitArgs); errors.Is(err, md.ErrDiffFound) {
+			differencesFound = true
+		} else if err != nil {
+			return diffCommandError(err, exitOnDiff)
 		}
+	}
+	if differencesFound {
+		return diffCommandError(md.ErrDiffFound, exitOnDiff)
 	}
 	return nil
 }
 
-func diffCommandError(err error) error {
+func diffCommandError(err error, exitOnDiff bool) error {
 	if errors.Is(err, md.ErrDiffFound) {
 		return &exitCodeError{code: 1}
+	}
+	if exitOnDiff {
+		return &exitCodeError{code: 2, err: err}
 	}
 	return err
 }
@@ -1683,13 +1701,21 @@ func checkArgs(fs *flag.FlagSet, maxArgs int) error {
 }
 
 // exitCodeError is returned when a subcommand needs to exit with a specific
-// non-zero code without printing an error message.
+// non-zero code. When err is nil, main exits without printing a diagnostic.
 type exitCodeError struct {
 	code int
+	err  error
 }
 
 func (e *exitCodeError) Error() string {
+	if e.err != nil {
+		return e.err.Error()
+	}
 	return fmt.Sprintf("exit code %d", e.code)
+}
+
+func (e *exitCodeError) Unwrap() error {
+	return e.err
 }
 
 // printSubcommandUsage prints flag defaults followed by harness and cache

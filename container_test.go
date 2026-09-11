@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1119,6 +1120,21 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 		}
 		if exitErr, ok := errors.AsType[*exec.ExitError](err); !ok || exitErr.ExitCode() != 1 {
 			t.Fatalf("Diff error = %v, want wrapped SSH exit status 1", err)
+		}
+	})
+	t.Run("diff_forwards_stderr_when_differences_are_found", func(t *testing.T) {
+		ct, _, _ := setupPullTest(t)
+		t.Setenv(fakeSSHFailureMatchEnv, "GIT_OPTIONAL_LOCKS=0")
+		t.Setenv(fakeSSHFailureStatusEnv, strconv.Itoa(diffFoundSSHExitCode))
+		t.Setenv(fakeSSHFailureTextEnv, "warning: simulated Git warning")
+		var stderr bytes.Buffer
+
+		err := ct.Diff(t.Context(), io.Discard, &stderr, 0, []string{"--quiet"})
+		if !errors.Is(err, ErrDiffFound) {
+			t.Fatalf("Diff error = %v, want ErrDiffFound", err)
+		}
+		if got := strings.TrimSpace(stderr.String()); got != "warning: simulated Git warning" {
+			t.Fatalf("Diff stderr = %q, want forwarded Git warning", got)
 		}
 	})
 	t.Run("diff_rejects_changed_host_branch_upstream", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.

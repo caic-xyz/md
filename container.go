@@ -1617,16 +1617,22 @@ func (c *Container) Diff(ctx context.Context, stdout, stderr io.Writer, repoIdx 
 	cmd.Stdout = stdout
 	var sshStderr bytes.Buffer
 	cmd.Stderr = &sshStderr
-	if err := cmd.Run(); err != nil {
-		if exitErr, ok := errors.AsType[*exec.ExitError](err); ok && exitErr.ExitCode() == diffFoundSSHExitCode {
-			return ErrDiffFound
+	runErr := cmd.Run()
+	differencesFound := false
+	if runErr != nil {
+		if exitErr, ok := errors.AsType[*exec.ExitError](runErr); ok && exitErr.ExitCode() == diffFoundSSHExitCode {
+			differencesFound = true
+		} else {
+			return commandErrorWithStderr(fmt.Sprintf("running diff in container %q over SSH", c.Name), runErr, sshStderr.String())
 		}
-		return commandErrorWithStderr(fmt.Sprintf("running diff in container %q over SSH", c.Name), err, sshStderr.String())
 	}
 	if stderr != nil {
 		if _, err := stderr.Write(sshStderr.Bytes()); err != nil {
 			return fmt.Errorf("writing SSH stderr: %w", err)
 		}
+	}
+	if differencesFound {
+		return ErrDiffFound
 	}
 	return nil
 }
@@ -3352,7 +3358,7 @@ func (c *Container) launchContainer(ctx context.Context, stdout, stderr io.Write
 
 	if opts.Quiet {
 		if _, err := c.Runtime.Run(ctx, "", runArgs...); err != nil {
-			return cmdErrWithStderr("starting container", err)
+			return fmt.Errorf("starting container: %w", err)
 		}
 	} else {
 		_, _ = fmt.Fprintf(stdout, "- Starting container %s ... ", c.Name)

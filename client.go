@@ -675,20 +675,6 @@ func (c *Client) globalGitConfig(ctx context.Context, key string) (string, error
 	return "", err
 }
 
-// cmdErrWithStderr wraps err with the captured stderr from an *exec.ExitError
-// so that quiet-mode failures include actionable output.
-func cmdErrWithStderr(prefix string, err error) error {
-	if err == nil {
-		return nil
-	}
-	stderr := ""
-	exitErr, ok := errors.AsType[*exec.ExitError](err)
-	if ok && len(exitErr.Stderr) > 0 {
-		stderr = string(exitErr.Stderr)
-	}
-	return commandErrorWithStderr(prefix, err, stderr)
-}
-
 func commandErrorWithStderr(prefix string, err error, stderr string) error {
 	diagnostic := strings.TrimSpace(stderr)
 	if diagnostic != "" {
@@ -1376,7 +1362,7 @@ func (c *Client) buildSpecializedImage(ctx context.Context, stdout, stderr io.Wr
 		var pullErr error
 		if quiet {
 			if _, err := c.Runtime.Run(ctx, "", "pull", "--platform", platform, baseImage); err != nil {
-				pullErr = cmdErrWithStderr("pulling base image", err)
+				pullErr = fmt.Errorf("pulling base image: %w", err)
 			}
 		} else {
 			if err := c.Runtime.RunOut(ctx, "", stdout, stderr, "pull", "--platform", platform, baseImage); err != nil {
@@ -1504,13 +1490,13 @@ func (c *Client) buildSpecializedImage(ctx context.Context, stdout, stderr io.Wr
 
 	if quiet {
 		if _, err := c.Runtime.Run(ctx, "", buildArgs...); err != nil {
-			buildErr := cmdErrWithStderr("building image", err)
+			buildErr := fmt.Errorf("building image: %w", err)
 			if isStaleBuilderCacheErr(buildErr) {
 				if _, pruneErr := c.Runtime.Run(ctx, "", "builder", "prune", "-f"); pruneErr != nil {
 					return "", buildErr
 				}
 				if _, err2 := c.Runtime.Run(ctx, "", buildArgs...); err2 != nil {
-					return "", cmdErrWithStderr("building image", err2)
+					return "", fmt.Errorf("building image: %w", err2)
 				}
 			} else {
 				return "", buildErr
