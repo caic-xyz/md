@@ -20,6 +20,12 @@
 	tool = vimdiff
 	noprefix = true
 	colorMoved = dimmed-zebra
+[gc]
+	# Keep every object an agent creates, so a commit recorded before a turn
+	# stays diffable after an amend, a reset or a rebase. Automatic repacking
+	# still runs; only the pruning of unreachable objects is suppressed.
+	pruneExpire = never
+	reflogExpireUnreachable = never
 [pull]
 	rebase = true
 [credential "https://github.com"]
