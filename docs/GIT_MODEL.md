@@ -10,8 +10,8 @@ direction: `md push` writes into the container, `md pull` reads out of it.
 `md` maps one or more of your branches into a container. The first one is the
 primary: the container checks it out and its name goes into the container name.
 
-Each mapped branch must exist and must have an upstream, because the container
-branch is configured to track the same upstream. `md` refuses to start, revive,
+Each mapped branch must exist and must have an upstream, because **the container
+branch is configured to track the same upstream**. `md` refuses to start, revive,
 synchronize or fork otherwise, and tells you the command that repairs it.
 
 A mapped branch may track another local branch through Git's `.` remote, and
@@ -20,7 +20,7 @@ there too. One case is refused: a non-primary mapped branch that tracks the
 primary. `md fork` renames the primary, which would leave that branch tracking
 a name the fork no longer has.
 
-Per container, `md` adds two things to your checkout:
+Per container, `md` adds two things to your checkout on the host:
 
 - a Git remote named after the container, pointing at it over SSH;
 - `refs/remotes/<container>/<branch>` for each mapped branch, holding what the
@@ -41,13 +41,14 @@ remote. It holds:
   as its host branch has;
 - every remote-tracking ref your host checkout had cached, and the tags
   selected by `--tags`;
-- `refs/remotes/host/<branch>`, the host branch's commit, written or updated
-  when no mirrored remote ref holds that commit. It seeds the branch;
+- while a branch is being reset, `refs/md/incoming/<branch>`, an internal
+  checkout seed containing the host branch's commit when no mirrored remote ref
+  holds that exact commit; it is deleted after the reset succeeds;
 - `refs/md/sync/<branch>`, the sync point: the commit the host has seen. This
   is what `md diff` compares against;
 - your Git identity, so commits made in the container are attributed to you.
 
-Three subtleties follow.
+Several subtleties follow.
 
 The mirrored remote refs make `git rebase origin/main` work inside the
 container with no network and no credentials. Every command below re-pushes
@@ -61,8 +62,13 @@ the base of your next diff. The container's Git configuration also disables
 pruning of unreachable objects, which trades a growing object store for the
 same guarantee; container lifetimes are finite, so the leak is acceptable.
 
-Nothing deletes a sync point. A fork rename moves one to the new branch name;
-otherwise a branch dropped from the mapping leaves its ref behind.
+Ordinary synchronization does not delete old sync points, so a branch dropped
+from the mapping leaves its ref behind. A fork is the exception: it deletes the
+old primary name and records fresh sync points for the fork's mapped branches.
+
+Containers created by older versions may retain an unused synthetic `host`
+remote and `refs/remotes/host/*`. Current commands neither read nor update that
+state; it disappears when the container is purged and recreated.
 
 ## What each command does
 
@@ -86,12 +92,14 @@ pass `--apply-patch`, which pulls each repository back to the host first.
 `md fork` snapshots the source container's filesystem into an image and starts a
 new container from it, so the fork inherits the source's work including
 uncommitted changes. It then creates new host branches with the same upstreams,
-renames the primary inside the fork, carries each sync point to the new name,
-and fetches the fork's primary branch to the host.
+renames the primary inside the fork, fetches every committed mapped branch tip
+to the host, and records those tips as the fork's fresh sync points. Therefore
+inherited committed work is already synchronized and does not appear in
+`md diff`; inherited uncommitted work still appears.
 
-The source container is not modified. The fork's branches must be new names;
-reusing a source branch is refused, since one host branch cannot belong to two
-containers.
+The source container is not modified. Each forked repository's primary branch
+must have a new name; reusing any branch mapped by the source is refused. Its
+non-primary mapped branches keep their existing names.
 
 ### md push
 

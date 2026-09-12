@@ -99,7 +99,7 @@ func setupPullTest(t *testing.T) (ct *Container, hostDir, containerDir string) {
 
 	logger := testLogger(t)
 	ct = &Container{
-		Client: &Client{Home: home, Logger: logger, Runtime: testRuntime(t, "true", logger, nil)},
+		Client: &Client{Home: home, Logger: logger, Runtime: testRunningRuntime(t, logger)},
 		Logger: logger,
 		Name:   "md-test",
 		Repos: []Repo{{
@@ -148,7 +148,7 @@ func setupMultiBranchPullTest(t *testing.T) (ct *Container, hostDir, containerDi
 
 	logger := testLogger(t)
 	ct = &Container{
-		Client: &Client{Home: home, Logger: logger, Runtime: testRuntime(t, "true", logger, nil)},
+		Client: &Client{Home: home, Logger: logger, Runtime: testRunningRuntime(t, logger)},
 		Logger: logger,
 		Name:   "md-test",
 		Repos: []Repo{{
@@ -870,7 +870,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 				Home:          home,
 				XDGConfigHome: filepath.Join(home, ".config"),
 				Logger:        logger,
-				Runtime:       testRuntime(t, "true", logger, nil),
+				Runtime:       testRunningRuntime(t, logger),
 				env:           []string{"GIT_CONFIG_GLOBAL=" + config, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_COUNT=0"},
 			},
 			Logger: logger,
@@ -906,7 +906,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 
 		logger := testLogger(t)
 		ct := &Container{
-			Client: &Client{Home: home, Logger: logger, Runtime: testRuntime(t, "true", logger, nil)},
+			Client: &Client{Home: home, Logger: logger, Runtime: testRunningRuntime(t, logger)},
 			Logger: logger,
 			Name:   "md-test",
 			Repos: []Repo{{
@@ -914,7 +914,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 				ContainerPath: filepath.ToSlash(containerDir),
 			}},
 		}
-		if err := ct.configureContainerRemotes(ctx, io.Discard, io.Discard, 0, false, true); err != nil {
+		if err := ct.configureContainerRemotes(ctx, io.Discard, io.Discard, 0, true); err != nil {
 			t.Fatal(err)
 		}
 		if got := runTestGit(t, ctx, containerDir, "config", "--local", "user.name"); got != "Marc-Antoine Ruel" {
@@ -1252,6 +1252,108 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 		err = ct.Diff(t.Context(), io.Discard, io.Discard, 0, nil)
 		if err == nil || err.Error() != "Container md-test is stopped. Restart it with: md start" {
 			t.Fatalf("Diff error = %v, want stopped-container guidance", err)
+		}
+	})
+	t.Run("container_state_policy", func(t *testing.T) {
+		t.Parallel()
+		executable, err := os.Executable()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, test := range []struct {
+			name      string
+			state     string
+			policy    containerStatePolicy
+			wantError string
+		}{
+			{name: "running_requires_running", state: "running", policy: containerMustBeRunning},
+			{name: "running_allows_stopped", state: "running", policy: containerMayBeStopped},
+			{name: "exited_requires_running", state: "exited", policy: containerMustBeRunning, wantError: "Container md-test is stopped. Restart it with: md start"},
+			{name: "exited_allows_stopped", state: "exited", policy: containerMayBeStopped},
+			{name: "paused_requires_running", state: "paused", policy: containerMustBeRunning, wantError: "Container md-test is stopped. Restart it with: md start"},
+			{name: "paused_rejects_stopped", state: "paused", policy: containerMayBeStopped, wantError: "Container md-test is paused. Fork requires a running or stopped container"},
+		} {
+			t.Run(test.name, func(t *testing.T) {
+				t.Parallel()
+				home := t.TempDir()
+				writeTestSSHConfig(t, home)
+				logger := testLogger(t)
+				env := []string{
+					fakeRuntimeEnv + "=1",
+					fakeRuntimeLogEnv + "=" + filepath.Join(t.TempDir(), "runtime.log"),
+					fakeRuntimeStateEnv + "=" + test.state,
+				}
+				ct := &Container{
+					Client: &Client{Home: home, Logger: logger, Runtime: testRuntime(t, executable, logger, env), env: env},
+					Logger: logger,
+					Name:   "md-test",
+					State:  "running",
+				}
+				err := ct.checkContainerState(t.Context(), test.policy)
+				if test.wantError == "" && err != nil {
+					t.Fatalf("checkContainerState() = %v, want nil", err)
+				}
+				if test.wantError != "" && (err == nil || err.Error() != test.wantError) {
+					t.Fatalf("checkContainerState() = %v, want %q", err, test.wantError)
+				}
+			})
+		}
+	})
+	t.Run("container_state_surfaces_inspect_parse_error", func(t *testing.T) {
+		t.Parallel()
+		executable, err := os.Executable()
+		if err != nil {
+			t.Fatal(err)
+		}
+		home := t.TempDir()
+		writeTestSSHConfig(t, home)
+		logger := testLogger(t)
+		env := []string{
+			fakeRuntimeEnv + "=1",
+			fakeRuntimeLogEnv + "=" + filepath.Join(t.TempDir(), "runtime.log"),
+			fakeRuntimeStateEnv + "=raw:not-json",
+		}
+		ct := &Container{
+			Client: &Client{Home: home, Logger: logger, Runtime: testRuntime(t, executable, logger, env), env: env},
+			Logger: logger,
+			Name:   "md-test",
+			State:  "running",
+		}
+		err = ct.checkContainerState(t.Context(), containerMustBeRunning)
+		if err == nil || !strings.Contains(err.Error(), `inspecting container "md-test"`) || !strings.Contains(err.Error(), "invalid character") {
+			t.Fatalf("checkContainerState() = %v, want inspect parse error", err)
+		}
+	})
+	t.Run("container_state_checks_every_repo_remote", func(t *testing.T) {
+		t.Parallel()
+		executable, err := os.Executable()
+		if err != nil {
+			t.Fatal(err)
+		}
+		firstRepo := t.TempDir()
+		secondRepo := t.TempDir()
+		for _, dir := range []string{firstRepo, secondRepo} {
+			runTestGit(t, t.Context(), dir, "init", "-q")
+		}
+		runTestGit(t, t.Context(), firstRepo, "remote", "add", "md-test", "/dev/null")
+		home := t.TempDir()
+		writeTestSSHConfig(t, home)
+		logger := testLogger(t)
+		env := []string{
+			fakeRuntimeEnv + "=1",
+			fakeRuntimeLogEnv + "=" + filepath.Join(t.TempDir(), "runtime.log"),
+			fakeRuntimeStateEnv + "=running",
+		}
+		ct := &Container{
+			Client: &Client{Home: home, Logger: logger, Runtime: testRuntime(t, executable, logger, env), env: env},
+			Logger: logger,
+			Name:   "md-test",
+			Repos:  []Repo{{GitRoot: firstRepo}, {GitRoot: secondRepo}},
+		}
+		err = ct.checkContainerState(t.Context(), containerMustBeRunning)
+		want := fmt.Sprintf("Git remote is missing from %q", secondRepo)
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("checkContainerState() = %v, want %q", err, want)
 		}
 	})
 	t.Run("diff_preserves_runtime_inspection_failure", func(t *testing.T) {
@@ -1740,7 +1842,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 				t.Errorf("pushed origin/migration = %q, want %q", got, migrationCommit)
 			}
 			var stdout, stderr bytes.Buffer
-			if _, _, err := ct.pushMappedBranchRefs(ctx, &stdout, &stderr, &ct.Repos[0]); err != nil {
+			if _, err := ct.pushMappedBranchRefs(ctx, &stdout, &stderr, &ct.Repos[0]); err != nil {
 				t.Fatal(err)
 			}
 			if strings.Contains(stderr.String(), "deleting a non-existent ref") {
@@ -1805,7 +1907,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			if err != nil {
 				t.Fatal(err)
 			}
-			commands := containerRemoteConfigCommands(&repo, configs, false)
+			commands := containerRemoteConfigCommands(&repo, configs)
 			commands = append(commands, containerBranchSetupCommands(
 				[]containerBranchBase{{branch: "release", ref: "upstream/release", upstreamRemote: "upstream", upstreamBranch: "release", pushRemote: "origin"}},
 			)...)
@@ -1828,7 +1930,6 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			if got := runTestGit(t, ctx, containerWorktree, "for-each-ref", "--format=%(push:remotename)", "refs/heads/release"); got != "origin" {
 				t.Errorf("container push remote = %q, want origin", got)
 			}
-
 			// A removed host remote must not erase the usable container URL or
 			// prevent its cached refs from being synchronized.
 			runTestGit(t, ctx, dir, "config", "--remove-section", "remote.upstream")
@@ -1836,7 +1937,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			if err != nil {
 				t.Fatal(err)
 			}
-			cmd = exec.CommandContext(ctx, "bash", "-c", strings.Join(containerRemoteConfigCommands(&repo, configs, false), " && ")) //nolint:gosec // commands are generated from test temp paths
+			cmd = exec.CommandContext(ctx, "bash", "-c", strings.Join(containerRemoteConfigCommands(&repo, configs), " && ")) //nolint:gosec // commands are generated from test temp paths
 			if out, err := cmd.CombinedOutput(); err != nil {
 				t.Fatalf("refresh container remotes: %v\n%s", err, out)
 			}
@@ -2069,15 +2170,15 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 		if err != nil {
 			t.Fatal(err)
 		}
-		if base.ref != "upstream/main" || base.useHost || base.destination != "refs/remotes/upstream/main" || base.pushRemote != "origin" {
+		if base.ref != "upstream/main" || base.destination != "refs/remotes/upstream/main" || base.pushRemote != "origin" {
 			t.Fatalf("remote base = %+v, want upstream/main with origin push remote", base)
 		}
 		extraBase, err := repo.resolveForkExtraBranchBase(ctx, logger, "main", "main-0")
 		if err != nil {
 			t.Fatal(err)
 		}
-		if extraBase.branch != "main-0" || extraBase.ref != "host/main-0" || extraBase.upstreamRemote != "upstream" || extraBase.upstreamBranch != "main" || extraBase.pushRemote != "origin" {
-			t.Fatalf("fork extra base = %+v, want host/main-0 with upstream/main and origin push remote", extraBase)
+		if extraBase.branch != "main-0" || extraBase.ref != containerIncomingRefPrefix+"main-0" || extraBase.destination != containerIncomingRefPrefix+"main-0" || extraBase.upstreamRemote != "upstream" || extraBase.upstreamBranch != "main" || extraBase.pushRemote != "origin" {
+			t.Fatalf("fork extra base = %+v, want incoming main-0 with upstream/main and origin push remote", extraBase)
 		}
 
 		writeTestFile(t, filepath.Join(dir, "tracked.txt"), "local main\n")
@@ -2086,8 +2187,23 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 		if err != nil {
 			t.Fatal(err)
 		}
-		if base.ref != "host/main" || base.upstreamRemote != "upstream" || base.upstreamBranch != "main" || !base.useHost || base.destination != "refs/remotes/host/main" {
-			t.Fatalf("local base = %+v, want host/main tracking upstream/main", base)
+		if base.ref != containerIncomingRefPrefix+"main" || base.upstreamRemote != "upstream" || base.upstreamBranch != "main" || base.destination != containerIncomingRefPrefix+"main" {
+			t.Fatalf("local base = %+v, want incoming main tracking upstream/main", base)
+		}
+		hostTip := runTestGit(t, ctx, dir, "rev-parse", "refs/heads/main")
+		containerDir := t.TempDir()
+		runTestGit(t, ctx, containerDir, "init", "-q")
+		runTestGit(t, ctx, dir, "push", "-q", containerDir, base.source+":"+base.destination)
+		setup := exec.CommandContext(ctx, "bash", "-c", strings.Join(containerBranchSetupCommands([]containerBranchBase{base}), " && ")) //nolint:gosec // command is generated from test temp paths and fixed branch names
+		setup.Dir = containerDir
+		if out, err := setup.CombinedOutput(); err != nil {
+			t.Fatalf("set up branch from incoming ref: %v\n%s", err, out)
+		}
+		if got := runTestGit(t, ctx, containerDir, "rev-parse", "refs/heads/main"); got != hostTip {
+			t.Errorf("container branch tip = %q, want host branch tip", got)
+		}
+		if got := runTestGit(t, ctx, containerDir, "for-each-ref", "--format=%(refname)", containerIncomingRefPrefix); got != "" {
+			t.Errorf("incoming refs after branch setup = %q, want none", got)
 		}
 
 		runTestGit(t, ctx, dir, "branch", "--unset-upstream", "main")
@@ -2379,7 +2495,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			runTestGit(t, ctx, hostDir, "remote", "add", "md-test", containerDir)
 
 			ct := &Container{
-				Client: &Client{Home: home, Logger: testLogger(t), Runtime: testRuntime(t, "true", testLogger(t), nil)},
+				Client: &Client{Home: home, Logger: testLogger(t), Runtime: testRunningRuntime(t, testLogger(t))},
 				Logger: testLogger(t),
 				Name:   "md-test",
 				Repos: []Repo{{
@@ -2431,7 +2547,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			runTestGit(t, ctx, hostDir, "remote", "add", "md-test", containerDir)
 
 			ct := &Container{
-				Client: &Client{Home: home, Logger: testLogger(t), Runtime: testRuntime(t, "true", testLogger(t), nil)},
+				Client: &Client{Home: home, Logger: testLogger(t), Runtime: testRunningRuntime(t, testLogger(t))},
 				Logger: testLogger(t),
 				Name:   "md-test",
 				Repos: []Repo{{
@@ -2505,7 +2621,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			var log bytes.Buffer
 			logger := slog.New(slog.NewTextHandler(io.MultiWriter(&log, testLogWriter{t: t}), testLoggerOptions()))
 			ct := &Container{
-				Client: &Client{Home: home, Logger: logger, Runtime: testRuntime(t, "true", logger, nil)},
+				Client: &Client{Home: home, Logger: logger, Runtime: testRunningRuntime(t, logger)},
 				Logger: logger,
 				Name:   "md-test",
 				Repos: []Repo{{
@@ -2619,7 +2735,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			runTestGit(t, ctx, hostDir, "remote", "add", "md-test", containerDir)
 
 			ct := &Container{
-				Client: &Client{Home: home, Logger: testLogger(t), Runtime: testRuntime(t, "true", testLogger(t), nil)},
+				Client: &Client{Home: home, Logger: testLogger(t), Runtime: testRunningRuntime(t, testLogger(t))},
 				Logger: testLogger(t),
 				Name:   "md-test",
 				Repos: []Repo{{
@@ -2741,7 +2857,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 
 			logger := testLogger(t)
 			ct := &Container{
-				Client: &Client{Home: home, Logger: logger, Runtime: testRuntime(t, "true", logger, nil)},
+				Client: &Client{Home: home, Logger: logger, Runtime: testRunningRuntime(t, logger)},
 				Logger: logger,
 				Name:   "md-test",
 				Repos: []Repo{{
@@ -2988,7 +3104,7 @@ func TestFork(t *testing.T) {
 			t.Errorf("branchSyncRefspecs() = %q, want %q", got, want)
 		}
 	})
-	t.Run("valid_sync_point_rename_moves_the_ref", func(t *testing.T) {
+	t.Run("valid_fork_refreshes_sync_points_to_committed_tips", func(t *testing.T) {
 		t.Parallel()
 		ctx := t.Context()
 		dir := t.TempDir()
@@ -2996,23 +3112,33 @@ func TestFork(t *testing.T) {
 		runTestGit(t, ctx, dir, "config", "user.name", "Test")
 		runTestGit(t, ctx, dir, "config", "user.email", "test@test")
 		runTestGit(t, ctx, dir, "commit", "-q", "--allow-empty", "-m", "base")
-		syncCommit := runTestGit(t, ctx, dir, "rev-parse", "HEAD")
-		runTestGit(t, ctx, dir, "update-ref", containerSyncRefPrefix+"caic-23", syncCommit)
+		staleSyncCommit := runTestGit(t, ctx, dir, "rev-parse", "HEAD")
+		runTestGit(t, ctx, dir, "update-ref", containerSyncRefPrefix+"caic-23", staleSyncCommit)
+		runTestGit(t, ctx, dir, "commit", "-q", "--allow-empty", "-m", "committed in source")
+		primaryTip := runTestGit(t, ctx, dir, "rev-parse", "HEAD")
+		runTestGit(t, ctx, dir, "branch", "topic")
+		runTestGit(t, ctx, dir, "update-ref", containerSyncRefPrefix+"topic", staleSyncCommit)
 
-		rename := exec.CommandContext(ctx, "bash", "-c", containerSyncPointRenameCommand("caic-23", "caic-23-0")) //nolint:gosec // command is generated from test branch names
+		commands := make([]string, 1, 4)
+		commands[0] = forkPrimaryBranchSetupCommand("caic-23", "caic-23-0")
+		commands = append(commands, forkSyncPointCommands("caic-23", []string{"caic-23-0", "topic"})...)
+		rename := exec.CommandContext(ctx, "bash", "-c", strings.Join(commands, " && ")) //nolint:gosec // commands are generated from test branch names
 		rename.Dir = dir
 		rename.Env = append(os.Environ(), "LANG=C")
 		if out, err := rename.CombinedOutput(); err != nil {
-			t.Fatalf("sync point rename: %v\n%s", err, out)
+			t.Fatalf("fork sync point refresh: %v\n%s", err, out)
 		}
-		if got := runTestGit(t, ctx, dir, "rev-parse", containerSyncRefPrefix+"caic-23-0"); got != syncCommit {
-			t.Errorf("renamed sync point = %q, want %q", got, syncCommit)
+		if got := runTestGit(t, ctx, dir, "rev-parse", containerSyncRefPrefix+"caic-23-0"); got != primaryTip {
+			t.Errorf("primary sync point = %q, want committed tip %q", got, primaryTip)
 		}
-		if got, want := runTestGit(t, ctx, dir, "for-each-ref", "--format=%(refname)", containerSyncRefPrefix), containerSyncRefPrefix+"caic-23-0"; got != want {
-			t.Errorf("sync refs = %q, want only %q", got, want)
+		if got := runTestGit(t, ctx, dir, "rev-parse", containerSyncRefPrefix+"topic"); got != primaryTip {
+			t.Errorf("topic sync point = %q, want committed tip %q", got, primaryTip)
+		}
+		if got := runTestGit(t, ctx, dir, "for-each-ref", "--format=%(refname)", containerSyncRefPrefix+"caic-23"); got != "" {
+			t.Errorf("old primary sync ref = %q, want none", got)
 		}
 	})
-	t.Run("valid_sync_point_rename_without_a_recorded_point", func(t *testing.T) {
+	t.Run("valid_fork_creates_sync_point_without_a_recorded_point", func(t *testing.T) {
 		t.Parallel()
 		ctx := t.Context()
 		dir := t.TempDir()
@@ -3021,14 +3147,17 @@ func TestFork(t *testing.T) {
 		runTestGit(t, ctx, dir, "config", "user.email", "test@test")
 		runTestGit(t, ctx, dir, "commit", "-q", "--allow-empty", "-m", "base")
 
-		rename := exec.CommandContext(ctx, "bash", "-c", containerSyncPointRenameCommand("caic-23", "caic-23-0")) //nolint:gosec // command is generated from test branch names
+		commands := make([]string, 1, 3)
+		commands[0] = forkPrimaryBranchSetupCommand("caic-23", "caic-23-0")
+		commands = append(commands, forkSyncPointCommands("caic-23", []string{"caic-23-0"})...)
+		rename := exec.CommandContext(ctx, "bash", "-c", strings.Join(commands, " && ")) //nolint:gosec // commands are generated from test branch names
 		rename.Dir = dir
 		rename.Env = append(os.Environ(), "LANG=C")
 		if out, err := rename.CombinedOutput(); err != nil {
-			t.Fatalf("sync point rename without a recorded point: %v\n%s", err, out)
+			t.Fatalf("fork sync point refresh without a recorded point: %v\n%s", err, out)
 		}
-		if got := runTestGit(t, ctx, dir, "for-each-ref", "--format=%(refname)", containerSyncRefPrefix); got != "" {
-			t.Errorf("sync refs = %q, want none", got)
+		if got, want := runTestGit(t, ctx, dir, "rev-parse", containerSyncRefPrefix+"caic-23-0"), runTestGit(t, ctx, dir, "rev-parse", "refs/heads/caic-23-0"); got != want {
+			t.Errorf("new sync point = %q, want committed tip %q", got, want)
 		}
 	})
 	t.Run("valid_primary_branch_setup_preserves_rebase", func(t *testing.T) {

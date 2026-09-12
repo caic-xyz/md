@@ -94,7 +94,6 @@ if id -nG user | tr ' ' '\n' | grep -qx sudo; then
 fi
 passwd -l user >/dev/null`
 
-	hostRemoteSetupCommand = "git config --replace-all remote.host.url . && (git config --unset-all remote.host.pushurl >/dev/null 2>&1 || true) && git config --replace-all remote.host.fetch '+refs/remotes/host/*:refs/remotes/host/*'"
 	// gitBaseRefCommand resolves base_ref and diff_base_ref for container diffs.
 	// It resolves the current upstream, falls back to the upstream of the branch
 	// recorded by an in-progress rebase, supports the legacy base branch, then
@@ -133,10 +132,10 @@ fi`
 	// they are neither branches nor matched by the mapped branch refspecs.
 	//
 	// This mirrors the host's own refs/remotes/<container>/<branch> into the
-	// container, where md diff runs Git. It is not refs/remotes/host/<branch>,
-	// which seeds a container branch with the host branch's commit only when no
-	// remote holds that commit, and which no fetch or pull moves.
-	containerSyncRefPrefix = "refs/md/sync/"
+	// container, where md diff runs Git. It is separate from refs/md/incoming,
+	// which temporarily names host branch tips used to seed container branches.
+	containerSyncRefPrefix     = "refs/md/sync/"
+	containerIncomingRefPrefix = "refs/md/incoming/"
 )
 
 func gitBaseRefCommand() string {
@@ -516,7 +515,7 @@ func (r *Repo) containerSyncRefspecs(ctx context.Context, logger *slog.Logger) (
 //
 // It prefers the branch's configured upstream when it matches the local branch,
 // then the default remote's same-named tracking branch, and finally the local
-// branch via refs/remotes/host when the local branch contains unpushed commits.
+// branch via refs/md/incoming when the local branch contains unpushed commits.
 func (r *Repo) resolveContainerBranchBase(ctx context.Context, logger *slog.Logger, branch string) (containerBranchBase, error) {
 	g := &git.Checkout{Root: r.GitRoot, Logger: logger}
 	localRef := "refs/heads/" + branch
@@ -558,9 +557,8 @@ func (r *Repo) resolveContainerBranchBase(ctx context.Context, logger *slog.Logg
 		return base, nil
 	}
 	base.source = localRef
-	base.ref = "host/" + branch
-	base.useHost = true
-	base.destination = "refs/remotes/host/" + branch
+	base.ref = containerIncomingRefPrefix + branch
+	base.destination = containerIncomingRefPrefix + branch
 	return base, nil
 }
 
@@ -728,7 +726,8 @@ func (r *Repo) resolveForkExtraBranchBase(ctx context.Context, logger *slog.Logg
 	}
 	return containerBranchBase{
 		branch:         destinationBranch,
-		ref:            "host/" + destinationBranch,
+		ref:            containerIncomingRefPrefix + destinationBranch,
+		destination:    containerIncomingRefPrefix + destinationBranch,
 		upstreamRemote: remote,
 		upstreamBranch: upstreamBranch,
 		pushRemote:     pushRemote,
@@ -1363,7 +1362,7 @@ func (c *Container) Revive(ctx context.Context, stdout, stderr io.Writer) error 
 		if err := c.SyncDefaultBranch(ctx, i); err != nil {
 			return fmt.Errorf("syncing remote branches after revive: %w", err)
 		}
-		if err := c.configureContainerRemotes(ctx, stdout, stderr, i, false, true); err != nil {
+		if err := c.configureContainerRemotes(ctx, stdout, stderr, i, true); err != nil {
 			return err
 		}
 	}
@@ -1474,7 +1473,7 @@ func (c *Container) Push(ctx context.Context, stdout, stderr io.Writer, repoIdx 
 	if repoIdx < 0 || repoIdx >= len(c.Repos) {
 		return "", fmt.Errorf("repo index %d out of range [0, %d)", repoIdx, len(c.Repos))
 	}
-	if err := c.checkContainerState(ctx); err != nil {
+	if err := c.checkContainerState(ctx, containerMustBeRunning); err != nil {
 		return "", err
 	}
 	r := &c.Repos[repoIdx]
@@ -1516,13 +1515,13 @@ func (c *Container) Push(ctx context.Context, stdout, stderr io.Writer, repoIdx 
 			return "", fmt.Errorf("there are pending changes on branch %s locally. Please commit or stash them before pushing", currentBranch)
 		}
 	}
-	bases, includeHost, err := c.pushMappedBranchRefs(ctx, stdout, stderr, r)
+	bases, err := c.pushMappedBranchRefs(ctx, stdout, stderr, r)
 	if err != nil {
 		return "", err
 	}
 	// Configure remotes before moving the branches; the branch resets depend on the
 	// refs and upstreams set by the preceding push.
-	if err := c.configureContainerRemotes(ctx, stdout, stderr, repoIdx, includeHost, true, containerBranchSetupCommands(bases)...); err != nil {
+	if err := c.configureContainerRemotes(ctx, stdout, stderr, repoIdx, true, containerBranchSetupCommands(bases)...); err != nil {
 		return "", err
 	}
 	if err := c.recordHostBranchSyncPoints(ctx, r); err != nil {
@@ -1556,14 +1555,14 @@ func (c *Container) Fetch(ctx context.Context, stdout, stderr io.Writer, repoIdx
 	if repoIdx < 0 || repoIdx >= len(c.Repos) {
 		return fmt.Errorf("repo index %d out of range [0, %d)", repoIdx, len(c.Repos))
 	}
-	if err := c.checkContainerState(ctx); err != nil {
+	if err := c.checkContainerState(ctx, containerMustBeRunning); err != nil {
 		return err
 	}
 	r := &c.Repos[repoIdx]
 	if err := c.SyncDefaultBranch(ctx, repoIdx); err != nil {
 		return err
 	}
-	commitCommands, err := c.containerGitConfigCommands(ctx, repoIdx, false, true)
+	commitCommands, err := c.containerGitConfigCommands(ctx, repoIdx, true)
 	if err != nil {
 		return err
 	}
@@ -1716,7 +1715,7 @@ func (c *Container) Diff(ctx context.Context, stdout, stderr io.Writer, repoIdx 
 	if repoIdx < 0 || repoIdx >= len(c.Repos) {
 		return fmt.Errorf("repo index %d out of range [0, %d)", repoIdx, len(c.Repos))
 	}
-	if err := c.checkContainerState(ctx); err != nil {
+	if err := c.checkContainerState(ctx, containerMustBeRunning); err != nil {
 		return err
 	}
 	repo := &c.Repos[repoIdx]
@@ -1877,12 +1876,12 @@ func preflightForkRepos(ctx context.Context, logger *slog.Logger, sourceRepos, e
 		bases := make([]containerBranchBase, len(src.Branches))
 		refspecs := make([]string, len(src.Branches))
 		for j, branch := range src.Branches {
-			refspecs[j] = branch + ":refs/remotes/host/" + dst.Branches[j]
 			base, err := src.resolveForkExtraBranchBase(ctx, logger, branch, dst.Branches[j])
 			if err != nil {
 				return nil, fmt.Errorf("preflight extra repo %s branch %q: %w", src.GitRoot, branch, err)
 			}
 			bases[j] = base
+			refspecs[j] = "refs/heads/" + branch + ":" + base.destination
 		}
 		syncRefspecs, err := src.containerSyncRefspecs(ctx, logger)
 		if err != nil {
@@ -1986,7 +1985,7 @@ func planFork(ctx context.Context, logger *slog.Logger, excludedRemote string, s
 // and avoiding other containers' branches belongs to the caller, symmetric with
 // Launch, where the caller owns branch names too.
 func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *ForkOpts) (*Container, error) {
-	if err := c.checkContainerState(ctx); err != nil {
+	if err := c.checkContainerState(ctx, containerMayBeStopped); err != nil {
 		return nil, err
 	}
 
@@ -2178,10 +2177,12 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 		oldPrimary := r.Branches[0]
 		newPrimary := fork.Repos[i].Branches[0]
 		// Apply the host's current remote and upstream configuration after
-		// renaming the snapshotted source branch. The sync point moves with the
-		// branch so the fork keeps reporting the source's unsynchronized work.
-		renameCommands := []string{forkPrimaryBranchSetupCommand(oldPrimary, newPrimary), containerSyncPointRenameCommand(oldPrimary, newPrimary)}
-		if err := fork.configureContainerRemotes(ctx, stdout, stderr, i, false, true, renameCommands...); err != nil {
+		// renaming the snapshotted source branch. Record every committed branch
+		// tip as freshly synchronized because the host fetched them above.
+		renameCommands := make([]string, 1, len(fork.Repos[i].Branches)+2)
+		renameCommands[0] = forkPrimaryBranchSetupCommand(oldPrimary, newPrimary)
+		renameCommands = append(renameCommands, forkSyncPointCommands(oldPrimary, fork.Repos[i].Branches)...)
+		if err := fork.configureContainerRemotes(ctx, stdout, stderr, i, true, renameCommands...); err != nil {
 			return nil, fmt.Errorf("renaming branch for %s: %w", r.ContainerPath, err)
 		}
 		if err := c.runCmdOut(ctx, fork.Repos[i].GitRoot, []string{"git", "fetch", "-q", fork.Name, newPrimary}, stdout, stderr); err != nil {
@@ -2196,7 +2197,7 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 		dst := &forkRepos[nSrc+i]
 		mp := shellQuote(src.ContainerPath)
 
-		if err := c.runCmdOut(ctx, "", fork.SSHCommand(nil, "git init -q "+mp+" && git -C "+mp+" remote add host /dev/null"), stdout, stderr); err != nil {
+		if err := c.runCmdOut(ctx, "", fork.SSHCommand(nil, "git init -q "+mp), stdout, stderr); err != nil {
 			return nil, fmt.Errorf("init extra repo %s in container: %w", src.ContainerPath, err)
 		}
 		bases := preflight.extraBases[i]
@@ -2213,7 +2214,7 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 		if err := src.createForkHostBranch(ctx, c.Logger, dst.Branches[0], "refs/heads/"+src.Branches[0], upstream); err != nil {
 			return nil, fmt.Errorf("creating host branch for extra repo %s: %w", src.ContainerPath, err)
 		}
-		if err := fork.configureContainerRemotes(ctx, stdout, stderr, nSrc+i, true, false, containerBranchSetupCommands(bases)...); err != nil {
+		if err := fork.configureContainerRemotes(ctx, stdout, stderr, nSrc+i, false, containerBranchSetupCommands(bases)...); err != nil {
 			return nil, fmt.Errorf("setting up extra repo %s: %w", src.ContainerPath, err)
 		}
 		if err := c.runCmdOut(ctx, dst.GitRoot, []string{"git", "fetch", "-q", fork.Name, dst.Branches[0]}, stdout, stderr); err != nil {
@@ -2530,11 +2531,11 @@ func (c *Container) migrateRepoRemotes(ctx context.Context) {
 	}
 }
 
-func (c *Container) configureContainerRemotes(ctx context.Context, stdout, stderr io.Writer, repoIdx int, includeHost, refreshUpstreams bool, postCommands ...string) error {
+func (c *Container) configureContainerRemotes(ctx context.Context, stdout, stderr io.Writer, repoIdx int, refreshUpstreams bool, postCommands ...string) error {
 	// postCommands run after the remote config in the same remote shell. Push,
 	// Pull, and provisioning use this to express the full ordered git transition
 	// at one call site.
-	commands, err := c.containerGitConfigCommands(ctx, repoIdx, includeHost, refreshUpstreams, postCommands...)
+	commands, err := c.containerGitConfigCommands(ctx, repoIdx, refreshUpstreams, postCommands...)
 	if err != nil {
 		return err
 	}
@@ -2545,7 +2546,7 @@ func (c *Container) configureContainerRemotes(ctx context.Context, stdout, stder
 	return nil
 }
 
-func (c *Container) containerGitConfigCommands(ctx context.Context, repoIdx int, includeHost, refreshUpstreams bool, postCommands ...string) ([]string, error) {
+func (c *Container) containerGitConfigCommands(ctx context.Context, repoIdx int, refreshUpstreams bool, postCommands ...string) ([]string, error) {
 	r := &c.Repos[repoIdx]
 	configs, err := r.containerRemoteConfigs(ctx, c.Logger)
 	if err != nil {
@@ -2562,17 +2563,14 @@ func (c *Container) containerGitConfigCommands(ctx context.Context, repoIdx int,
 			return nil, err
 		}
 	}
-	commands := containerRemoteConfigCommands(r, configs, includeHost)
+	commands := containerRemoteConfigCommands(r, configs)
 	commands = slices.Insert(commands, 1, gitIdentityCommands("--local", identity)...)
 	commands = append(commands, postCommands...)
 	return append(commands, upstreamCommands...), nil
 }
 
-func containerRemoteConfigCommands(r *Repo, configs []containerRemoteConfig, includeHost bool) []string {
+func containerRemoteConfigCommands(r *Repo, configs []containerRemoteConfig) []string {
 	commands := []string{"cd " + shellQuote(r.ContainerPath)}
-	if includeHost {
-		commands = append(commands, hostRemoteSetupCommand)
-	}
 	for _, config := range configs {
 		remoteConfigPrefix := "remote." + config.name
 		if config.url != "" {
@@ -2699,31 +2697,28 @@ func refspecDestination(refspec string) string {
 // them inside the container into the container remote.
 //
 // It returns one base per mapped branch for configuring the container working
-// tree, and whether the fake host remote must be configured because at least
-// one branch is seeded from refs/remotes/host.
-func (c *Container) pushMappedBranchRefs(ctx context.Context, stdout, stderr io.Writer, r *Repo) ([]containerBranchBase, bool, error) {
+// tree.
+func (c *Container) pushMappedBranchRefs(ctx context.Context, stdout, stderr io.Writer, r *Repo) ([]containerBranchBase, error) {
 	bases := make([]containerBranchBase, len(r.Branches))
-	includeHost := false
 	refspecs := make([]string, 0, len(r.Branches))
 	for i, b := range r.Branches {
 		base, err := r.resolveContainerBranchBase(ctx, c.Logger, b)
 		if err != nil {
-			return nil, false, fmt.Errorf("resolve branch base for %s: %w", b, err)
+			return nil, fmt.Errorf("resolve branch base for %s: %w", b, err)
 		}
 		bases[i] = base
-		includeHost = includeHost || base.useHost
 		refspecs = appendUniqueRefspecs(refspecs, base.source+":"+base.destination)
 	}
 	syncRefspecs, err := r.containerSyncRefspecs(ctx, c.Logger)
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
 	refspecs = appendUniqueRefspecs(refspecs, syncRefspecs...)
 
 	if err := c.pushRefspecs(ctx, r.GitRoot, c.Name, refspecs, true, stdout, stderr); err != nil {
-		return nil, false, fmt.Errorf("push mapped branches: %w", err)
+		return nil, fmt.Errorf("push mapped branches: %w", err)
 	}
-	return bases, includeHost, nil
+	return bases, nil
 }
 
 // containerBranchSetupCommands returns shell commands that create/reset mapped
@@ -2744,6 +2739,9 @@ func containerBranchSetupCommands(bases []containerBranchBase) []string {
 			branch:     base.upstreamBranch,
 			pushRemote: base.pushRemote,
 		})...)
+		if base.ref == base.destination && strings.HasPrefix(base.destination, containerIncomingRefPrefix) {
+			commands = append(commands, "git update-ref -d "+baseRef)
+		}
 	}
 	return commands
 }
@@ -2778,17 +2776,19 @@ func (c *Container) recordHostBranchSyncPoints(ctx context.Context, r *Repo) err
 	return nil
 }
 
-// containerSyncPointRenameCommand returns a shell command that carries the
-// recorded sync point of a renamed branch over to its new name, so a fork keeps
-// reporting the work the source container had not synchronized yet. It tolerates
-// a container that has no sync point recorded for the old name.
-//
-// The two names must differ; planFork rejects a fork that reuses the source's
-// primary branch, because moving a ref onto itself here would delete it.
-func containerSyncPointRenameCommand(oldBranch, newBranch string) string {
-	oldRef := shellQuote(containerSyncRefPrefix + oldBranch)
-	newRef := shellQuote(containerSyncRefPrefix + newBranch)
-	return `if sync_commit=$(git rev-parse --verify -q ` + oldRef + `); then git update-ref ` + newRef + ` "$sync_commit" && git update-ref -d ` + oldRef + `; fi`
+// forkSyncPointCommands records the fork's committed branch tips as freshly
+// synchronized. Fork fetched those tips to the host before running these
+// commands, so inherited committed work is already present on both sides while
+// inherited working-tree changes remain visible to md diff.
+// planFork guarantees oldPrimary is absent from branches, so the final
+// deletion cannot remove a sync point recorded above.
+func forkSyncPointCommands(oldPrimary string, branches []string) []string {
+	commands := make([]string, 0, len(branches)+1)
+	for _, branch := range branches {
+		commands = append(commands, "git update-ref "+shellQuote(containerSyncRefPrefix+branch)+" "+shellQuote("refs/heads/"+branch))
+	}
+	commands = append(commands, "git update-ref -d "+shellQuote(containerSyncRefPrefix+oldPrimary))
+	return commands
 }
 
 func branchUpstreamCommands(branch, remote, upstreamBranch string) []string {
@@ -2831,7 +2831,6 @@ type containerBranchBase struct {
 	ref            string
 	upstreamRemote string
 	upstreamBranch string
-	useHost        bool
 	destination    string
 	pushRemote     string
 }
@@ -3085,31 +3084,36 @@ func (c *Container) gatherGitDiff(ctx context.Context, r *Repo) string {
 	return out
 }
 
-func (c *Container) checkContainerState(ctx context.Context) error {
-	inspectOutput, err := c.Runtime.Run(ctx, "", "inspect", c.Name)
+type containerStatePolicy uint8
+
+const (
+	containerMustBeRunning containerStatePolicy = iota
+	containerMayBeStopped
+)
+
+func (c *Container) checkContainerState(ctx context.Context, policy containerStatePolicy) error {
+	inspected, err := c.Runtime.InspectContainer(ctx, c.Name)
 	if err != nil {
 		return fmt.Errorf("inspecting container %q with %s: %w", c.Name, c.Runtime.Name(), err)
 	}
-	state := c.State
-	if inspected, err := containers.ParseInspectContainer([]byte(inspectOutput)); err == nil {
-		state = inspected.State
-	}
-	if state != "" && state != "running" {
+	state := inspected.State
+	if state != "" && state != "running" && (policy != containerMayBeStopped || state != "exited") {
+		if policy == containerMayBeStopped {
+			return fmt.Errorf("Container %s is %s. Fork requires a running or stopped container", c.Name, state)
+		}
 		return fmt.Errorf("Container %s is stopped. Restart it with: md start", c.Name)
 	}
-	var remoteExists bool
-	if len(c.Repos) > 0 {
-		_, remoteErr := c.runCmd(ctx, c.Repos[0].GitRoot, []string{"git", "remote", "get-url", c.Name})
-		remoteExists = remoteErr == nil
+	var issues []string
+	for i := range c.Repos {
+		gitRoot := c.Repos[i].GitRoot
+		if _, err := c.runCmd(ctx, gitRoot, []string{"git", "remote", "get-url", c.Name}); err != nil {
+			issues = append(issues, fmt.Sprintf("Git remote is missing from %q", gitRoot))
+		}
 	}
 	sshConfigDir := filepath.Join(c.Home, ".ssh", "config.d")
 	_, sshErr := os.Stat(filepath.Join(sshConfigDir, c.Name+".conf"))
 	sshExists := sshErr == nil
 
-	var issues []string
-	if len(c.Repos) > 0 && !remoteExists {
-		issues = append(issues, "Git remote is missing")
-	}
 	if !sshExists {
 		issues = append(issues, "SSH config is missing")
 	}
@@ -3770,10 +3774,9 @@ func (c *Container) provisionContainer(ctx context.Context, stdout, stderr io.Wr
 	// Phase 2: push all repos into the container in parallel, including
 	// submodules. Each repo pushes to a distinct path (~/src/<name>).
 	//
-	// Inside the container, a fake "host" remote (URL /dev/null) holds
-	// host-side branches as refs/remotes/host/<name> when their exact commits
-	// are needed as checkout seeds. Each working branch tracks the same
-	// upstream as its corresponding host branch.
+	// Host-side branch tips that do not match a cached remote-tracking ref are
+	// pushed into refs/md/incoming/<name> as checkout seeds. Each working branch
+	// tracks the same upstream as its corresponding host branch.
 	if len(c.Repos) > 0 {
 		if !opts.Quiet {
 			_, _ = fmt.Fprintln(stdout, "- git clone into container ...")
@@ -3784,13 +3787,13 @@ func (c *Container) provisionContainer(ctx context.Context, stdout, stderr io.Wr
 				r := &c.Repos[repoIdx]
 				mp := shellQuote(r.ContainerPath)
 
-				if err := c.runCmdOut(egCtx, "", c.SSHCommand(nil, "git init -q "+mp+" && git -C "+mp+" remote add host /dev/null"), stdout, stderr); err != nil {
+				if err := c.runCmdOut(egCtx, "", c.SSHCommand(nil, "git init -q "+mp), stdout, stderr); err != nil {
 					return fmt.Errorf("init repo %s in container: %w", r.ContainerPath, err)
 				}
 				if err := r.resolveDefaults(egCtx, c.Logger); err != nil {
 					return fmt.Errorf("resolve defaults for %s: %w", r.ContainerPath, err)
 				}
-				bases, includeHost, err := c.pushMappedBranchRefs(egCtx, stdout, stderr, r)
+				bases, err := c.pushMappedBranchRefs(egCtx, stdout, stderr, r)
 				if err != nil {
 					return fmt.Errorf("push repo %s: %w", r.ContainerPath, err)
 				}
@@ -3799,7 +3802,7 @@ func (c *Container) provisionContainer(ctx context.Context, stdout, stderr io.Wr
 				if !opts.Quiet && httpsURL != "" {
 					_, _ = fmt.Fprintf(stdout, "- Set %s %s to %s\n", r.ContainerPath, r.DefaultRemote, httpsURL)
 				}
-				if err := c.configureContainerRemotes(egCtx, stdout, stderr, repoIdx, includeHost, true, containerBranchSetupCommands(bases)...); err != nil {
+				if err := c.configureContainerRemotes(egCtx, stdout, stderr, repoIdx, true, containerBranchSetupCommands(bases)...); err != nil {
 					return err
 				}
 				if err := c.recordHostBranchSyncPoints(egCtx, r); err != nil {

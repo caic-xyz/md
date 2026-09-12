@@ -50,6 +50,19 @@ func testRuntime(t testing.TB, name string, logger *slog.Logger, env []string) c
 	return r
 }
 
+func testRunningRuntime(t testing.TB, logger *slog.Logger) containers.Runtime {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := []string{
+		fakeRuntimeEnv + "=1",
+		fakeRuntimeLogEnv + "=" + filepath.Join(t.TempDir(), "runtime.log"),
+		fakeRuntimeStateEnv + "=running",
+	}
+	return testRuntime(t, executable, logger, env)
+}
+
 func testClient(t testing.TB) *Client {
 	logger := testLogger(t)
 	return &Client{Logger: logger, Runtime: testRuntime(t, "docker", logger, nil)}
@@ -965,6 +978,10 @@ func writeFakeIIDFile(args []string, imageID string) error {
 }
 
 func fakeRuntimeContainerInspect(args []string, state string) int {
+	if raw, ok := strings.CutPrefix(state, "raw:"); ok {
+		_, _ = fmt.Fprintln(os.Stdout, raw)
+		return 0
+	}
 	if state == "" {
 		state = "running"
 	}

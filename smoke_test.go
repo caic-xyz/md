@@ -323,11 +323,14 @@ func assertSmokeContainerGitRefMissing(t *testing.T, ct *Container, repoPath, re
 	}
 }
 
-func assertSmokeContainerNoDiff(t *testing.T, ct *Container, repoPath string) {
-	gitArgs := []string{"git", "-C", repoPath, "diff", "--exit-code", "@{upstream}", "--", "."}
-	out, err := ct.runCmd(t.Context(), "", ct.SSHCommand(nil, shellQuoteArgs(gitArgs)))
+func assertSmokeContainerNoDiff(t *testing.T, ct *Container, repoIdx int) {
+	var stdout, stderr strings.Builder
+	err := ct.Diff(t.Context(), &stdout, &stderr, repoIdx, &DiffOpts{Args: []string{"--exit-code"}})
 	if err != nil {
-		t.Fatalf("container diff against upstream is not empty: %v\n%s", err, out)
+		t.Fatalf("container diff since synchronization is not empty: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("container diff since synchronization produced output:\n%s", stdout.String())
 	}
 }
 
@@ -714,6 +717,7 @@ func TestSmoke(t *testing.T) {
 				t.Run("origin_refs", func(t *testing.T) {
 					mainCommit := runSmokeGit(t, t.Context(), repo, "rev-parse", "refs/remotes/origin/main")
 					assertSmokeContainerGitRef(t, ct, cp, "refs/remotes/origin/main", mainCommit)
+					assertSmokeContainerGitRefMissing(t, ct, cp, containerIncomingRefPrefix+"main")
 					assertSmokeContainerGitRefMissing(t, ct, cp, "refs/remotes/host/main")
 					assertSmokeContainerGitRefMissing(t, ct, cp, "base")
 					assertSmokeContainerGitRefMissing(t, ct, cp, "refs/remotes/origin/HEAD")
@@ -740,7 +744,7 @@ func TestSmoke(t *testing.T) {
 					if got := strings.TrimSpace(out); got != "local-push" {
 						t.Fatalf("container README.md = %q, want local-push", got)
 					}
-					assertSmokeContainerNoDiff(t, ct, cp)
+					assertSmokeContainerNoDiff(t, ct, 0)
 
 					if _, err := ct.runCmd(t.Context(), "", ct.SSHCommand(nil, "printf 'container-pull\n' > "+shellQuote(cp+"/README.md"))); err != nil {
 						t.Fatalf("write container README.md: %v", err)
@@ -758,7 +762,7 @@ func TestSmoke(t *testing.T) {
 					if got := runSmokeGit(t, t.Context(), repo, "status", "--short"); got != "" {
 						t.Fatalf("local repo is dirty after Pull:\n%s", got)
 					}
-					assertSmokeContainerNoDiff(t, ct, cp)
+					assertSmokeContainerNoDiff(t, ct, 0)
 				})
 
 				t.Run("fork", func(t *testing.T) {
@@ -772,7 +776,11 @@ func TestSmoke(t *testing.T) {
 					})
 
 					prepareForkCmd := "printf snapshot > /tmp/fork-marker" +
-						" && printf 'fork-uncommitted\n' > " + shellQuote(cp+"/README.md")
+						" && cd " + shellQuote(cp) +
+						" && printf 'fork-committed\n' > fork-committed.txt" +
+						" && git add fork-committed.txt" +
+						" && git commit -q -m 'fork committed'" +
+						" && printf 'fork-uncommitted\n' > README.md"
 					if _, err := ct.runCmd(t.Context(), "", ct.SSHCommand(nil, prepareForkCmd)); err != nil {
 						t.Fatalf("prepare source for Fork: %v", err)
 					}
@@ -859,11 +867,11 @@ func TestSmoke(t *testing.T) {
 					if got := runSmokeGit(t, t.Context(), repo, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "main-0@{upstream}"); got != "origin/main" {
 						t.Fatalf("host fork upstream = %q, want origin/main", got)
 					}
-					out, err := fork.runCmd(t.Context(), "", fork.SSHCommand(nil, "cat /tmp/fork-marker && printf '\n' && git -C "+shellQuote(cp)+" branch --show-current && git -C "+shellQuote(cp)+" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' && cat "+shellQuote(cp+"/README.md")))
+					out, err := fork.runCmd(t.Context(), "", fork.SSHCommand(nil, "cat /tmp/fork-marker && printf '\n' && git -C "+shellQuote(cp)+" branch --show-current && git -C "+shellQuote(cp)+" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' && cat "+shellQuote(cp+"/fork-committed.txt")+" && cat "+shellQuote(cp+"/README.md")+" && git -C "+shellQuote(cp)+" diff --name-only "+shellQuote(containerSyncRefPrefix+"main-0")))
 					if err != nil {
 						t.Fatalf("inspect fork: %v", err)
 					}
-					for _, want := range []string{"snapshot", "main-0", "host/main", "fork-uncommitted"} {
+					for _, want := range []string{"snapshot", "main-0", "origin/main", "fork-committed", "fork-uncommitted", "README.md"} {
 						if !strings.Contains(out, want) {
 							t.Fatalf("fork output missing %q:\n%s", want, out)
 						}
@@ -962,8 +970,10 @@ func TestSmoke(t *testing.T) {
 				localFeatureCommit := runSmokeGit(t, t.Context(), repo, "rev-parse", "feature")
 				assertSmokeContainerGitRef(t, ct, cp, "refs/remotes/upstream/release", releaseCommit)
 				assertSmokeContainerGitRef(t, ct, cp, "refs/remotes/upstream/feature", upstreamFeatureCommit)
+				assertSmokeContainerGitRefMissing(t, ct, cp, containerIncomingRefPrefix+"release")
+				assertSmokeContainerGitRefMissing(t, ct, cp, containerIncomingRefPrefix+"feature")
 				assertSmokeContainerGitRefMissing(t, ct, cp, "refs/remotes/host/release")
-				assertSmokeContainerGitRef(t, ct, cp, "refs/remotes/host/feature", localFeatureCommit)
+				assertSmokeContainerGitRefMissing(t, ct, cp, "refs/remotes/host/feature")
 				assertSmokeContainerGitRef(t, ct, cp, "feature", localFeatureCommit)
 				assertSmokeContainerGitRefMissing(t, ct, cp, "base")
 				if upstreamFeatureCommit == localFeatureCommit {
