@@ -1743,7 +1743,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			}},
 		}
 		err := ct.SyncDefaultBranch(ctx, 0)
-		if err == nil || !strings.Contains(err.Error(), hostDir) || !strings.Contains(err.Error(), `container "md-test"`) || !strings.Contains(err.Error(), "does not appear to be a git repository") {
+		if err == nil || !strings.Contains(err.Error(), strconv.Quote(hostDir)) || !strings.Contains(err.Error(), `container "md-test"`) || !strings.Contains(err.Error(), "does not appear to be a git repository") {
 			t.Fatalf("SyncDefaultBranch error = %v, want repository/container context and Git stderr", err)
 		}
 	})
