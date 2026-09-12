@@ -194,15 +194,15 @@ func (n *psName) UnmarshalJSON(data []byte) error {
 	return json.Unmarshal(data, (*string)(n))
 }
 
-// psPorts handles Docker's string format and Podman's array format for Ports.
-type psPorts string
-
 type podmanPortMapping struct {
 	HostIP        string `json:"host_ip"`
 	HostPort      uint16 `json:"host_port"`
 	ContainerPort uint16 `json:"container_port"`
 	Proto         string `json:"proto"`
 }
+
+// psPorts handles Docker's string format and Podman's array format for Ports.
+type psPorts string
 
 func (p *psPorts) UnmarshalJSON(data []byte) error {
 	if len(data) == 0 || string(data) == "null" {

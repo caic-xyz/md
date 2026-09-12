@@ -38,12 +38,6 @@ import (
 	"github.com/caic-xyz/md/git"
 )
 
-type app struct {
-	runtimeOverride      string
-	controlMasterEnabled bool
-	client               *md.Client
-}
-
 func main() {
 	if err := mainImpl(); err != nil {
 		ec, ok := errors.AsType[*exitCodeError](err)
@@ -167,15 +161,6 @@ func usage() {
 		"  vnc           Open VNC connection to the container\n")
 }
 
-type containerFlags struct {
-	image    *string
-	tag      *string
-	platform *string
-	tags     *string
-	branch   *string
-	repo     *string
-}
-
 // addContainerFlags registers -b/-branch and -repo on the given FlagSet.
 // When image is true, image and platform flags are also registered.
 func addContainerFlags(fs *flag.FlagSet, image bool) *containerFlags {
@@ -190,6 +175,15 @@ func addContainerFlags(fs *flag.FlagSet, image bool) *containerFlags {
 	cf.repo = fs.String("repo", "", "Path to git repository (default: current directory)")
 	fs.StringVar(cf.repo, "r", "", "Path to git repository (default: current directory)")
 	return cf
+}
+
+type containerFlags struct {
+	image    *string
+	tag      *string
+	platform *string
+	tags     *string
+	branch   *string
+	repo     *string
 }
 
 func (cf *containerFlags) containerPlatform() (string, error) {
@@ -219,6 +213,12 @@ func (cf *containerFlags) baseImage() (string, error) {
 		return md.DefaultBaseImage + ":" + *cf.tag, nil
 	}
 	return "", nil
+}
+
+type app struct {
+	runtimeOverride      string
+	controlMasterEnabled bool
+	client               *md.Client
 }
 
 func (a *app) Close() error {

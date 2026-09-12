@@ -19,9 +19,6 @@ func DefaultMaxCPUs() int {
 	return max(2, runtime.NumCPU()-2)
 }
 
-// Platform is a Linux container platform.
-type Platform string
-
 const (
 	// PlatformDefault uses the host's native Linux container platform.
 	PlatformDefault Platform = ""
@@ -35,6 +32,9 @@ const (
 func DefaultPlatform() Platform {
 	return Platform("linux/" + runtime.GOARCH)
 }
+
+// Platform is a Linux container platform.
+type Platform string
 
 // Resolve returns the host's native Linux container platform when p is empty.
 func (p Platform) Resolve() Platform {

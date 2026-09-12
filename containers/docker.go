@@ -14,17 +14,17 @@ import (
 	"strconv"
 )
 
-// docker wraps the docker CLI.
-type docker struct {
-	base
-}
-
 // newDocker returns a Docker runtime wrapper.
 func newDocker(executable string, logger *slog.Logger, env []string) *docker {
 	if executable == "" {
 		executable = "docker"
 	}
 	return &docker{base: newBase(executable, logger, env, parseDockerStats)}
+}
+
+// docker wraps the docker CLI.
+type docker struct {
+	base
 }
 
 // UntagImage removes an image tag without deleting containers that use it.

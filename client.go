@@ -41,68 +41,6 @@ import (
 	"github.com/caic-xyz/md/containers"
 )
 
-// Client holds global MD tool state (paths, image config, SSH keys).
-type Client struct {
-	// Paths.
-	Home          string
-	XDGConfigHome string
-	XDGDataHome   string
-	XDGStateHome  string
-
-	// SSH key paths.
-	HostKeyPath string // ~/.config/md/ssh_host_ed25519_key (generated)
-	UserKeyPath string // ~/.ssh/md
-
-	// Runtime is the Docker or Podman runtime.
-	Runtime containers.Runtime
-
-	// Logger receives md package logs. It must be non-nil.
-	Logger *slog.Logger
-
-	// ControlMaster enables SSH ControlMaster connection multiplexing.
-	// When true, SSH connections are shared via a persistent socket,
-	// reducing connection overhead. Disabled by default because stale
-	// sockets can cause connectivity issues that are hard to diagnose.
-	ControlMaster bool
-
-	// Tokens.
-	GithubToken string // GitHub API token for Docker build secrets.
-	// TailscaleAPIKey is the Tailscale API key for auth key generation and device deletion.
-	//
-	// It is necessary to setup ephemeral nodes. The key must be rotated every 90 days.
-	//
-	// See https://tailscale.com/docs/reference/tailscale-api and
-	// https://tailscale.com/docs/features/ephemeral-nodes
-	TailscaleAPIKey string
-
-	// DigestCacheTTL controls how long remote image digest lookups are cached.
-	// When zero, caching is disabled and the registry is queried on every start.
-	DigestCacheTTL time.Duration
-
-	// keysDir is the directory containing SSH host keys and authorized_keys
-	// (~/.config/md/), used as a named Docker build context.
-	keysDir string
-
-	// env holds extra environment variables appended to subprocess
-	// environments (podman, ssh, git, etc.).
-	env []string
-
-	// buildMu serializes image build operations (BuildImage, Warmup, and the
-	// build step inside Launch) so concurrent callers don't race on the same
-	// image tag.
-	buildMu sync.Mutex
-
-	// mu protects digestCache and imageBuildCache.
-	mu sync.Mutex
-	// digestCache caches remote image digest queries to avoid repeated
-	// registry network round-trips. Entries expire after DigestCacheTTL.
-	digestCache map[string]remoteDigestEntry
-	// imageBuildCache stores the last imageBuildNeeded result so that
-	// back-to-back checks (e.g. Warmup then Launch) skip redundant
-	// docker inspect calls. Protected by mu; invalidated on successful build.
-	imageBuildCache *imageBuildCacheEntry
-}
-
 const specializedBuildContextPrefix = "rsc/specialized"
 
 // New creates a Client with global MD tool config and initialises SSH
@@ -172,6 +110,68 @@ func defaultRuntimeExecutable() string {
 		return "podman"
 	}
 	return "docker"
+}
+
+// Client holds global MD tool state (paths, image config, SSH keys).
+type Client struct {
+	// Paths.
+	Home          string
+	XDGConfigHome string
+	XDGDataHome   string
+	XDGStateHome  string
+
+	// SSH key paths.
+	HostKeyPath string // ~/.config/md/ssh_host_ed25519_key (generated)
+	UserKeyPath string // ~/.ssh/md
+
+	// Runtime is the Docker or Podman runtime.
+	Runtime containers.Runtime
+
+	// Logger receives md package logs. It must be non-nil.
+	Logger *slog.Logger
+
+	// ControlMaster enables SSH ControlMaster connection multiplexing.
+	// When true, SSH connections are shared via a persistent socket,
+	// reducing connection overhead. Disabled by default because stale
+	// sockets can cause connectivity issues that are hard to diagnose.
+	ControlMaster bool
+
+	// Tokens.
+	GithubToken string // GitHub API token for Docker build secrets.
+	// TailscaleAPIKey is the Tailscale API key for auth key generation and device deletion.
+	//
+	// It is necessary to setup ephemeral nodes. The key must be rotated every 90 days.
+	//
+	// See https://tailscale.com/docs/reference/tailscale-api and
+	// https://tailscale.com/docs/features/ephemeral-nodes
+	TailscaleAPIKey string
+
+	// DigestCacheTTL controls how long remote image digest lookups are cached.
+	// When zero, caching is disabled and the registry is queried on every start.
+	DigestCacheTTL time.Duration
+
+	// keysDir is the directory containing SSH host keys and authorized_keys
+	// (~/.config/md/), used as a named Docker build context.
+	keysDir string
+
+	// env holds extra environment variables appended to subprocess
+	// environments (podman, ssh, git, etc.).
+	env []string
+
+	// buildMu serializes image build operations (BuildImage, Warmup, and the
+	// build step inside Launch) so concurrent callers don't race on the same
+	// image tag.
+	buildMu sync.Mutex
+
+	// mu protects digestCache and imageBuildCache.
+	mu sync.Mutex
+	// digestCache caches remote image digest queries to avoid repeated
+	// registry network round-trips. Entries expire after DigestCacheTTL.
+	digestCache map[string]remoteDigestEntry
+	// imageBuildCache stores the last imageBuildNeeded result so that
+	// back-to-back checks (e.g. Warmup then Launch) skip redundant
+	// docker inspect calls. Protected by mu; invalidated on successful build.
+	imageBuildCache *imageBuildCacheEntry
 }
 
 // Close implements io.Closer.

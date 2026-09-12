@@ -16,17 +16,17 @@ import (
 	"strconv"
 )
 
-// podman wraps the podman CLI.
-type podman struct {
-	base
-}
-
 // newPodman returns a Podman runtime wrapper.
 func newPodman(executable string, logger *slog.Logger, env []string) *podman {
 	if executable == "" {
 		executable = "podman"
 	}
 	return &podman{base: newBase(executable, logger, env, parsePodmanStats)}
+}
+
+// podman wraps the podman CLI.
+type podman struct {
+	base
 }
 
 // UntagImage removes an image tag without deleting containers that use it.

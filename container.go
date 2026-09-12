@@ -674,23 +674,6 @@ type branchUpstreamSpec struct {
 	pushRemote string
 }
 
-type forkHostBranchConfig struct {
-	remote     []string
-	merge      []string
-	pushRemote []string
-}
-
-type forkHostBranchChange struct {
-	gitRoot       string
-	branch        string
-	previousOID   string
-	writtenOID    string
-	previous      forkHostBranchConfig
-	written       forkHostBranchConfig
-	previouslySet bool
-	refWritten    bool
-}
-
 func (r *Repo) mappedBranchUpstreamSpec(ctx context.Context, logger *slog.Logger, branch string) (branchUpstreamSpec, error) {
 	remote, upstreamBranch, err := r.requiredMappedBranchUpstream(ctx, logger, branch)
 	if err != nil {
@@ -853,6 +836,72 @@ func (r *Repo) createForkHostBranch(ctx context.Context, logger *slog.Logger, de
 	return change, nil
 }
 
+// forkHostBranchConfig preserves every value in the three Git configuration
+// keys that define a host branch's fetch and push upstreams.
+type forkHostBranchConfig struct {
+	remote     []string
+	merge      []string
+	pushRemote []string
+}
+
+// forkHostBranchChange records a host branch before and after Fork mutates it.
+// rollback uses both states to avoid overwriting a concurrent user change.
+type forkHostBranchChange struct {
+	gitRoot       string
+	branch        string
+	previousOID   string
+	writtenOID    string
+	previous      forkHostBranchConfig
+	written       forkHostBranchConfig
+	previouslySet bool
+	refWritten    bool
+}
+
+func (c *forkHostBranchChange) rollback(ctx context.Context, logger *slog.Logger) error {
+	if !c.refWritten {
+		return nil
+	}
+	g := &git.Checkout{Root: c.gitRoot, Logger: logger}
+	currentOID, err := g.RevParse(ctx, "refs/heads/"+c.branch)
+	if err != nil {
+		return fmt.Errorf("not rolling back host branch %q in %s because it changed after fork wrote it: %w", c.branch, c.gitRoot, err)
+	}
+	if currentOID != c.writtenOID {
+		return fmt.Errorf("not rolling back host branch %q in %s because it changed after fork wrote it: now %s, expected %s", c.branch, c.gitRoot, currentOID, c.writtenOID)
+	}
+	currentConfig, err := readForkHostBranchConfig(ctx, g, c.branch)
+	if err != nil {
+		return err
+	}
+	entries := []struct {
+		key      string
+		current  []string
+		previous []string
+		written  []string
+	}{
+		{key: "merge", current: currentConfig.merge, previous: c.previous.merge, written: c.written.merge},
+		{key: "pushRemote", current: currentConfig.pushRemote, previous: c.previous.pushRemote, written: c.written.pushRemote},
+		{key: "remote", current: currentConfig.remote, previous: c.previous.remote, written: c.written.remote},
+	}
+	for _, entry := range entries {
+		if !slices.Equal(entry.current, entry.previous) && !slices.Equal(entry.current, entry.written) {
+			return fmt.Errorf("not rolling back host branch %q in %s because its %s configuration changed after fork wrote it", c.branch, c.gitRoot, entry.key)
+		}
+	}
+	ref := "refs/heads/" + c.branch
+	if c.previouslySet {
+		if _, err := g.RunGit(ctx, "update-ref", ref, c.previousOID, c.writtenOID); err != nil {
+			return fmt.Errorf("restoring host branch %q in %s: %w", c.branch, c.gitRoot, err)
+		}
+	} else if _, err := g.RunGit(ctx, "update-ref", "-d", ref, c.writtenOID); err != nil {
+		return fmt.Errorf("deleting host branch %q in %s: %w", c.branch, c.gitRoot, err)
+	}
+	if err := writeForkHostBranchConfig(ctx, g, c.branch, c.previous); err != nil {
+		return fmt.Errorf("restoring configuration for host branch %q in %s: %w", c.branch, c.gitRoot, err)
+	}
+	return nil
+}
+
 func readForkHostBranchConfig(ctx context.Context, g *git.Checkout, branch string) (forkHostBranchConfig, error) {
 	values := func(key string) ([]string, error) {
 		out, err := g.RunGit(ctx, "config", "--get-all", key)
@@ -904,51 +953,6 @@ func writeForkHostBranchConfig(ctx context.Context, g *git.Checkout, branch stri
 				return fmt.Errorf("setting %s for fork branch %q: %w", entry.key, branch, err)
 			}
 		}
-	}
-	return nil
-}
-
-func (c *forkHostBranchChange) rollback(ctx context.Context, logger *slog.Logger) error {
-	if !c.refWritten {
-		return nil
-	}
-	g := &git.Checkout{Root: c.gitRoot, Logger: logger}
-	currentOID, err := g.RevParse(ctx, "refs/heads/"+c.branch)
-	if err != nil {
-		return fmt.Errorf("not rolling back host branch %q in %s because it changed after fork wrote it: %w", c.branch, c.gitRoot, err)
-	}
-	if currentOID != c.writtenOID {
-		return fmt.Errorf("not rolling back host branch %q in %s because it changed after fork wrote it: now %s, expected %s", c.branch, c.gitRoot, currentOID, c.writtenOID)
-	}
-	currentConfig, err := readForkHostBranchConfig(ctx, g, c.branch)
-	if err != nil {
-		return err
-	}
-	entries := []struct {
-		key      string
-		current  []string
-		previous []string
-		written  []string
-	}{
-		{key: "merge", current: currentConfig.merge, previous: c.previous.merge, written: c.written.merge},
-		{key: "pushRemote", current: currentConfig.pushRemote, previous: c.previous.pushRemote, written: c.written.pushRemote},
-		{key: "remote", current: currentConfig.remote, previous: c.previous.remote, written: c.written.remote},
-	}
-	for _, entry := range entries {
-		if !slices.Equal(entry.current, entry.previous) && !slices.Equal(entry.current, entry.written) {
-			return fmt.Errorf("not rolling back host branch %q in %s because its %s configuration changed after fork wrote it", c.branch, c.gitRoot, entry.key)
-		}
-	}
-	ref := "refs/heads/" + c.branch
-	if c.previouslySet {
-		if _, err := g.RunGit(ctx, "update-ref", ref, c.previousOID, c.writtenOID); err != nil {
-			return fmt.Errorf("restoring host branch %q in %s: %w", c.branch, c.gitRoot, err)
-		}
-	} else if _, err := g.RunGit(ctx, "update-ref", "-d", ref, c.writtenOID); err != nil {
-		return fmt.Errorf("deleting host branch %q in %s: %w", c.branch, c.gitRoot, err)
-	}
-	if err := writeForkHostBranchConfig(ctx, g, c.branch, c.previous); err != nil {
-		return fmt.Errorf("restoring configuration for host branch %q in %s: %w", c.branch, c.gitRoot, err)
 	}
 	return nil
 }
@@ -4200,16 +4204,16 @@ func (n *psName) UnmarshalJSON(data []byte) error {
 	return json.Unmarshal(data, (*string)(n))
 }
 
-// psPorts handles Docker's string format and Podman's array format for the
-// Ports field in `docker ps --format '{{json .}}'`.
-type psPorts string
-
 type podmanPortMapping struct {
 	HostIP        string `json:"host_ip"`
 	HostPort      uint16 `json:"host_port"`
 	ContainerPort uint16 `json:"container_port"`
 	Proto         string `json:"proto"`
 }
+
+// psPorts handles Docker's string format and Podman's array format for the
+// Ports field in `docker ps --format '{{json .}}'`.
+type psPorts string
 
 func (p *psPorts) UnmarshalJSON(data []byte) error {
 	if len(data) == 0 || string(data) == "null" {

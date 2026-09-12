@@ -117,15 +117,6 @@ type Logger interface {
 	Log(ctx context.Context, level slog.Level, msg string, args ...any)
 }
 
-// Checkout provides git operations scoped to the repository at Root, logging via
-// Logger.
-type Checkout struct {
-	Root   string
-	Logger Logger
-
-	_ struct{}
-}
-
 // RootDir discovers the git repository root for the given working directory
 // and returns a Git scoped to it.
 func RootDir(ctx context.Context, wd string, logger Logger) (*Checkout, error) {
@@ -136,6 +127,15 @@ func RootDir(ctx context.Context, wd string, logger Logger) (*Checkout, error) {
 	}
 	g.Root = out
 	return g, nil
+}
+
+// Checkout provides git operations scoped to the repository at Root, logging via
+// Logger.
+type Checkout struct {
+	Root   string
+	Logger Logger
+
+	_ struct{}
 }
 
 // RunGit executes a git command in Root and returns captured stdout.
