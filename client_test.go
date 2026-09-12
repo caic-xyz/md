@@ -950,6 +950,9 @@ func runFakeRuntime(args []string, logPath string, localBase bool, containerStat
 	if len(args) >= 1 && args[0] == "rmi" {
 		return 0
 	}
+	if len(args) >= 1 && args[0] == "rm" {
+		return 0
+	}
 	if len(args) >= 1 && args[0] == "stats" {
 		_, _ = fmt.Fprintln(os.Stdout, `{"Name":"md-one","CPUPerc":"1.5%","MemUsage":"10MiB / 1GiB","MemPerc":"1%","PIDs":"3","NetIO":"2kB / 3kB","BlockIO":"4kB / 5kB"}`)
 		return 0
@@ -989,8 +992,8 @@ func fakeRuntimeContainerInspect(args []string, state string) int {
 		_, _ = fmt.Fprintln(os.Stdout, "linux/amd64")
 		return 0
 	}
-	if len(args) == 2 && args[1] == "md-test" {
-		_, _ = fmt.Fprintf(os.Stdout, `[{"Name":"/md-test","Id":"ctr","Image":"sha256:image","Platform":"linux","Config":{"Image":"base:latest","Labels":{}},"State":{"Status":%q}}]`+"\n", state)
+	if len(args) == 2 {
+		_, _ = fmt.Fprintf(os.Stdout, `[{"Name":%q,"Id":"ctr","Image":"sha256:image","Platform":"linux","Config":{"Image":"base:latest","Labels":{}},"State":{"Status":%q}}]`+"\n", "/"+args[1], state)
 		return 0
 	}
 	_, _ = fmt.Fprintf(os.Stderr, "unexpected inspect command: %s\n", strings.Join(args, " "))

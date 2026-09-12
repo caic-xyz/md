@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -2923,7 +2924,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 					}
 
 					repo := &Repo{GitRoot: dir, DefaultRemote: "origin", DefaultBranch: "main"}
-					err := repo.createForkHostBranch(ctx, testLogger(t), "source-0", "fork/source", branchUpstreamSpec{remote: tt.wantRemote, branch: strings.TrimPrefix(tt.wantMergeRef, "refs/heads/"), pushRemote: tt.wantPushRemote})
+					_, err := repo.createForkHostBranch(ctx, testLogger(t), "source-0", "fork/source", branchUpstreamSpec{remote: tt.wantRemote, branch: strings.TrimPrefix(tt.wantMergeRef, "refs/heads/"), pushRemote: tt.wantPushRemote})
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -2952,6 +2953,205 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 
 func TestFork(t *testing.T) {
 	t.Parallel()
+
+	t.Run("host_branch_rollback", func(t *testing.T) {
+		t.Parallel()
+		newRepo := func(t *testing.T) (Repo, string, string) {
+			dir := t.TempDir()
+			runTestGit(t, t.Context(), dir, "init", "-q", "--initial-branch=main")
+			runTestGit(t, t.Context(), dir, "config", "user.name", "Test")
+			runTestGit(t, t.Context(), dir, "config", "user.email", "test@test")
+			runTestGit(t, t.Context(), dir, "commit", "-q", "--allow-empty", "-m", "base")
+			base := runTestGit(t, t.Context(), dir, "rev-parse", "HEAD")
+			runTestGit(t, t.Context(), dir, "commit", "-q", "--allow-empty", "-m", "fork")
+			forkTip := runTestGit(t, t.Context(), dir, "rev-parse", "HEAD")
+			return Repo{GitRoot: dir}, base, forkTip
+		}
+
+		t.Run("deletes_new_branch", func(t *testing.T) {
+			t.Parallel()
+			repo, _, forkTip := newRepo(t)
+			change, err := repo.createForkHostBranch(t.Context(), testLogger(t), "forked", forkTip, branchUpstreamSpec{remote: "origin", branch: "main"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := change.rollback(t.Context(), testLogger(t)); err != nil {
+				t.Fatal(err)
+			}
+			g := &git.Checkout{Root: repo.GitRoot, Logger: testLogger(t)}
+			exists, err := g.RefExists(t.Context(), "refs/heads/forked")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if exists {
+				t.Fatal("new fork branch still exists after rollback")
+			}
+			if remote, err := optionalGitConfig(t.Context(), g, "branch.forked.remote"); err != nil || remote != "" {
+				t.Fatalf("fork branch remote after rollback = %q, %v; want absent", remote, err)
+			}
+		})
+
+		t.Run("restores_existing_branch_and_config", func(t *testing.T) {
+			t.Parallel()
+			repo, base, forkTip := newRepo(t)
+			runTestGit(t, t.Context(), repo.GitRoot, "branch", "forked", base)
+			runTestGit(t, t.Context(), repo.GitRoot, "config", "branch.forked.remote", "old-origin")
+			runTestGit(t, t.Context(), repo.GitRoot, "config", "branch.forked.merge", "refs/heads/old-main")
+			runTestGit(t, t.Context(), repo.GitRoot, "config", "branch.forked.pushRemote", "old-push")
+
+			change, err := repo.createForkHostBranch(t.Context(), testLogger(t), "forked", forkTip, branchUpstreamSpec{remote: "origin", branch: "main"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			g := &git.Checkout{Root: repo.GitRoot, Logger: testLogger(t)}
+			if pushRemote, err := optionalGitConfig(t.Context(), g, "branch.forked.pushRemote"); err != nil || pushRemote != "" {
+				t.Fatalf("fork branch push remote = %q, %v; want stale value cleared", pushRemote, err)
+			}
+			if err := change.rollback(t.Context(), testLogger(t)); err != nil {
+				t.Fatal(err)
+			}
+			if got := runTestGit(t, t.Context(), repo.GitRoot, "rev-parse", "forked"); got != base {
+				t.Fatalf("restored branch tip = %q, want %q", got, base)
+			}
+			for _, entry := range []struct {
+				key  string
+				want string
+			}{
+				{key: "branch.forked.merge", want: "refs/heads/old-main"},
+				{key: "branch.forked.pushRemote", want: "old-push"},
+				{key: "branch.forked.remote", want: "old-origin"},
+			} {
+				if got := runTestGit(t, t.Context(), repo.GitRoot, "config", "--get", entry.key); got != entry.want {
+					t.Errorf("%s = %q, want %q", entry.key, got, entry.want)
+				}
+			}
+		})
+
+		t.Run("preserves_concurrently_moved_branch", func(t *testing.T) {
+			t.Parallel()
+			repo, _, forkTip := newRepo(t)
+			change, err := repo.createForkHostBranch(t.Context(), testLogger(t), "forked", forkTip, branchUpstreamSpec{remote: "origin", branch: "main"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			runTestGit(t, t.Context(), repo.GitRoot, "commit", "-q", "--allow-empty", "-m", "concurrent")
+			concurrentTip := runTestGit(t, t.Context(), repo.GitRoot, "rev-parse", "HEAD")
+			runTestGit(t, t.Context(), repo.GitRoot, "branch", "-f", "forked", concurrentTip)
+
+			err = change.rollback(t.Context(), testLogger(t))
+			if err == nil || !strings.Contains(err.Error(), "changed after fork wrote it") {
+				t.Fatalf("rollback error = %v, want concurrent-change error", err)
+			}
+			if got := runTestGit(t, t.Context(), repo.GitRoot, "rev-parse", "forked"); got != concurrentTip {
+				t.Fatalf("concurrently moved branch tip = %q, want preserved %q", got, concurrentTip)
+			}
+		})
+
+		t.Run("preserves_concurrently_changed_config", func(t *testing.T) {
+			t.Parallel()
+			repo, _, forkTip := newRepo(t)
+			change, err := repo.createForkHostBranch(t.Context(), testLogger(t), "forked", forkTip, branchUpstreamSpec{remote: "origin", branch: "main"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			runTestGit(t, t.Context(), repo.GitRoot, "config", "branch.forked.remote", "concurrent-origin")
+
+			err = change.rollback(t.Context(), testLogger(t))
+			if err == nil || !strings.Contains(err.Error(), "configuration changed after fork wrote it") {
+				t.Fatalf("rollback error = %v, want concurrent-config error", err)
+			}
+			if got := runTestGit(t, t.Context(), repo.GitRoot, "rev-parse", "forked"); got != forkTip {
+				t.Fatalf("fork branch tip = %q, want preserved %q", got, forkTip)
+			}
+			if got := runTestGit(t, t.Context(), repo.GitRoot, "config", "--get", "branch.forked.remote"); got != "concurrent-origin" {
+				t.Fatalf("fork branch remote = %q, want concurrent-origin", got)
+			}
+		})
+	})
+
+	t.Run("failed_attempt_rolls_back_artifacts", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		dir := t.TempDir()
+		runTestGit(t, ctx, dir, "init", "-q", "--initial-branch=main")
+		runTestGit(t, ctx, dir, "config", "user.name", "Test")
+		runTestGit(t, ctx, dir, "config", "user.email", "test@test")
+		runTestGit(t, ctx, dir, "commit", "-q", "--allow-empty", "-m", "main")
+		tip := runTestGit(t, ctx, dir, "rev-parse", "HEAD")
+		const forkName = "md-repo-forked"
+		runTestGit(t, ctx, dir, "remote", "add", forkName, "/dev/null")
+		change, err := (&Repo{GitRoot: dir}).createForkHostBranch(ctx, testLogger(t), "forked", tip, branchUpstreamSpec{remote: "origin", branch: "main"})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		home := t.TempDir()
+		configDir := filepath.Join(home, ".ssh", "config.d")
+		if err := os.MkdirAll(configDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range []string{forkName + ".conf", forkName + ".known_hosts"} {
+			if err := os.WriteFile(filepath.Join(configDir, name), []byte("test\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		executable, err := os.Executable()
+		if err != nil {
+			t.Fatal(err)
+		}
+		logPath := filepath.Join(t.TempDir(), "runtime.log")
+		env := []string{
+			fakeRuntimeEnv + "=1",
+			fakeRuntimeLogEnv + "=" + logPath,
+			fakeRuntimeStateEnv + "=running",
+		}
+		logger := testLogger(t)
+		client := &Client{Home: home, Logger: logger, Runtime: testRuntime(t, executable, logger, env), env: env}
+		source := &Container{Client: client, Logger: logger, Name: "md-source"}
+		fork := &Container{
+			Client: client,
+			Logger: logger,
+			Name:   forkName,
+			Repos:  []Repo{{GitRoot: dir}},
+			State:  "running",
+		}
+		attempt := forkAttempt{
+			source:          source,
+			fork:            fork,
+			snapshotImage:   "md-fork-md-source",
+			hostBranches:    []forkHostBranchChange{change},
+			snapshotCreated: true,
+		}
+		if err := attempt.rollback(ctx); err != nil {
+			t.Fatal(err)
+		}
+
+		g := &git.Checkout{Root: dir, Logger: logger}
+		exists, err := g.RefExists(ctx, "refs/heads/forked")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if exists {
+			t.Error("fork host branch still exists")
+		}
+		if remotes := runTestGit(t, ctx, dir, "remote"); strings.Contains(remotes, forkName) {
+			t.Errorf("fork remote still exists in %q", remotes)
+		}
+		for _, name := range []string{forkName + ".conf", forkName + ".known_hosts"} {
+			if _, err := os.Stat(filepath.Join(configDir, name)); !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("SSH artifact %s still exists: %v", name, err)
+			}
+		}
+		logData, err := os.ReadFile(logPath) //nolint:gosec // private test log.
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, want := range []string{"inspect " + forkName, "rm -f -v " + forkName, "rmi md-fork-md-source"} {
+			if !strings.Contains(string(logData), want) {
+				t.Errorf("runtime log missing %q:\n%s", want, logData)
+			}
+		}
+	})
 
 	t.Run("local_primary_upstream_fails_before_runtime_mutation", func(t *testing.T) {
 		t.Parallel()

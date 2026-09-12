@@ -101,6 +101,13 @@ The source container is not modified. Each forked repository's primary branch
 must have a new name; reusing any branch mapped by the source is refused. Its
 non-primary mapped branches keep their existing names.
 
+The new host branches are created before the fork's repository setup finishes,
+so committed work has a host-side anchor while later steps run. If setup fails,
+`md` removes the partial fork and rolls those branch changes back. A rollback
+deletes a newly created branch or restores a pre-existing branch only while it
+still points to the exact commit written by `md`; a concurrently moved branch
+is preserved and reported instead.
+
 ### md push
 
 `md push` overwrites the container with your host state. Before that it saves

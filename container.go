@@ -674,6 +674,23 @@ type branchUpstreamSpec struct {
 	pushRemote string
 }
 
+type forkHostBranchConfig struct {
+	remote     []string
+	merge      []string
+	pushRemote []string
+}
+
+type forkHostBranchChange struct {
+	gitRoot       string
+	branch        string
+	previousOID   string
+	writtenOID    string
+	previous      forkHostBranchConfig
+	written       forkHostBranchConfig
+	previouslySet bool
+	refWritten    bool
+}
+
 func (r *Repo) mappedBranchUpstreamSpec(ctx context.Context, logger *slog.Logger, branch string) (branchUpstreamSpec, error) {
 	remote, upstreamBranch, err := r.requiredMappedBranchUpstream(ctx, logger, branch)
 	if err != nil {
@@ -792,22 +809,146 @@ func optionalGitConfig(ctx context.Context, g *git.Checkout, key string) (string
 }
 
 // createForkHostBranch creates destinationBranch at startPoint and gives it the
-// source branch's upstream.
-func (r *Repo) createForkHostBranch(ctx context.Context, logger *slog.Logger, destinationBranch, startPoint string, upstream branchUpstreamSpec) error {
+// source branch's upstream. It returns enough prior state to roll the change
+// back safely if the surrounding fork operation fails.
+func (r *Repo) createForkHostBranch(ctx context.Context, logger *slog.Logger, destinationBranch, startPoint string, upstream branchUpstreamSpec) (forkHostBranchChange, error) {
 	g := &git.Checkout{Root: r.GitRoot, Logger: logger}
-	if _, err := g.RunGit(ctx, "branch", "--no-track", "-f", destinationBranch, startPoint); err != nil {
-		return fmt.Errorf("creating fork branch %q: %w", destinationBranch, err)
-	}
-	if _, err := g.RunGit(ctx, "config", "--replace-all", "branch."+destinationBranch+".remote", upstream.remote); err != nil {
-		return fmt.Errorf("setting remote for fork branch %q: %w", destinationBranch, err)
-	}
-	if _, err := g.RunGit(ctx, "config", "--replace-all", "branch."+destinationBranch+".merge", "refs/heads/"+upstream.branch); err != nil {
-		return fmt.Errorf("setting merge ref for fork branch %q: %w", destinationBranch, err)
+	change := forkHostBranchChange{
+		gitRoot: r.GitRoot,
+		branch:  destinationBranch,
+		written: forkHostBranchConfig{
+			remote: []string{upstream.remote},
+			merge:  []string{"refs/heads/" + upstream.branch},
+		},
 	}
 	if upstream.pushRemote != "" {
-		if _, err := g.RunGit(ctx, "config", "--replace-all", "branch."+destinationBranch+".pushRemote", upstream.pushRemote); err != nil {
-			return fmt.Errorf("setting push remote for fork branch %q: %w", destinationBranch, err)
+		change.written.pushRemote = []string{upstream.pushRemote}
+	}
+	var err error
+	change.writtenOID, err = g.RevParse(ctx, startPoint)
+	if err != nil {
+		return change, fmt.Errorf("resolving fork branch start point %q: %w", startPoint, err)
+	}
+	change.previouslySet, err = g.RefExists(ctx, "refs/heads/"+destinationBranch)
+	if err != nil {
+		return change, fmt.Errorf("checking fork branch %q: %w", destinationBranch, err)
+	}
+	if change.previouslySet {
+		change.previousOID, err = g.RevParse(ctx, "refs/heads/"+destinationBranch)
+		if err != nil {
+			return change, fmt.Errorf("reading fork branch %q: %w", destinationBranch, err)
 		}
+	}
+	change.previous, err = readForkHostBranchConfig(ctx, g, destinationBranch)
+	if err != nil {
+		return change, err
+	}
+	if _, err := g.RunGit(ctx, "branch", "--no-track", "-f", destinationBranch, startPoint); err != nil {
+		return change, fmt.Errorf("creating fork branch %q: %w", destinationBranch, err)
+	}
+	change.refWritten = true
+	if err := writeForkHostBranchConfig(ctx, g, destinationBranch, change.written); err != nil {
+		return change, err
+	}
+	return change, nil
+}
+
+func readForkHostBranchConfig(ctx context.Context, g *git.Checkout, branch string) (forkHostBranchConfig, error) {
+	values := func(key string) ([]string, error) {
+		out, err := g.RunGit(ctx, "config", "--get-all", key)
+		if err == nil {
+			return strings.Split(out, "\n"), nil
+		}
+		if exitErr, ok := errors.AsType[*exec.ExitError](err); ok && exitErr.ExitCode() == 1 {
+			return nil, nil
+		}
+		return nil, err
+	}
+	prefix := "branch." + branch + "."
+	remote, err := values(prefix + "remote")
+	if err != nil {
+		return forkHostBranchConfig{}, fmt.Errorf("reading remote for fork branch %q: %w", branch, err)
+	}
+	merge, err := values(prefix + "merge")
+	if err != nil {
+		return forkHostBranchConfig{}, fmt.Errorf("reading merge ref for fork branch %q: %w", branch, err)
+	}
+	pushRemote, err := values(prefix + "pushRemote")
+	if err != nil {
+		return forkHostBranchConfig{}, fmt.Errorf("reading push remote for fork branch %q: %w", branch, err)
+	}
+	return forkHostBranchConfig{remote: remote, merge: merge, pushRemote: pushRemote}, nil
+}
+
+func writeForkHostBranchConfig(ctx context.Context, g *git.Checkout, branch string, config forkHostBranchConfig) error {
+	entries := []struct {
+		key    string
+		values []string
+	}{
+		{key: "merge", values: config.merge},
+		{key: "pushRemote", values: config.pushRemote},
+		{key: "remote", values: config.remote},
+	}
+	for _, entry := range entries {
+		fullKey := "branch." + branch + "." + entry.key
+		_, err := g.RunGit(ctx, "config", "--get-all", fullKey)
+		if err == nil {
+			if _, err := g.RunGit(ctx, "config", "--unset-all", fullKey); err != nil {
+				return fmt.Errorf("clearing %s for fork branch %q: %w", entry.key, branch, err)
+			}
+		} else if exitErr, ok := errors.AsType[*exec.ExitError](err); !ok || exitErr.ExitCode() != 1 {
+			return fmt.Errorf("checking %s for fork branch %q: %w", entry.key, branch, err)
+		}
+		for _, value := range entry.values {
+			if _, err := g.RunGit(ctx, "config", "--add", fullKey, value); err != nil {
+				return fmt.Errorf("setting %s for fork branch %q: %w", entry.key, branch, err)
+			}
+		}
+	}
+	return nil
+}
+
+func (c *forkHostBranchChange) rollback(ctx context.Context, logger *slog.Logger) error {
+	if !c.refWritten {
+		return nil
+	}
+	g := &git.Checkout{Root: c.gitRoot, Logger: logger}
+	currentOID, err := g.RevParse(ctx, "refs/heads/"+c.branch)
+	if err != nil {
+		return fmt.Errorf("not rolling back host branch %q in %s because it changed after fork wrote it: %w", c.branch, c.gitRoot, err)
+	}
+	if currentOID != c.writtenOID {
+		return fmt.Errorf("not rolling back host branch %q in %s because it changed after fork wrote it: now %s, expected %s", c.branch, c.gitRoot, currentOID, c.writtenOID)
+	}
+	currentConfig, err := readForkHostBranchConfig(ctx, g, c.branch)
+	if err != nil {
+		return err
+	}
+	entries := []struct {
+		key      string
+		current  []string
+		previous []string
+		written  []string
+	}{
+		{key: "merge", current: currentConfig.merge, previous: c.previous.merge, written: c.written.merge},
+		{key: "pushRemote", current: currentConfig.pushRemote, previous: c.previous.pushRemote, written: c.written.pushRemote},
+		{key: "remote", current: currentConfig.remote, previous: c.previous.remote, written: c.written.remote},
+	}
+	for _, entry := range entries {
+		if !slices.Equal(entry.current, entry.previous) && !slices.Equal(entry.current, entry.written) {
+			return fmt.Errorf("not rolling back host branch %q in %s because its %s configuration changed after fork wrote it", c.branch, c.gitRoot, entry.key)
+		}
+	}
+	ref := "refs/heads/" + c.branch
+	if c.previouslySet {
+		if _, err := g.RunGit(ctx, "update-ref", ref, c.previousOID, c.writtenOID); err != nil {
+			return fmt.Errorf("restoring host branch %q in %s: %w", c.branch, c.gitRoot, err)
+		}
+	} else if _, err := g.RunGit(ctx, "update-ref", "-d", ref, c.writtenOID); err != nil {
+		return fmt.Errorf("deleting host branch %q in %s: %w", c.branch, c.gitRoot, err)
+	}
+	if err := writeForkHostBranchConfig(ctx, g, c.branch, c.previous); err != nil {
+		return fmt.Errorf("restoring configuration for host branch %q in %s: %w", c.branch, c.gitRoot, err)
 	}
 	return nil
 }
@@ -1984,7 +2125,21 @@ func planFork(ctx context.Context, logger *slog.Logger, excludedRemote string, s
 // a name the repo already maps, which it would destroy. Allocating a free name
 // and avoiding other containers' branches belongs to the caller, symmetric with
 // Launch, where the caller owns branch names too.
-func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *ForkOpts) (*Container, error) {
+//
+// If setup fails, Fork removes the partial container and restores or deletes
+// destination host branches that still point to the commits written by this
+// attempt. Branches moved concurrently are preserved and reported.
+func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *ForkOpts) (_ *Container, retErr error) {
+	attempt := forkAttempt{source: c}
+	defer func() {
+		if retErr == nil {
+			return
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		retErr = errors.Join(retErr, attempt.rollback(cleanupCtx))
+	}()
+
 	if err := c.checkContainerState(ctx, containerMayBeStopped); err != nil {
 		return nil, err
 	}
@@ -2016,6 +2171,7 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 	// docker commit bakes container labels into the image; any label
 	// not explicitly re-set by launchContainer would leak through.
 	snapshotImage := "md-fork-" + c.Name
+	attempt.snapshotImage = snapshotImage
 	if !opts.Quiet {
 		_, _ = fmt.Fprintf(stdout, "- Snapshotting container %s → %s ...\n", c.Name, snapshotImage)
 	}
@@ -2032,12 +2188,14 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 	if _, err := c.Runtime.Run(ctx, "", commitArgs...); err != nil {
 		return nil, fmt.Errorf("docker commit: %w", err)
 	}
+	attempt.snapshotCreated = true
 
 	// Create the new container handle with destination branches.
 	fork, err := c.Container(forkRepos...)
 	if err != nil {
 		return nil, fmt.Errorf("fork container: %w", err)
 	}
+	attempt.fork = fork
 
 	// Start the new container from the snapshot image.
 	if !opts.Quiet {
@@ -2045,6 +2203,10 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 	}
 	startOpts := opts.startOptions()
 	fork.prepareTailscaleAuthKey(ctx, stdout, startOpts)
+	fork.Display = startOpts.Display
+	fork.Tailscale = startOpts.Tailscale
+	fork.USB = startOpts.USB
+	fork.Sudo = startOpts.Sudo
 	if err := fork.launchContainer(ctx, stdout, stderr, startOpts, snapshotImage); err != nil {
 		return nil, err
 	}
@@ -2059,10 +2221,7 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 	if err := fork.untagImage(ctx, snapshotImage); err != nil {
 		return nil, err
 	}
-	fork.Display = startOpts.Display
-	fork.Tailscale = startOpts.Tailscale
-	fork.USB = startOpts.USB
-	fork.Sudo = startOpts.Sudo
+	attempt.snapshotCreated = false
 
 	if startOpts.Tailscale && startOpts.TailscaleAuthKey == "" {
 		if _, err := fork.tryReadTailscaleAuthURL(ctx, stdout); err != nil {
@@ -2121,7 +2280,9 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 		}
 		fetchedRef := fork.Name + "/" + r.Branches[0]
 		newBranch := fork.Repos[i].Branches[0]
-		if err := r.createForkHostBranch(ctx, c.Logger, newBranch, fetchedRef, preflight.sourceUpstreams[i]); err != nil {
+		change, err := r.createForkHostBranch(ctx, c.Logger, newBranch, fetchedRef, preflight.sourceUpstreams[i])
+		attempt.hostBranches = append(attempt.hostBranches, change)
+		if err != nil {
 			return nil, fmt.Errorf("creating host branch for %s: %w", r.ContainerPath, err)
 		}
 	}
@@ -2211,7 +2372,9 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 			branch:     primaryBase.upstreamBranch,
 			pushRemote: primaryBase.pushRemote,
 		}
-		if err := src.createForkHostBranch(ctx, c.Logger, dst.Branches[0], "refs/heads/"+src.Branches[0], upstream); err != nil {
+		change, err := src.createForkHostBranch(ctx, c.Logger, dst.Branches[0], "refs/heads/"+src.Branches[0], upstream)
+		attempt.hostBranches = append(attempt.hostBranches, change)
+		if err != nil {
 			return nil, fmt.Errorf("creating host branch for extra repo %s: %w", src.ContainerPath, err)
 		}
 		if err := fork.configureContainerRemotes(ctx, stdout, stderr, nSrc+i, false, containerBranchSetupCommands(bases)...); err != nil {
@@ -3588,6 +3751,7 @@ func (c *Container) launchContainer(ctx context.Context, stdout, stderr io.Write
 			return fmt.Errorf("starting container: %w", err)
 		}
 	}
+	c.State = "running"
 
 	// Get creation time and port mappings in one inspect call.
 	if err := c.refreshRuntimeFields(ctx); err != nil {
@@ -3915,6 +4079,32 @@ func (c *Container) sendEnv(ctx context.Context, stdout io.Writer, opts *StartOp
 		return fmt.Errorf("copying .env: %w\n%s", err, out)
 	}
 	return nil
+}
+
+// forkAttempt records external state created by one Fork call. On failure it
+// rolls host branches back only if they still contain the exact ref and
+// configuration this call wrote, then removes the partial container and
+// snapshot tag.
+type forkAttempt struct {
+	source          *Container
+	fork            *Container
+	snapshotImage   string
+	hostBranches    []forkHostBranchChange
+	snapshotCreated bool
+}
+
+func (a *forkAttempt) rollback(ctx context.Context) error {
+	var retErr error
+	for i := len(a.hostBranches) - 1; i >= 0; i-- {
+		retErr = errors.Join(retErr, a.hostBranches[i].rollback(ctx, a.source.Logger))
+	}
+	if a.fork != nil && a.fork.State != "" {
+		retErr = errors.Join(retErr, a.fork.Purge(ctx, io.Discard, io.Discard))
+	}
+	if a.snapshotCreated {
+		retErr = errors.Join(retErr, a.source.untagImage(ctx, a.snapshotImage))
+	}
+	return retErr
 }
 
 // convertGitURLToHTTPS converts a git URL to HTTPS format.
