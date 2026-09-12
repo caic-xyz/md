@@ -34,8 +34,11 @@ cd ~/src/<repo-name>
 claude
 exit
 
-# Check pending changes
+# Check what the container did since the last sync
 md diff
+
+# Check the whole branch
+md diff -full
 
 # Pull changes back when done
 md pull
@@ -43,37 +46,32 @@ md pull
 
 ### Git synchronization commands
 
-`md` keeps a container checkout separate from the host checkout. These commands
-make their Git effects explicit:
+`md` keeps a container checkout separate from the host checkout. Each command
+names the direction it moves work:
 
-| Command | Git effects |
+| Command | Effect |
 | --- | --- |
-| `md start` | Copies the host's mapped branches and cached remote refs into a new container, configures each mapped branch with the same upstream as its host branch, then checks out the primary mapped branch there. |
-| `md diff` | Verifies that all mapped host branches still exist and have the same upstreams as the container, refreshes cached remote refs, then reports the checked-out container branch's changes from its upstream merge base. It does not move any mapped branch. |
-| `md fetch` | Refreshes cached remote refs and branch upstreams in the container from the host; commits dirty container changes when needed; then fetches all mapped container branches into the host's corresponding remote-tracking refs over one connection. It does not integrate those refs into a host branch. |
-| `md pull` | Performs `md fetch`, then fast-forwards, rebases, or replaces each mapped host branch to include the fetched container changes. It never pushes a mapped branch to the container or resets the container checkout. |
-| `md push` | Commits dirty container changes to a timestamped backup branch, then force-pushes the mapped host branches into the container and resets the container's mapped branches to those host refs. |
-| `md fork` | Snapshots the source container's filesystem and creates a new container on new host branches; it does not modify the source container. |
+| `md start` | Copies the mapped branches, cached remote refs and tags into a new container, then checks out the primary branch there. Your branches do not move. |
+| `md diff` | Reports what the container did since the last synchronization. `md diff -full` reports the whole branch. It moves no branch. |
+| `md pull` | Commits the container's pending changes, then integrates every mapped branch into your host branches. It can rewrite host commit IDs. |
+| `md push` | Saves the container's Git-visible work on timestamped backup branches, then replaces the container's mapped branches with your host state. |
+| `md fork` | Snapshots the container and starts a new one on new host branches. The source container is untouched. |
 
-`md pull` may rewrite host commit IDs when Git rebases host-only commits onto
-container changes. Use `md push` explicitly when that reconciled host history
-should replace the container branch.
+Every mapped host branch must exist and have an upstream, because the container
+branch tracks the same upstream. `md` reports an error and the repair command
+when that is not the case.
 
-Every mapped host branch must still exist and have an upstream. `md` reports an
-error when either condition is not met. A non-primary mapped branch cannot
-track the primary branch through Git's local `.` remote; configure a different
-upstream before mapping it. If a host branch's upstream changes, `md diff`
-reports the mismatch and asks for `md pull` or `md push`; either command updates
-the container branch to track the new upstream. Consequently, `md diff`
-includes both unpushed host commits and container changes relative to the same
-upstream baseline used by the host branch.
+### Sync points
 
-If the checked-out host branch still points exactly to a container commit from
-an earlier pull and that commit was amended in the container, `md pull` uses
-`git reset --hard` to replace it. Before fetching, it refuses to proceed when
-the host has staged or unstaged tracked changes. Untracked files are normally
-left in place, but Git may remove an untracked path that obstructs a tracked
-path during the hard reset.
+Every command that synchronizes the host and the container remembers where each
+mapped branch stood. `md diff` shows the work done since then, so you see what
+the container did since you last looked at it, and `md diff -full` shows the
+whole branch. The record survives the agent amending, resetting or rebasing its
+branch.
+
+[docs/GIT_MODEL.md](docs/GIT_MODEL.md) explains what each side holds, what each
+command moves, and the cases where a diff reports something other than the work
+since the last synchronization.
 
 ### Remote branches and fork workflows
 
@@ -99,11 +97,11 @@ semantics: an empty tag expression maps no tags.
 
 ### Multiple mapped branches
 
-`md start --extra-branch <branch>` maps additional branches into the same container. The first branch (`Branches[0]`: current branch or `-b`) remains the primary branch.
-
-`md diff` validates every mapped branch before refreshing refs, then reports
-changes for whichever branch is checked out inside the container. Extra mapped
-branches are also available for `push`, `pull`, and `fork`.
+`md start --extra-branch <branch>` maps additional branches into the same
+container. The first branch, your current branch or `-b`, remains the primary
+one and is the branch the container checks out. `md diff` reports whichever
+branch is checked out there; `push`, `pull` and `fork` cover every mapped
+branch.
 
 `md pull` integrates mapped branches in order. If a later branch cannot be
 rebased, branches already completed remain integrated; the failed rebase is

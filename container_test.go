@@ -283,6 +283,37 @@ func TestCheckRepoOverlap(t *testing.T) {
 	})
 }
 
+// setupDiffTestRepo creates a repository on branch main with one commit,
+// tracking host/main as the container's mapped branches do.
+func setupDiffTestRepo(t *testing.T, ctx context.Context) string {
+	dir := t.TempDir()
+	runTestGit(t, ctx, dir, "init", "-q", "--initial-branch=main")
+	runTestGit(t, ctx, dir, "config", "user.name", "Test")
+	runTestGit(t, ctx, dir, "config", "user.email", "test@test")
+	writeTestFile(t, filepath.Join(dir, "base.txt"), "base\n")
+	runTestGit(t, ctx, dir, "add", ".")
+	runTestGit(t, ctx, dir, "commit", "-q", "-m", "base")
+	runTestGit(t, ctx, dir, "update-ref", "refs/remotes/host/main", "HEAD")
+	runTestGit(t, ctx, dir, "config", "--replace-all", "remote.host.url", ".")
+	runTestGit(t, ctx, dir, "config", "--replace-all", "remote.host.fetch", "+refs/remotes/host/*:refs/remotes/host/*")
+	runTestGit(t, ctx, dir, "branch", "-q", "--set-upstream-to=host/main", "main")
+	return dir
+}
+
+// runTestDiffCommand runs the generated container diff command and returns its
+// trimmed stdout and its stderr.
+func runTestDiffCommand(t *testing.T, ctx context.Context, req *diffRequest) (stdout, stderr string) {
+	cmd := exec.CommandContext(ctx, "bash", "-c", gitDiffCommand(req)) //nolint:gosec // repo path is a test temp dir
+	cmd.Env = append(os.Environ(), "LANG=C")
+	var out, errOut bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &errOut
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("diff command: %v\nstdout:\n%s\nstderr:\n%s", err, out.String(), errOut.String())
+	}
+	return strings.TrimSpace(out.String()), errOut.String()
+}
+
 func TestDiff(t *testing.T) {
 	t.Parallel()
 	t.Run("valid", func(t *testing.T) {
@@ -306,7 +337,7 @@ func TestDiff(t *testing.T) {
 		runTestGit(t, ctx, dir, "add", "staged.txt")
 		writeTestFile(t, filepath.Join(dir, "untracked.txt"), "new\n")
 
-		diffCommand := gitDiffCommand(dir, "main", "host", "main", nil, false)
+		diffCommand := gitDiffCommand(&diffRequest{repo: dir, primaryBranch: "main", defaultRemote: "host", defaultBranch: "main"})
 		if strings.Count(diffCommand, "git diff ") != 1 {
 			t.Fatalf("diff command runs multiple git diff invocations: %s", diffCommand)
 		}
@@ -365,20 +396,168 @@ func TestDiff(t *testing.T) {
 		runTestGit(t, ctx, dir, "update-ref", "refs/remotes/host/main", upstreamCommit)
 		runTestGit(t, ctx, dir, "checkout", "-q", "main")
 
-		cmd := exec.CommandContext(ctx, "bash", "-c", gitDiffCommand(dir, "main", "host", "main", []string{"--name-only"}, false)) //nolint:gosec // repo path is a test temp dir
-		cmd.Env = append(os.Environ(), "LANG=C")
-		var stdout, stderr bytes.Buffer
-		cmd.Stdout = &stdout
-		cmd.Stderr = &stderr
-		if err := cmd.Run(); err != nil {
-			t.Fatalf("diff command: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+		stdout, stderr := runTestDiffCommand(t, ctx, &diffRequest{repo: dir, primaryBranch: "main", defaultRemote: "host", defaultBranch: "main", extraArgs: []string{"--name-only"}})
+		if !strings.Contains(stdout, "local.txt") {
+			t.Errorf("diff output missing local.txt:\n%s", stdout)
 		}
-		out := stdout.String()
-		if !strings.Contains(out, "local.txt") {
-			t.Errorf("diff output missing local.txt:\n%s", out)
+		if strings.Contains(stdout, "upstream.txt") {
+			t.Errorf("diff output includes updated upstream file:\n%s", stdout)
 		}
-		if strings.Contains(out, "upstream.txt") {
-			t.Errorf("diff output includes updated upstream file:\n%s", out)
+		if !strings.Contains(stderr, `branch "main" has no recorded sync point`) {
+			t.Errorf("stderr missing the missing sync point note:\n%s", stderr)
+		}
+	})
+	t.Run("valid_since_sync_point", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		dir := setupDiffTestRepo(t, ctx)
+		writeTestFile(t, filepath.Join(dir, "synced.txt"), "synced\n")
+		runTestGit(t, ctx, dir, "add", ".")
+		runTestGit(t, ctx, dir, "commit", "-q", "-m", "synced")
+		runTestGit(t, ctx, dir, "update-ref", containerSyncRefPrefix+"main", "HEAD")
+
+		writeTestFile(t, filepath.Join(dir, "committed.txt"), "committed\n")
+		runTestGit(t, ctx, dir, "add", ".")
+		runTestGit(t, ctx, dir, "commit", "-q", "-m", "after the sync point")
+		writeTestFile(t, filepath.Join(dir, "untracked.txt"), "untracked\n")
+
+		req := &diffRequest{repo: dir, primaryBranch: "main", defaultRemote: "host", defaultBranch: "main", extraArgs: []string{"--name-only"}}
+		stdout, stderr := runTestDiffCommand(t, ctx, req)
+		if want := "committed.txt\nuntracked.txt"; stdout != want {
+			t.Errorf("diff --name-only = %q, want %q\nstderr:\n%s", stdout, want, stderr)
+		}
+		req.full = true
+		stdout, stderr = runTestDiffCommand(t, ctx, req)
+		if want := "committed.txt\nsynced.txt\nuntracked.txt"; stdout != want {
+			t.Errorf("full diff --name-only = %q, want %q\nstderr:\n%s", stdout, want, stderr)
+		}
+	})
+	t.Run("valid_since_sync_point_survives_rebase_and_gc", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		dir := setupDiffTestRepo(t, ctx)
+		baseCommit := runTestGit(t, ctx, dir, "rev-parse", "HEAD")
+		writeTestFile(t, filepath.Join(dir, "work.txt"), "work\n")
+		runTestGit(t, ctx, dir, "add", ".")
+		runTestGit(t, ctx, dir, "commit", "-q", "-m", "work")
+		syncCommit := runTestGit(t, ctx, dir, "rev-parse", "HEAD")
+		runTestGit(t, ctx, dir, "update-ref", containerSyncRefPrefix+"main", syncCommit)
+
+		// The upstream gains a commit and the agent rebases onto it, which makes
+		// the recorded sync point unreachable from every branch.
+		runTestGit(t, ctx, dir, "checkout", "-q", "-b", "upstream-update", baseCommit)
+		writeTestFile(t, filepath.Join(dir, "upstream.txt"), "upstream\n")
+		runTestGit(t, ctx, dir, "add", ".")
+		runTestGit(t, ctx, dir, "commit", "-q", "-m", "upstream")
+		runTestGit(t, ctx, dir, "update-ref", "refs/remotes/host/main", "HEAD")
+		runTestGit(t, ctx, dir, "checkout", "-q", "main")
+		runTestGit(t, ctx, dir, "branch", "-q", "-D", "upstream-update")
+		runTestGit(t, ctx, dir, "rebase", "-q", "host/main")
+		runTestGit(t, ctx, dir, "update-ref", "-d", "ORIG_HEAD")
+		runTestGit(t, ctx, dir, "reflog", "expire", "--expire=now", "--expire-unreachable=now", "--all")
+		runTestGit(t, ctx, dir, "gc", "-q", "--prune=now")
+
+		// Only the sync ref keeps the base of the diff alive.
+		runTestGit(t, ctx, dir, "cat-file", "-e", syncCommit)
+		req := &diffRequest{repo: dir, primaryBranch: "main", defaultRemote: "host", defaultBranch: "main", extraArgs: []string{"--name-only"}}
+		stdout, stderr := runTestDiffCommand(t, ctx, req)
+		// The rebase replayed work.txt unchanged, so the diff from the sync point
+		// holds the upstream commit only.
+		if stdout != "upstream.txt" {
+			t.Errorf("diff --name-only = %q, want upstream.txt", stdout)
+		}
+		if !strings.Contains(stderr, "moved onto a newer upstream") {
+			t.Errorf("stderr missing the rebase note:\n%s", stderr)
+		}
+	})
+	t.Run("valid_since_sync_point_during_a_rebase", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		dir := setupDiffTestRepo(t, ctx)
+		writeTestFile(t, filepath.Join(dir, "work.txt"), "work\n")
+		writeTestFile(t, filepath.Join(dir, "synced.txt"), "synced\n")
+		runTestGit(t, ctx, dir, "add", ".")
+		runTestGit(t, ctx, dir, "commit", "-q", "-m", "work")
+		// The sync point is the work commit, which already holds synced.txt. A
+		// diff from it therefore reports only the conflicted file, while the
+		// upstream merge base would also report synced.txt as added.
+		runTestGit(t, ctx, dir, "update-ref", containerSyncRefPrefix+"main", "HEAD")
+
+		// Conflict with the rebase target so the rebase stops with HEAD detached.
+		runTestGit(t, ctx, dir, "checkout", "-q", "-b", "rebase-target", "HEAD~1")
+		writeTestFile(t, filepath.Join(dir, "work.txt"), "target\n")
+		runTestGit(t, ctx, dir, "add", ".")
+		runTestGit(t, ctx, dir, "commit", "-q", "-m", "target")
+		runTestGit(t, ctx, dir, "checkout", "-q", "main")
+		rebase := exec.CommandContext(ctx, "git", "rebase", "rebase-target")
+		rebase.Dir = dir
+		rebase.Env = append(os.Environ(), "LANG=C")
+		if out, err := rebase.CombinedOutput(); err == nil {
+			t.Fatalf("git rebase unexpectedly succeeded:\n%s", out)
+		}
+		if got := runTestGit(t, ctx, dir, "branch", "--show-current"); got != "" {
+			t.Fatalf("branch --show-current = %q, want empty during the rebase", got)
+		}
+
+		req := &diffRequest{repo: dir, primaryBranch: "main", defaultRemote: "host", defaultBranch: "main", extraArgs: []string{"--name-only"}}
+		stdout, stderr := runTestDiffCommand(t, ctx, req)
+		if stdout != "work.txt" {
+			t.Errorf("diff --name-only = %q, want work.txt only, so the sync point was the base\nstderr:\n%s", stdout, stderr)
+		}
+		if strings.Contains(stderr, "no recorded sync point") {
+			t.Errorf("stderr claims no sync point while a rebase is in progress:\n%s", stderr)
+		}
+	})
+	t.Run("valid_reset_behind_the_sync_point_omits_the_upstream_note", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		dir := setupDiffTestRepo(t, ctx)
+		baseCommit := runTestGit(t, ctx, dir, "rev-parse", "HEAD")
+		writeTestFile(t, filepath.Join(dir, "upstream.txt"), "upstream\n")
+		runTestGit(t, ctx, dir, "add", ".")
+		runTestGit(t, ctx, dir, "commit", "-q", "-m", "upstream")
+		runTestGit(t, ctx, dir, "update-ref", "refs/remotes/host/main", "HEAD")
+		runTestGit(t, ctx, dir, "update-ref", containerSyncRefPrefix+"main", "HEAD")
+		// The agent drops the upstream commit instead of moving onto a new one.
+		runTestGit(t, ctx, dir, "reset", "--hard", "-q", baseCommit)
+
+		req := &diffRequest{repo: dir, primaryBranch: "main", defaultRemote: "host", defaultBranch: "main", extraArgs: []string{"--name-only"}}
+		stdout, stderr := runTestDiffCommand(t, ctx, req)
+		if stdout != "upstream.txt" {
+			t.Errorf("diff --name-only = %q, want upstream.txt\nstderr:\n%s", stdout, stderr)
+		}
+		if strings.Contains(stderr, "moved onto a newer upstream") {
+			t.Errorf("stderr claims the branch moved onto a newer upstream:\n%s", stderr)
+		}
+	})
+	t.Run("valid_quiet_omits_base_notes", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		dir := setupDiffTestRepo(t, ctx)
+		writeTestFile(t, filepath.Join(dir, "work.txt"), "work\n")
+
+		stdout, stderr := runTestDiffCommand(t, ctx, &diffRequest{repo: dir, primaryBranch: "main", defaultRemote: "host", defaultBranch: "main", extraArgs: []string{"--quiet"}, quiet: true})
+		if stdout != "" || stderr != "" {
+			t.Errorf("quiet diff = stdout %q, stderr %q; want both empty", stdout, stderr)
+		}
+	})
+	t.Run("valid_since_sync_point_without_upstream", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		dir := t.TempDir()
+		runTestGit(t, ctx, dir, "init", "-q", "--initial-branch=caic-1")
+		runTestGit(t, ctx, dir, "config", "user.name", "Test")
+		runTestGit(t, ctx, dir, "config", "user.email", "test@test")
+		writeTestFile(t, filepath.Join(dir, "base.txt"), "base\n")
+		runTestGit(t, ctx, dir, "add", ".")
+		runTestGit(t, ctx, dir, "commit", "-q", "-m", "base")
+		runTestGit(t, ctx, dir, "update-ref", containerSyncRefPrefix+"caic-1", "HEAD")
+		writeTestFile(t, filepath.Join(dir, "work.txt"), "work\n")
+
+		req := &diffRequest{repo: dir, primaryBranch: "caic-1", defaultRemote: "origin", defaultBranch: "main", extraArgs: []string{"--name-only"}}
+		stdout, stderr := runTestDiffCommand(t, ctx, req)
+		if stdout != "work.txt" {
+			t.Errorf("diff --name-only = %q, want work.txt\nstderr:\n%s", stdout, stderr)
 		}
 	})
 	t.Run("valid_legacy_base_upstream", func(t *testing.T) {
@@ -396,7 +575,7 @@ func TestDiff(t *testing.T) {
 		runTestGit(t, ctx, dir, "branch", "-q", "--set-upstream-to=base", "caic-2")
 		writeTestFile(t, filepath.Join(dir, "tracked.txt"), "new\n")
 
-		cmd := exec.CommandContext(ctx, "bash", "-c", gitDiffCommand(dir, "caic-2", "origin", "main", nil, false)) //nolint:gosec // repo path is a test temp dir
+		cmd := exec.CommandContext(ctx, "bash", "-c", gitDiffCommand(&diffRequest{repo: dir, primaryBranch: "caic-2", defaultRemote: "origin", defaultBranch: "main"})) //nolint:gosec // repo path is a test temp dir
 		cmd.Env = append(os.Environ(), "LANG=C")
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout = &stdout
@@ -440,7 +619,7 @@ func TestDiff(t *testing.T) {
 			t.Fatalf("rebase metadata missing: %v", err)
 		}
 
-		cmd := exec.CommandContext(ctx, "bash", "-c", gitDiffCommand(dir, "main", "host", "main", []string{"--name-only"}, false)) //nolint:gosec // repo path is a test temp dir
+		cmd := exec.CommandContext(ctx, "bash", "-c", gitDiffCommand(&diffRequest{repo: dir, primaryBranch: "main", defaultRemote: "host", defaultBranch: "main", extraArgs: []string{"--name-only"}})) //nolint:gosec // repo path is a test temp dir
 		cmd.Env = append(os.Environ(), "LANG=C")
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout = &stdout
@@ -468,7 +647,7 @@ func TestDiff(t *testing.T) {
 		runTestGit(t, ctx, dir, "branch", "-q", "--set-upstream-to=origin/main", "caic-1")
 		runTestGit(t, ctx, dir, "checkout", "-q", "-b", "fix-$(touch-pwn)")
 
-		cmd := exec.CommandContext(ctx, "bash", "-c", gitDiffCommand(dir, "caic-1", "origin", "main", nil, false)) //nolint:gosec // repo path is a test temp dir
+		cmd := exec.CommandContext(ctx, "bash", "-c", gitDiffCommand(&diffRequest{repo: dir, primaryBranch: "caic-1", defaultRemote: "origin", defaultBranch: "main"})) //nolint:gosec // repo path is a test temp dir
 		cmd.Env = append(os.Environ(), "LANG=C")
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
@@ -500,7 +679,7 @@ func TestDiff(t *testing.T) {
 		runTestGit(t, ctx, dir, "add", ".")
 		runTestGit(t, ctx, dir, "commit", "-q", "-m", "base")
 
-		cmd := exec.CommandContext(ctx, "bash", "-c", gitDiffCommand(dir, "caic-1", "origin", "main", nil, false)) //nolint:gosec // repo path is a test temp dir
+		cmd := exec.CommandContext(ctx, "bash", "-c", gitDiffCommand(&diffRequest{repo: dir, primaryBranch: "caic-1", defaultRemote: "origin", defaultBranch: "main"})) //nolint:gosec // repo path is a test temp dir
 		cmd.Env = append(os.Environ(), "LANG=C")
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
@@ -524,7 +703,7 @@ func TestDiff(t *testing.T) {
 		runTestGit(t, ctx, dir, "commit", "-q", "--allow-empty", "-m", "base")
 		runTestGit(t, ctx, dir, "switch", "-q", "--detach")
 
-		cmd := exec.CommandContext(ctx, "bash", "-c", gitDiffCommand(dir, "caic-1", "origin", "main", nil, false)) //nolint:gosec // repo path is a test temp dir
+		cmd := exec.CommandContext(ctx, "bash", "-c", gitDiffCommand(&diffRequest{repo: dir, primaryBranch: "caic-1", defaultRemote: "origin", defaultBranch: "main"})) //nolint:gosec // repo path is a test temp dir
 		cmd.Env = append(os.Environ(), "LANG=C")
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
@@ -630,6 +809,16 @@ func TestPlanFork(t *testing.T) {
 			{GitRoot: "/src/a", DestPrimary: "a1"},
 			{GitRoot: "/src/b", DestPrimary: "b0"},
 		}},
+		// Reusing a mapped branch would map one host branch into two containers,
+		// and Fork force-resets the destination host branch.
+		{"dest_reuses_source_primary", []ForkRepo{
+			{GitRoot: "/src/a", DestPrimary: "a0"},
+			{GitRoot: "/src/b", DestPrimary: "main"},
+		}},
+		{"dest_reuses_source_non_primary_branch", []ForkRepo{
+			{GitRoot: "/src/a", DestPrimary: "feat"},
+			{GitRoot: "/src/b", DestPrimary: "b0"},
+		}},
 	}
 	for _, tc := range errCases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -639,6 +828,29 @@ func TestPlanFork(t *testing.T) {
 			}
 		})
 	}
+
+	// An added repo resolves its own branches, so its destination is checked
+	// against those rather than against a source container's mapping.
+	t.Run("error_added_repo_dest_reuses_its_own_branch", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		dir := t.TempDir()
+		remote := filepath.Join(t.TempDir(), "z.git")
+		runTestGit(t, ctx, "", "init", "-q", "--bare", "--initial-branch=main", remote)
+		runTestGit(t, ctx, dir, "init", "-q", "--initial-branch=main")
+		runTestGit(t, ctx, dir, "commit", "-q", "--allow-empty", "-m", "main")
+		runTestGit(t, ctx, dir, "branch", "topic")
+		runTestGit(t, ctx, dir, "remote", "add", "origin", remote)
+		runTestGit(t, ctx, dir, "push", "-q", "-u", "origin", "main", "topic")
+		spec := []ForkRepo{
+			{GitRoot: "/src/a", DestPrimary: "a0"},
+			{GitRoot: "/src/b", DestPrimary: "b0"},
+			{GitRoot: dir, SourceBranches: []string{"main", "topic"}, DestPrimary: "topic"},
+		}
+		if _, err := planFork(ctx, testLogger(t), "", source, spec); err == nil {
+			t.Fatal("planFork error = nil, want error")
+		}
+	})
 }
 
 func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with t.Setenv.
@@ -808,7 +1020,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 					runTestGit(t, t.Context(), hostDir, "push", "-q", "origin", "main")
 				}
 				var stdout, stderr bytes.Buffer
-				err := ct.Diff(t.Context(), &stdout, &stderr, 0, test.args)
+				err := ct.Diff(t.Context(), &stdout, &stderr, 0, &DiffOpts{Args: test.args})
 				if got := errors.Is(err, ErrDiffFound); got != test.wantErr {
 					t.Fatalf("Diff error is ErrDiffFound = %v, want %v: %v", got, test.wantErr, err)
 				} else if !test.wantErr && err != nil {
@@ -821,6 +1033,21 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 					t.Errorf("Diff stderr = %q, want empty", stderr.String())
 				}
 			})
+		}
+	})
+	t.Run("diff_forwards_base_notes_with_exit_status_flags", func(t *testing.T) { //nolint:paralleltest // setupPullTest uses t.Setenv.
+		ctx := t.Context()
+		ct, _, containerDir := setupPullTest(t)
+		runTestGit(t, ctx, containerDir, "update-ref", "-d", containerSyncRefPrefix+"main")
+		writeTestFile(t, filepath.Join(containerDir, "shared.txt"), "different\n")
+
+		var stdout, stderr bytes.Buffer
+		err := ct.Diff(ctx, &stdout, &stderr, 0, &DiffOpts{Args: []string{"--exit-code", "--name-only"}})
+		if !errors.Is(err, ErrDiffFound) {
+			t.Fatalf("Diff error = %v, want ErrDiffFound", err)
+		}
+		if !strings.Contains(stderr.String(), "has no recorded sync point") {
+			t.Errorf("Diff stderr = %q, want the missing sync point note", stderr.String())
 		}
 	})
 	t.Run("host_upstream_repair_command_targets_mapped_repo", func(t *testing.T) { //nolint:paralleltest // setupPullTest uses t.Setenv.
@@ -1114,7 +1341,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 		t.Setenv(fakeSSHFailureStatusEnv, "1")
 		t.Setenv(fakeSSHFailureTextEnv, "fatal: simulated remote Git failure")
 
-		err := ct.Diff(t.Context(), io.Discard, io.Discard, 0, []string{"--exit-code"})
+		err := ct.Diff(t.Context(), io.Discard, io.Discard, 0, &DiffOpts{Args: []string{"--exit-code"}})
 		if err == nil || errors.Is(err, ErrDiffFound) || !strings.Contains(err.Error(), `running diff in container "md-test" over SSH`) || !strings.Contains(err.Error(), "fatal: simulated remote Git failure") {
 			t.Fatalf("Diff error = %v, want wrapped remote Git diagnostic", err)
 		}
@@ -1129,7 +1356,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 		t.Setenv(fakeSSHFailureTextEnv, "warning: simulated Git warning")
 		var stderr bytes.Buffer
 
-		err := ct.Diff(t.Context(), io.Discard, &stderr, 0, []string{"--quiet"})
+		err := ct.Diff(t.Context(), io.Discard, &stderr, 0, &DiffOpts{Args: []string{"--quiet"}})
 		if !errors.Is(err, ErrDiffFound) {
 			t.Fatalf("Diff error = %v, want ErrDiffFound", err)
 		}
@@ -1188,17 +1415,94 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			t.Fatalf("Pull after local upstream change: %v", err)
 		}
 		var stdout bytes.Buffer
-		if err := ct.Diff(ctx, &stdout, io.Discard, 0, []string{"--name-only"}); err != nil {
+		if err := ct.Diff(ctx, &stdout, io.Discard, 0, &DiffOpts{Args: []string{"--name-only"}, Full: true}); err != nil {
 			t.Fatal(err)
 		}
 		if got := strings.TrimSpace(stdout.String()); got != "shared.txt" {
-			t.Fatalf("diff --name-only = %q, want shared.txt", got)
+			t.Fatalf("full diff --name-only = %q, want shared.txt", got)
+		}
+		stdout.Reset()
+		if err := ct.Diff(ctx, &stdout, io.Discard, 0, &DiffOpts{Args: []string{"--name-only"}}); err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.TrimSpace(stdout.String()); got != "" {
+			t.Fatalf("diff --name-only after pull = %q, want no change since the sync point", got)
 		}
 		if got := runTestGit(t, ctx, containerDir, "rev-parse", "migration"); got != runTestGit(t, ctx, hostDir, "rev-parse", "migration") {
 			t.Errorf("container migration = %q, want host migration", got)
 		}
 		if got := runTestGit(t, ctx, containerDir, "config", "--get", "branch.main.remote"); got != "." {
 			t.Errorf("container branch remote = %q, want .", got)
+		}
+	})
+	t.Run("diff_reports_container_work_since_the_last_pull", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
+		ctx := t.Context()
+		ct, _, containerDir := setupPullTest(t)
+		syncPoint := runTestGit(t, ctx, containerDir, "rev-parse", containerSyncRefPrefix+"main")
+		if want := runTestGit(t, ctx, containerDir, "rev-parse", "main"); syncPoint != want {
+			t.Fatalf("sync point after pull = %q, want container main %q", syncPoint, want)
+		}
+		writeTestFile(t, filepath.Join(containerDir, "turn.txt"), "turn\n")
+		runTestGit(t, ctx, containerDir, "add", ".")
+		runTestGit(t, ctx, containerDir, "commit", "-q", "-m", "turn")
+
+		var stdout bytes.Buffer
+		if err := ct.Diff(ctx, &stdout, io.Discard, 0, &DiffOpts{Args: []string{"--name-only"}}); err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.TrimSpace(stdout.String()); got != "turn.txt" {
+			t.Fatalf("diff --name-only = %q, want turn.txt", got)
+		}
+		// Amending the branch tip must not move the base of the diff.
+		writeTestFile(t, filepath.Join(containerDir, "amended.txt"), "amended\n")
+		runTestGit(t, ctx, containerDir, "add", ".")
+		runTestGit(t, ctx, containerDir, "commit", "-q", "--amend", "--no-edit")
+		stdout.Reset()
+		if err := ct.Diff(ctx, &stdout, io.Discard, 0, &DiffOpts{Args: []string{"--name-only"}}); err != nil {
+			t.Fatal(err)
+		}
+		if got, want := strings.TrimSpace(stdout.String()), "amended.txt\nturn.txt"; got != want {
+			t.Fatalf("diff --name-only after amend = %q, want %q", got, want)
+		}
+		stdout.Reset()
+		if err := ct.Diff(ctx, &stdout, io.Discard, 0, &DiffOpts{Args: []string{"--name-only"}, Full: true}); err != nil {
+			t.Fatal(err)
+		}
+		if got, want := strings.TrimSpace(stdout.String()), "amended.txt\nshared.txt\nturn.txt"; got != want {
+			t.Fatalf("full diff --name-only = %q, want %q", got, want)
+		}
+	})
+	t.Run("fetch_without_commit_separates_committed_work", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
+		ctx := t.Context()
+		ct, hostDir, containerDir := setupPullTest(t)
+		writeTestFile(t, filepath.Join(containerDir, "committed.txt"), "committed\n")
+		runTestGit(t, ctx, containerDir, "add", ".")
+		runTestGit(t, ctx, containerDir, "commit", "-q", "-m", "committed work")
+		containerTip := runTestGit(t, ctx, containerDir, "rev-parse", "main")
+		writeTestFile(t, filepath.Join(containerDir, "pending.txt"), "pending\n")
+
+		if err := ct.Fetch(ctx, io.Discard, io.Discard, 0, nil); err != nil {
+			t.Fatalf("Fetch: %v", err)
+		}
+		if got := runTestGit(t, ctx, containerDir, "rev-parse", "main"); got != containerTip {
+			t.Errorf("container main = %q, want the tip %q it had before the fetch", got, containerTip)
+		}
+		if got := runTestGit(t, ctx, containerDir, "status", "--porcelain"); got != "?? pending.txt" {
+			t.Errorf("container status = %q, want pending.txt still uncommitted", got)
+		}
+		if got := runTestGit(t, ctx, hostDir, "rev-parse", "refs/remotes/md-test/main"); got != containerTip {
+			t.Errorf("host tracking ref = %q, want the committed tip %q", got, containerTip)
+		}
+		if got := runTestGit(t, ctx, containerDir, "rev-parse", containerSyncRefPrefix+"main"); got != containerTip {
+			t.Errorf("sync point = %q, want the committed tip %q", got, containerTip)
+		}
+		// The committed work reached the host, so only the pending work remains.
+		var stdout bytes.Buffer
+		if err := ct.Diff(ctx, &stdout, io.Discard, 0, &DiffOpts{Args: []string{"--name-only"}}); err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.TrimSpace(stdout.String()); got != "pending.txt" {
+			t.Errorf("diff --name-only = %q, want pending.txt", got)
 		}
 	})
 	t.Run("pull_refreshes_changed_push_remote", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
@@ -2139,7 +2443,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 				}},
 			}
 			var stdout, stderr bytes.Buffer
-			if err := ct.Fetch(ctx, &stdout, &stderr, 0, nil); err != nil {
+			if err := ct.Fetch(ctx, &stdout, &stderr, 0, &FetchOpts{Commit: true}); err != nil {
 				t.Fatalf("Fetch: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 			}
 			if got := runTestGit(t, ctx, hostDir, "show", "md-test/main:container.txt"); got != "container" {
@@ -2340,7 +2644,45 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			}
 		})
 	})
-	t.Run("Push", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
+	t.Run("Push", func(t *testing.T) {
+		t.Run("rejects_staged_host_changes", func(t *testing.T) { //nolint:paralleltest // setupPullTest uses t.Setenv.
+			ctx := t.Context()
+			ct, hostDir, containerDir := setupPullTest(t)
+			containerTip := runTestGit(t, ctx, containerDir, "rev-parse", "main")
+			writeTestFile(t, filepath.Join(hostDir, "staged.txt"), "staged\n")
+			runTestGit(t, ctx, hostDir, "add", "staged.txt")
+
+			if _, err := ct.Push(ctx, io.Discard, io.Discard, 0); err == nil || !strings.Contains(err.Error(), "pending changes on branch main locally") {
+				t.Fatalf("Push error = %v, want pending host changes error", err)
+			}
+			if got := runTestGit(t, ctx, containerDir, "rev-parse", "main"); got != containerTip {
+				t.Fatalf("container main = %q, want unchanged %q", got, containerTip)
+			}
+			if got := runTestGit(t, ctx, hostDir, "status", "--short"); got != "A  staged.txt" {
+				t.Fatalf("host status = %q, want staged change preserved", got)
+			}
+		})
+		t.Run("failed_reset_keeps_previous_sync_point", func(t *testing.T) {
+			ctx := t.Context()
+			ct, hostDir, containerDir := setupPullTest(t)
+			containerTip := runTestGit(t, ctx, containerDir, "rev-parse", "main")
+			previousSync := runTestGit(t, ctx, containerDir, "rev-parse", containerSyncRefPrefix+"main")
+			writeTestFile(t, filepath.Join(hostDir, "host.txt"), "host\n")
+			runTestGit(t, ctx, hostDir, "add", ".")
+			runTestGit(t, ctx, hostDir, "commit", "-q", "-m", "host")
+			t.Setenv(fakeSSHFailureMatchEnv, "git switch -q -C main")
+			t.Setenv(fakeSSHFailureTextEnv, "ssh: simulated reset failure")
+
+			if _, err := ct.Push(ctx, io.Discard, io.Discard, 0); err == nil {
+				t.Fatal("Push error = nil, want reset failure")
+			}
+			if got := runTestGit(t, ctx, containerDir, "rev-parse", "main"); got != containerTip {
+				t.Fatalf("container main = %q, want unchanged %q", got, containerTip)
+			}
+			if got := runTestGit(t, ctx, containerDir, "rev-parse", containerSyncRefPrefix+"main"); got != previousSync {
+				t.Fatalf("sync point = %q, want previous %q", got, previousSync)
+			}
+		})
 		t.Run("uses_fully_qualified_tracking_source", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
 			ctx := t.Context()
 			ct, hostDir, _ := setupPullTest(t)
@@ -2635,6 +2977,60 @@ func TestFork(t *testing.T) {
 		}
 	})
 
+	t.Run("valid_sync_refspecs_pair_every_branch", func(t *testing.T) {
+		t.Parallel()
+		got := branchSyncRefspecs([]string{"main", "topic"}, []string{"main-0", "topic-0"})
+		want := []string{
+			"+refs/heads/main:" + containerSyncRefPrefix + "main-0",
+			"+refs/heads/topic:" + containerSyncRefPrefix + "topic-0",
+		}
+		if !slices.Equal(got, want) {
+			t.Errorf("branchSyncRefspecs() = %q, want %q", got, want)
+		}
+	})
+	t.Run("valid_sync_point_rename_moves_the_ref", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		dir := t.TempDir()
+		runTestGit(t, ctx, dir, "init", "-q", "--initial-branch=caic-23")
+		runTestGit(t, ctx, dir, "config", "user.name", "Test")
+		runTestGit(t, ctx, dir, "config", "user.email", "test@test")
+		runTestGit(t, ctx, dir, "commit", "-q", "--allow-empty", "-m", "base")
+		syncCommit := runTestGit(t, ctx, dir, "rev-parse", "HEAD")
+		runTestGit(t, ctx, dir, "update-ref", containerSyncRefPrefix+"caic-23", syncCommit)
+
+		rename := exec.CommandContext(ctx, "bash", "-c", containerSyncPointRenameCommand("caic-23", "caic-23-0")) //nolint:gosec // command is generated from test branch names
+		rename.Dir = dir
+		rename.Env = append(os.Environ(), "LANG=C")
+		if out, err := rename.CombinedOutput(); err != nil {
+			t.Fatalf("sync point rename: %v\n%s", err, out)
+		}
+		if got := runTestGit(t, ctx, dir, "rev-parse", containerSyncRefPrefix+"caic-23-0"); got != syncCommit {
+			t.Errorf("renamed sync point = %q, want %q", got, syncCommit)
+		}
+		if got, want := runTestGit(t, ctx, dir, "for-each-ref", "--format=%(refname)", containerSyncRefPrefix), containerSyncRefPrefix+"caic-23-0"; got != want {
+			t.Errorf("sync refs = %q, want only %q", got, want)
+		}
+	})
+	t.Run("valid_sync_point_rename_without_a_recorded_point", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		dir := t.TempDir()
+		runTestGit(t, ctx, dir, "init", "-q", "--initial-branch=caic-23")
+		runTestGit(t, ctx, dir, "config", "user.name", "Test")
+		runTestGit(t, ctx, dir, "config", "user.email", "test@test")
+		runTestGit(t, ctx, dir, "commit", "-q", "--allow-empty", "-m", "base")
+
+		rename := exec.CommandContext(ctx, "bash", "-c", containerSyncPointRenameCommand("caic-23", "caic-23-0")) //nolint:gosec // command is generated from test branch names
+		rename.Dir = dir
+		rename.Env = append(os.Environ(), "LANG=C")
+		if out, err := rename.CombinedOutput(); err != nil {
+			t.Fatalf("sync point rename without a recorded point: %v\n%s", err, out)
+		}
+		if got := runTestGit(t, ctx, dir, "for-each-ref", "--format=%(refname)", containerSyncRefPrefix); got != "" {
+			t.Errorf("sync refs = %q, want none", got)
+		}
+	})
 	t.Run("valid_primary_branch_setup_preserves_rebase", func(t *testing.T) {
 		t.Parallel()
 		ctx := t.Context()

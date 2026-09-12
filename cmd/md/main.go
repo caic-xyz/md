@@ -151,7 +151,7 @@ func usage() {
 		"\n"+
 		"Commands:\n"+
 		"  build-image   Build the base Docker image locally\n"+
-		"  diff          Show differences between host branch and current changes\n"+
+		"  diff          Show container changes since the last push or pull (-full for the branch)\n"+
 		"  fork          Snapshot container and create a new one on forked branches\n"+
 		"  list          List running md containers\n"+
 		"  prune         Remove unused md images and build cache from all available runtimes\n"+
@@ -685,7 +685,7 @@ func printContainerSummary(ctx context.Context, ct *md.Container, r *md.StartRes
 		}
 		fmt.Println("  > Host state is mapped to the branch upstream")
 		fmt.Println("  > See changes (in container): git diff @{upstream}")
-		fmt.Println("  > See changes (on host)     : md diff (checked-out branch)")
+		fmt.Println("  > See changes (on host)     : md diff (since last sync), md diff -full (branch)")
 	}
 	fmt.Println("  > Stop container            : md stop")
 	fmt.Println("  > Purge container           : md purge")
@@ -1242,6 +1242,7 @@ func (a *app) cmdDiff(ctx context.Context, args []string) error {
 	verbose := addVerboseFlag(fs)
 	cf := addContainerFlags(fs, false)
 	all := fs.Bool("all", false, "Operate on all repos, not just the current one")
+	full := fs.Bool("full", false, "Diff the whole branch from its upstream merge base, not only the changes since the last md push or md pull")
 	// Separate md-own flags from git passthrough args.
 	// Flags defined on fs go to mdArgs; everything else (e.g. --stat,
 	// --name-only) is forwarded to git diff. "--" explicitly ends md flag
@@ -1279,10 +1280,10 @@ func (a *app) cmdDiff(ctx context.Context, args []string) error {
 	if err != nil {
 		return diffCommandError(err, exitOnDiff)
 	}
-	return diffContainerRepos(ctx, os.Stdout, os.Stderr, ct, repoIdx, *all, gitArgs, exitOnDiff)
+	return diffContainerRepos(ctx, os.Stdout, os.Stderr, ct, repoIdx, *all, &md.DiffOpts{Args: gitArgs, Full: *full}, exitOnDiff)
 }
 
-func diffContainerRepos(ctx context.Context, stdout, stderr io.Writer, ct *md.Container, repoIdx int, all bool, gitArgs []string, exitOnDiff bool) error {
+func diffContainerRepos(ctx context.Context, stdout, stderr io.Writer, ct *md.Container, repoIdx int, all bool, opts *md.DiffOpts, exitOnDiff bool) error {
 	indices := []int{repoIdx}
 	if all {
 		indices = make([]int, len(ct.Repos))
@@ -1290,13 +1291,13 @@ func diffContainerRepos(ctx context.Context, stdout, stderr io.Writer, ct *md.Co
 			indices[i] = i
 		}
 	}
-	quiet := slices.Contains(gitArgs, "--quiet")
+	quiet := slices.Contains(opts.Args, "--quiet")
 	differencesFound := false
 	for _, i := range indices {
 		if all && len(ct.Repos) > 1 && !quiet {
 			_, _ = fmt.Fprintf(stdout, "=== %s ===\n", filepath.Base(ct.Repos[i].GitRoot))
 		}
-		if err := ct.Diff(ctx, stdout, stderr, i, gitArgs); errors.Is(err, md.ErrDiffFound) {
+		if err := ct.Diff(ctx, stdout, stderr, i, opts); errors.Is(err, md.ErrDiffFound) {
 			differencesFound = true
 		} else if err != nil {
 			return diffCommandError(err, exitOnDiff)

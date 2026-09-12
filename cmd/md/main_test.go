@@ -543,7 +543,7 @@ func TestCmdDiff(t *testing.T) { //nolint:paralleltest // environment selects re
 	t.Run("all_quiet_checks_every_repository", func(t *testing.T) { //nolint:paralleltest // setup changes the process environment.
 		ct, logPath := setupCmdDiffContainer(t, 2)
 		var stdout, stderr bytes.Buffer
-		err := diffContainerRepos(t.Context(), &stdout, &stderr, ct, 0, true, []string{"--quiet"}, true)
+		err := diffContainerRepos(t.Context(), &stdout, &stderr, ct, 0, true, &md.DiffOpts{Args: []string{"--quiet"}}, true)
 		exitErr, ok := errors.AsType[*exitCodeError](err)
 		if !ok || exitErr.code != 1 {
 			t.Fatalf("diffContainerRepos() = %v, want silent exit code 1", err)
