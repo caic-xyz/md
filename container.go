@@ -1577,9 +1577,7 @@ func (c *Container) Purge(ctx context.Context, stdout, stderr io.Writer) error {
 				switch {
 				case err != nil:
 					retErr = errors.Join(retErr, fmt.Errorf("reading Tailscale device ID: %w", err))
-				case deviceID == "":
-					retErr = errors.Join(retErr, errors.New("tailscale node not removed: device ID unavailable"))
-				default:
+				case deviceID != "":
 					_, _ = fmt.Fprintln(stdout, "- Removing Tailscale node from tailnet...")
 					if err := deleteTailscaleDevice(ctx, c.TailscaleAPIKey, deviceID); err != nil {
 						retErr = errors.Join(retErr, fmt.Errorf("removing Tailscale node %s: %w", deviceID, err))
@@ -3095,6 +3093,9 @@ func (c *Container) tailscaleDeviceID(ctx context.Context) (string, error) {
 	if fileErr == nil {
 		return strings.TrimSpace(deviceID), nil
 	}
+	if errors.Is(fileErr, fs.ErrNotExist) {
+		return "", nil
+	}
 	return "", errors.Join(statusErr, fileErr)
 }
 
@@ -3117,10 +3118,13 @@ func (c *Container) readContainerFile(ctx context.Context, containerPath string)
 		}
 	}()
 
-	dst := filepath.Join(tmpDir, "file")
-	if _, err := c.Runtime.Run(ctx, "", "cp", c.Name+":"+containerPath, dst); err != nil {
+	containerDir := path.Dir(containerPath)
+	// Copy the parent directory so a missing file becomes a typed fs.ErrNotExist
+	// from os.ReadFile instead of runtime-specific command text.
+	if _, err := c.Runtime.Run(ctx, "", "cp", c.Name+":"+containerDir+"/.", tmpDir); err != nil {
 		return "", err
 	}
+	dst := filepath.Join(tmpDir, path.Base(containerPath))
 	data, err2 := os.ReadFile(dst) // #nosec G304 -- dst is a private temp file populated by docker cp.
 	if err2 != nil {
 		return "", err2

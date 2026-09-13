@@ -856,6 +856,43 @@ func TestPlanFork(t *testing.T) {
 }
 
 func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with t.Setenv.
+	t.Run("purge_stopped_tailscale_container_before_authentication", func(t *testing.T) {
+		t.Parallel()
+		executable, err := os.Executable()
+		if err != nil {
+			t.Fatal(err)
+		}
+		home := t.TempDir()
+		writeTestSSHConfig(t, home)
+		logPath := filepath.Join(t.TempDir(), "runtime.log")
+		env := []string{
+			fakeRuntimeEnv + "=1",
+			fakeRuntimeLogEnv + "=" + logPath,
+			fakeRuntimeStateEnv + "=exited",
+		}
+		logger := testLogger(t)
+		ct := &Container{
+			Client:    &Client{Home: home, Logger: logger, Runtime: testRuntime(t, executable, logger, env), env: env},
+			Logger:    logger,
+			Name:      "md-test",
+			State:     "exited",
+			Tailscale: true,
+		}
+		var stdout bytes.Buffer
+		if err := ct.Purge(t.Context(), &stdout, io.Discard); err != nil {
+			t.Fatal(err)
+		}
+		if got := stdout.String(); got != "Removed md-test\n" {
+			t.Errorf("Purge output = %q, want %q", got, "Removed md-test\n")
+		}
+		logData, err := os.ReadFile(logPath) //nolint:gosec // private test log.
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(logData), "rm -f -v md-test") {
+			t.Errorf("runtime log missing container removal:\n%s", logData)
+		}
+	})
 	t.Run("configure_global_git_identity_uses_host_global_config", func(t *testing.T) {
 		ctx := t.Context()
 		fakeSSH(t)

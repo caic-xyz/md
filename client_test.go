@@ -953,6 +953,13 @@ func runFakeRuntime(args []string, logPath string, localBase bool, containerStat
 	if len(args) >= 1 && args[0] == "rm" {
 		return 0
 	}
+	if len(args) >= 1 && args[0] == "exec" && containerState == "exited" {
+		_, _ = fmt.Fprintln(os.Stderr, "container is not running")
+		return 1
+	}
+	if len(args) == 3 && args[0] == "cp" && strings.HasSuffix(args[1], ":"+filepath.ToSlash(filepath.Dir(tailscaleDeviceIDPath))+"/.") {
+		return 0
+	}
 	if len(args) >= 1 && args[0] == "stats" {
 		_, _ = fmt.Fprintln(os.Stdout, `{"Name":"md-one","CPUPerc":"1.5%","MemUsage":"10MiB / 1GiB","MemPerc":"1%","PIDs":"3","NetIO":"2kB / 3kB","BlockIO":"4kB / 5kB"}`)
 		return 0
