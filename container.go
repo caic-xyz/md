@@ -1973,15 +1973,52 @@ func gitDiffCommand(req *diffRequest) string {
 		"export GIT_OPTIONAL_LOCKS=0",
 		`index_path=$(git rev-parse --git-path index) || exit 2`,
 		`tmp_index=$(mktemp) || exit 2`,
+		`diff_stdout=$(mktemp) || exit 2`,
+		`diff_stderr=$(mktemp) || exit 2`,
 		`untracked_paths=$(mktemp) || exit 2`,
+		`trap 'rm -f "$tmp_index" "$diff_stdout" "$diff_stderr" "$untracked_paths"' EXIT`,
 		// Preserve the index timestamp so Git keeps its racy-clean checks valid.
-		`cp -p "$index_path" "$tmp_index" || exit 2`,
-		`trap 'rm -f "$tmp_index" "$untracked_paths"' EXIT`,
-		`git ls-files -z --others --exclude-standard -- . > "$untracked_paths" || exit 2`,
-		`while IFS= read -r -d '' path; do GIT_INDEX_FILE="$tmp_index" git add -N -- "$path" || exit 2; done < "$untracked_paths"`,
-		"diff_status=0",
-		`GIT_INDEX_FILE="$tmp_index" git diff "$diff_base_ref"` + diffArgs + ` -- . || diff_status=$?`,
-		`if [ "$diff_status" -gt 1 ]; then exit 2; fi`,
+		// Recreating it before a retry also drops intent-to-add entries for files
+		// that vanished during the previous diff.
+		`prepare_diff_index() {
+	cp -p "$index_path" "$tmp_index" &&
+		git ls-files -z --others --exclude-standard -- . > "$untracked_paths" || return 1
+	while IFS= read -r -d '' path; do
+		GIT_INDEX_FILE="$tmp_index" git add -N -- "$path" || return 1
+	done < "$untracked_paths"
+}`,
+		`prepare_diff_index || exit 2`,
+		"diff_attempt=0",
+		`while :; do
+	: > "$diff_stdout"
+	: > "$diff_stderr"
+	diff_status=0
+	if [ -t 1 ]; then
+		exec 3>&1
+	else
+		exec 3> "$diff_stdout"
+	fi
+	GIT_INDEX_FILE="$tmp_index" git diff "$diff_base_ref"` + diffArgs + ` -- . >&3 2> "$diff_stderr" || diff_status=$?
+	exec 3>&-
+	if [ "$diff_status" -le 1 ]; then
+		if [ ! -t 1 ]; then cat "$diff_stdout" || exit 2; fi
+		cat "$diff_stderr" >&2 || exit 2
+		break
+	fi
+	vanished_untracked=0
+	while IFS= read -r -d '' path; do
+		if [ ! -e "$path" ] && [ ! -L "$path" ]; then
+			vanished_untracked=1
+			break
+		fi
+	done < "$untracked_paths"
+	if [ "$diff_attempt" -ge 2 ] || [ "$vanished_untracked" -eq 0 ] || ! grep -q "^fatal: stat .*: No such file or directory$" "$diff_stderr"; then
+		cat "$diff_stderr" >&2
+		exit 2
+	fi
+	diff_attempt=$((diff_attempt + 1))
+	prepare_diff_index || exit 2
+done`,
 		"if [ " + exitOnDiffFlag + ` -eq 1 ] && [ "$diff_status" -eq 1 ]; then exit ` + strconv.Itoa(diffFoundSSHExitCode) + `; fi`,
 	}
 	return strings.Join(commands, "; ")

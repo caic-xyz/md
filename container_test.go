@@ -316,6 +316,38 @@ func runTestDiffCommand(t *testing.T, ctx context.Context, req *diffRequest) (st
 	return strings.TrimSpace(out.String()), errOut.String()
 }
 
+func fakeGitDiffOnce(t *testing.T, vanishPath string) []string {
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	binDir := t.TempDir()
+	t.Cleanup(func() {
+		if err := removeAllWithRetry(binDir); err != nil {
+			t.Errorf("removing fake Git dir %q: %v", binDir, err)
+		}
+	})
+	name := "git"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	if err := linkOrCopyExecutable(executable, filepath.Join(binDir, name)); err != nil {
+		t.Fatal(err)
+	}
+	return []string{
+		fakeGitDiffFailureEnv + "=1",
+		fakeGitExecutableEnv + "=" + realGit,
+		fakeGitMarkerEnv + "=" + filepath.Join(t.TempDir(), "failed"),
+		fakeGitVanishPathEnv + "=" + vanishPath,
+		"LANG=C",
+		"PATH=" + binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+}
+
 func TestDiff(t *testing.T) {
 	t.Parallel()
 	t.Run("valid", func(t *testing.T) {
@@ -369,6 +401,50 @@ func TestDiff(t *testing.T) {
 			if !strings.Contains(status, want) {
 				t.Errorf("status missing %q:\n%s", want, status)
 			}
+		}
+	})
+	t.Run("valid_retries_when_a_file_vanishes", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		dir := setupDiffTestRepo(t, ctx)
+		vanishedPath := filepath.Join(dir, "vanished.txt")
+		writeTestFile(t, vanishedPath, "vanished\n")
+		writeTestFile(t, filepath.Join(dir, "retained.txt"), "retained\n")
+
+		cmd := exec.CommandContext(ctx, "bash", "-c", gitDiffCommand(&diffRequest{repo: dir, primaryBranch: "main", defaultRemote: "host", defaultBranch: "main", extraArgs: []string{"--stat"}})) //nolint:gosec // repo path is a test temp dir
+		cmd.Env = append(os.Environ(), fakeGitDiffOnce(t, vanishedPath)...)
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("diff command: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+		}
+		if !strings.Contains(stdout.String(), "retained.txt") {
+			t.Errorf("diff --stat output missing retained.txt:\n%s", stdout.String())
+		}
+		if strings.Contains(stdout.String(), "vanished.txt") {
+			t.Errorf("diff --stat output contains vanished.txt:\n%s", stdout.String())
+		}
+		if strings.Contains(stderr.String(), "fatal: stat") {
+			t.Errorf("diff leaked the recovered transient error:\n%s", stderr.String())
+		}
+	})
+	t.Run("error_does_not_retry_unrelated_git_failure", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		dir := setupDiffTestRepo(t, ctx)
+		writeTestFile(t, filepath.Join(dir, "untracked.txt"), "untracked\n")
+
+		cmd := exec.CommandContext(ctx, "bash", "-c", gitDiffCommand(&diffRequest{repo: dir, primaryBranch: "main", defaultRemote: "host", defaultBranch: "main", extraArgs: []string{"--stat"}})) //nolint:gosec // repo path is a test temp dir
+		cmd.Env = append(os.Environ(), fakeGitDiffOnce(t, "")...)
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err == nil {
+			t.Fatalf("diff command unexpectedly succeeded\nstdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
+		}
+		if !strings.Contains(stderr.String(), "fatal: simulated diff failure") {
+			t.Errorf("diff did not surface the original Git failure:\n%s", stderr.String())
 		}
 	})
 	t.Run("valid_uses_merge_base_when_upstream_moves", func(t *testing.T) {

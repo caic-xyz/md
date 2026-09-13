@@ -35,6 +35,10 @@ const (
 	fakeRuntimeStateEnv     = "MD_TEST_FAKE_RUNTIME_STATE"
 	fakeRuntimeLocalBaseEnv = "MD_TEST_FAKE_RUNTIME_LOCAL_BASE"
 	fakeRuntimeLogEnv       = "MD_TEST_FAKE_RUNTIME_LOG"
+	fakeGitDiffFailureEnv   = "MD_TEST_FAKE_GIT_DIFF_FAILURE"
+	fakeGitExecutableEnv    = "MD_TEST_FAKE_GIT_EXECUTABLE"
+	fakeGitMarkerEnv        = "MD_TEST_FAKE_GIT_MARKER"
+	fakeGitVanishPathEnv    = "MD_TEST_FAKE_GIT_VANISH_PATH"
 	fakeSSHEnv              = "MD_TEST_FAKE_SSH"
 	fakeSSHFailureMatchEnv  = "MD_TEST_FAKE_SSH_FAILURE_MATCH"
 	fakeSSHFailureStatusEnv = "MD_TEST_FAKE_SSH_FAILURE_STATUS"
@@ -69,6 +73,9 @@ func testClient(t testing.TB) *Client {
 }
 
 func TestMain(m *testing.M) {
+	if os.Getenv(fakeGitDiffFailureEnv) == "1" && isFakeGitExecutable(os.Args[0]) {
+		os.Exit(runFakeGit(os.Args[1:]))
+	}
 	if os.Getenv(fakeSSHEnv) == "1" && isFakeSSHExecutable(os.Args[0]) {
 		os.Exit(runFakeSSH(os.Args[1:]))
 	}
@@ -105,6 +112,11 @@ func TestMain(m *testing.M) {
 		}
 	}
 	os.Exit(exitCode)
+}
+
+func isFakeGitExecutable(name string) bool {
+	base := filepath.Base(name)
+	return base == "git" || base == "git.exe"
 }
 
 func isFakeSSHExecutable(name string) bool {
@@ -860,6 +872,50 @@ func linkOrCopyExecutable(src, dst string) error {
 	}
 	_, copyErr := io.Copy(out, in)
 	return errors.Join(copyErr, out.Close(), in.Close())
+}
+
+func runFakeGit(args []string) int {
+	if len(args) != 0 && args[0] == "diff" {
+		marker, err := os.OpenFile(os.Getenv(fakeGitMarkerEnv), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600) //nolint:gosec // private path comes from the parent test process.
+		if err == nil {
+			_ = marker.Close()
+			if path := os.Getenv(fakeGitVanishPathEnv); path != "" {
+				if err := os.Remove(path); err != nil { //nolint:gosec // private path comes from the parent test process.
+					_, _ = fmt.Fprintf(os.Stderr, "removing test path: %v\n", err)
+					return 1
+				}
+				_, _ = fmt.Fprintf(os.Stderr, "fatal: stat '%s': No such file or directory\n", filepath.Base(path))
+			} else {
+				_, _ = fmt.Fprintln(os.Stderr, "fatal: simulated diff failure")
+			}
+			return 128
+		}
+		if !errors.Is(err, os.ErrExist) {
+			_, _ = fmt.Fprintf(os.Stderr, "creating fake Git marker: %v\n", err)
+			return 1
+		}
+		if path := os.Getenv(fakeGitVanishPathEnv); path != "" {
+			check := exec.CommandContext(context.Background(), os.Getenv(fakeGitExecutableEnv), "ls-files", "--error-unmatch", "--", filepath.Base(path)) //nolint:gosec // executable and path come from the parent test process.
+			check.Stdout = io.Discard
+			check.Stderr = io.Discard
+			if check.Run() == nil {
+				_, _ = fmt.Fprintln(os.Stderr, "fatal: vanished path remains in the temporary index")
+				return 128
+			}
+		}
+	}
+	cmd := exec.CommandContext(context.Background(), os.Getenv(fakeGitExecutableEnv), args...) //nolint:gosec // executable and arguments come from the parent test process.
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		if exitErr, ok := errors.AsType[*exec.ExitError](err); ok {
+			return exitErr.ExitCode()
+		}
+		_, _ = fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	return 0
 }
 
 func runFakeSSH(args []string) int {
