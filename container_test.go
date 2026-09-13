@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"slices"
 	"strconv"
@@ -404,8 +405,8 @@ func TestDiff(t *testing.T) {
 		if strings.Contains(stdout, "upstream.txt") {
 			t.Errorf("diff output includes updated upstream file:\n%s", stdout)
 		}
-		if !strings.Contains(stderr, `branch "main" has no recorded sync point`) {
-			t.Errorf("stderr missing the missing sync point note:\n%s", stderr)
+		if !strings.Contains(stderr, `branch "main" has no recorded host integration point`) {
+			t.Errorf("stderr missing the integration-point note:\n%s", stderr)
 		}
 	})
 	t.Run("valid_since_sync_point", func(t *testing.T) {
@@ -505,8 +506,8 @@ func TestDiff(t *testing.T) {
 		if stdout != "work.txt" {
 			t.Errorf("diff --name-only = %q, want work.txt only, so the sync point was the base\nstderr:\n%s", stdout, stderr)
 		}
-		if strings.Contains(stderr, "no recorded sync point") {
-			t.Errorf("stderr claims no sync point while a rebase is in progress:\n%s", stderr)
+		if strings.Contains(stderr, "no recorded host integration point") {
+			t.Errorf("stderr claims no integration point while a rebase is in progress:\n%s", stderr)
 		}
 	})
 	t.Run("valid_reset_behind_the_sync_point_omits_the_upstream_note", func(t *testing.T) {
@@ -1047,7 +1048,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 		if !errors.Is(err, ErrDiffFound) {
 			t.Fatalf("Diff error = %v, want ErrDiffFound", err)
 		}
-		if !strings.Contains(stderr.String(), "has no recorded sync point") {
+		if !strings.Contains(stderr.String(), "has no recorded host integration point") {
 			t.Errorf("Diff stderr = %q, want the missing sync point note", stderr.String())
 		}
 	})
@@ -1575,17 +1576,22 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			t.Fatalf("full diff --name-only = %q, want %q", got, want)
 		}
 	})
-	t.Run("fetch_without_commit_separates_committed_work", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
+	t.Run("fetch_without_commit_preserves_unintegrated_diff", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
 		ctx := t.Context()
 		ct, hostDir, containerDir := setupPullTest(t)
+		previousSync := runTestGit(t, ctx, containerDir, "rev-parse", containerSyncRefPrefix+"main")
 		writeTestFile(t, filepath.Join(containerDir, "committed.txt"), "committed\n")
 		runTestGit(t, ctx, containerDir, "add", ".")
 		runTestGit(t, ctx, containerDir, "commit", "-q", "-m", "committed work")
 		containerTip := runTestGit(t, ctx, containerDir, "rev-parse", "main")
 		writeTestFile(t, filepath.Join(containerDir, "pending.txt"), "pending\n")
 
-		if err := ct.Fetch(ctx, io.Discard, io.Discard, 0, nil); err != nil {
+		fetched, err := ct.Fetch(ctx, io.Discard, io.Discard, 0, nil)
+		if err != nil {
 			t.Fatalf("Fetch: %v", err)
+		}
+		if want := []FetchedBranch{{BranchName: "main", CommitHash: containerTip}}; !reflect.DeepEqual(fetched, want) {
+			t.Errorf("Fetch result = %+v, want %+v", fetched, want)
 		}
 		if got := runTestGit(t, ctx, containerDir, "rev-parse", "main"); got != containerTip {
 			t.Errorf("container main = %q, want the tip %q it had before the fetch", got, containerTip)
@@ -1596,16 +1602,17 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 		if got := runTestGit(t, ctx, hostDir, "rev-parse", "refs/remotes/md-test/main"); got != containerTip {
 			t.Errorf("host tracking ref = %q, want the committed tip %q", got, containerTip)
 		}
-		if got := runTestGit(t, ctx, containerDir, "rev-parse", containerSyncRefPrefix+"main"); got != containerTip {
-			t.Errorf("sync point = %q, want the committed tip %q", got, containerTip)
+		if got := runTestGit(t, ctx, containerDir, "rev-parse", containerSyncRefPrefix+"main"); got != previousSync {
+			t.Errorf("sync point = %q, want unchanged %q", got, previousSync)
 		}
-		// The committed work reached the host, so only the pending work remains.
+		// Fetching makes the commits durable on the host without acknowledging
+		// them as integrated into its branch.
 		var stdout bytes.Buffer
 		if err := ct.Diff(ctx, &stdout, io.Discard, 0, &DiffOpts{Args: []string{"--name-only"}}); err != nil {
 			t.Fatal(err)
 		}
-		if got := strings.TrimSpace(stdout.String()); got != "pending.txt" {
-			t.Errorf("diff --name-only = %q, want pending.txt", got)
+		if got, want := strings.TrimSpace(stdout.String()), "committed.txt\npending.txt"; got != want {
+			t.Errorf("diff --name-only = %q, want %q", got, want)
 		}
 	})
 	t.Run("pull_refreshes_changed_push_remote", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
@@ -2358,6 +2365,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 		t.Run("leaves_conflicting_rebase_for_manual_resolution", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
 			ctx := t.Context()
 			ct, hostDir, containerDir := setupPullTest(t)
+			previousSync := runTestGit(t, ctx, containerDir, "rev-parse", containerSyncRefPrefix+"main")
 			writeTestFile(t, filepath.Join(hostDir, "shared.txt"), "host\n")
 			runTestGit(t, ctx, hostDir, "commit", "-q", "-am", "host")
 			hostTip := runTestGit(t, ctx, hostDir, "rev-parse", "refs/heads/main")
@@ -2383,6 +2391,41 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			}
 			if got := runTestGit(t, ctx, hostDir, "status", "--porcelain", "--untracked-files=no"); got != "UU shared.txt" {
 				t.Fatalf("tracked status after failed Pull = %q, want unresolved shared.txt conflict", got)
+			}
+			if got := runTestGit(t, ctx, containerDir, "rev-parse", containerSyncRefPrefix+"main"); got != previousSync {
+				t.Fatalf("sync point after failed Pull = %q, want unchanged %q", got, previousSync)
+			}
+		})
+		t.Run("later_branch_failure_keeps_all_integration_points", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
+			ctx := t.Context()
+			ct, hostDir, containerDir := setupMultiBranchPullTest(t)
+			runTestGit(t, ctx, containerDir, "branch", "feature", "origin/feature")
+			previousSync := make(map[string]string, 2)
+			for _, branch := range []string{"main", "feature"} {
+				previousSync[branch] = runTestGit(t, ctx, containerDir, "rev-parse", "refs/heads/"+branch)
+				runTestGit(t, ctx, containerDir, "update-ref", containerSyncRefPrefix+branch, previousSync[branch])
+			}
+
+			writeTestFile(t, filepath.Join(containerDir, "container-main.txt"), "container main\n")
+			runTestGit(t, ctx, containerDir, "add", ".")
+			runTestGit(t, ctx, containerDir, "commit", "-q", "-m", "container main")
+			runTestGit(t, ctx, containerDir, "switch", "-q", "feature")
+			writeTestFile(t, filepath.Join(containerDir, "feature.txt"), "container feature\n")
+			runTestGit(t, ctx, containerDir, "commit", "-q", "-am", "container feature")
+			runTestGit(t, ctx, containerDir, "switch", "-q", "main")
+
+			runTestGit(t, ctx, hostDir, "switch", "-q", "feature")
+			writeTestFile(t, filepath.Join(hostDir, "feature.txt"), "host feature\n")
+			runTestGit(t, ctx, hostDir, "commit", "-q", "-am", "host feature")
+			runTestGit(t, ctx, hostDir, "switch", "-q", "main")
+
+			if err := ct.Pull(ctx, io.Discard, io.Discard, 0, nil); err == nil || !strings.Contains(err.Error(), "rebasing branch feature") {
+				t.Fatalf("Pull error = %v, want feature rebase failure", err)
+			}
+			for _, branch := range []string{"main", "feature"} {
+				if got := runTestGit(t, ctx, containerDir, "rev-parse", containerSyncRefPrefix+branch); got != previousSync[branch] {
+					t.Errorf("%s integration point = %q, want unchanged %q", branch, got, previousSync[branch])
+				}
 			}
 		})
 		t.Run("integrates_unchanged_tracking_tip_after_host_reset", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
@@ -2560,8 +2603,12 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 				}},
 			}
 			var stdout, stderr bytes.Buffer
-			if err := ct.Fetch(ctx, &stdout, &stderr, 0, &FetchOpts{Commit: true}); err != nil {
+			fetched, err := ct.Fetch(ctx, &stdout, &stderr, 0, &FetchOpts{Commit: true})
+			if err != nil {
 				t.Fatalf("Fetch: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+			}
+			if len(fetched) != 1 || fetched[0].BranchName != "main" || fetched[0].CommitHash == "" {
+				t.Fatalf("Fetch result = %+v, want main branch commit", fetched)
 			}
 			if got := runTestGit(t, ctx, hostDir, "show", "md-test/main:container.txt"); got != "container" {
 				t.Fatalf("fetched container.txt = %q, want container", got)

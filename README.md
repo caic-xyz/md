@@ -34,7 +34,7 @@ cd ~/src/<repo-name>
 claude
 exit
 
-# Check what the container did since the last sync
+# Check what the container did that is not integrated on the host
 md diff
 
 # Check the whole branch
@@ -52,7 +52,7 @@ names the direction it moves work:
 | Command | Effect |
 | --- | --- |
 | `md start` | Copies the mapped branches, cached remote refs and tags into a new container, then checks out the primary branch there. Your branches do not move. |
-| `md diff` | Reports what the container did since the last synchronization. `md diff -full` reports the whole branch. It moves no branch. |
+| `md diff` | Reports container work not yet integrated into the host branch. `md diff -full` reports the whole branch. It moves no branch. |
 | `md pull` | Commits the container's pending changes, then integrates every mapped branch into your host branches. It can rewrite host commit IDs. |
 | `md push` | Saves the container's Git-visible work on timestamped backup branches, then replaces the container's mapped branches with your host state. |
 | `md fork` | Snapshots the container and starts a new one on new host branches. The source container is untouched. |
@@ -61,17 +61,17 @@ Every mapped host branch must exist and have an upstream, because the container
 branch tracks the same upstream. `md` reports an error and the repair command
 when that is not the case.
 
-### Sync points
+### Integration points
 
-Every command that synchronizes the host and the container remembers where each
-mapped branch stood. `md diff` shows the work done since then, so you see what
-the container did since you last looked at it, and `md diff -full` shows the
-whole branch. The record survives the agent amending, resetting or rebasing its
-branch.
+When a command creates, replaces, or pulls a mapped branch, `md` remembers the
+container commit integrated into the host branch. `md diff` shows work after
+that point, while `md diff -full` shows the whole branch. Fetching a container
+branch for observation or durability does not move the integration point. The
+record survives the agent amending, resetting or rebasing its branch.
 
 [docs/GIT_MODEL.md](docs/GIT_MODEL.md) explains what each side holds, what each
 command moves, and the cases where a diff reports something other than the work
-since the last synchronization.
+not yet integrated into the host branch.
 
 ### Remote branches and fork workflows
 

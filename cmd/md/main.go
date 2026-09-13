@@ -685,7 +685,7 @@ func printContainerSummary(ctx context.Context, ct *md.Container, r *md.StartRes
 		}
 		fmt.Println("  > Host state is mapped to the branch upstream")
 		fmt.Println("  > See changes (in container): git diff @{upstream}")
-		fmt.Println("  > See changes (on host)     : md diff (since last sync), md diff -full (branch)")
+		fmt.Println("  > See changes (on host)     : md diff (not integrated), md diff -full (branch)")
 	}
 	fmt.Println("  > Stop container            : md stop")
 	fmt.Println("  > Purge container           : md purge")

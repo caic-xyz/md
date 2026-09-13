@@ -44,8 +44,9 @@ remote. It holds:
 - while a branch is being reset, `refs/md/incoming/<branch>`, an internal
   checkout seed containing the host branch's commit when no mirrored remote ref
   holds that exact commit; it is deleted after the reset succeeds;
-- `refs/md/sync/<branch>`, the sync point: the commit the host has seen. This
-  is what `md diff` compares against;
+- `refs/md/sync/<branch>`, the integration point: the container commit most
+  recently established in the host branch. This is what `md diff` compares
+  against;
 - your Git identity, so commits made in the container are attributed to you.
 
 Several subtleties follow.
@@ -56,15 +57,16 @@ them from your checkout before doing its own work, so they are as fresh as your
 host checkout, and no fresher: fetch on the host first when a task needs the
 latest remote state.
 
-The sync point is a ref, not a recorded commit ID, so it keeps its commit
+The integration point is a ref, not a recorded commit ID, so it keeps its commit
 reachable. An agent that amends, resets or rebases its branch does not destroy
 the base of your next diff. The container's Git configuration also disables
 pruning of unreachable objects, which trades a growing object store for the
 same guarantee; container lifetimes are finite, so the leak is acceptable.
 
-Ordinary synchronization does not delete old sync points, so a branch dropped
+Ordinary operations do not delete old integration points, so a branch dropped
 from the mapping leaves its ref behind. A fork is the exception: it deletes the
-old primary name and records fresh sync points for the fork's mapped branches.
+old primary name and records fresh integration points for the fork's mapped
+branches.
 
 Containers created by older versions may retain an unused synthetic `host`
 remote and `refs/remotes/host/*`. Current commands neither read nor update that
@@ -76,12 +78,12 @@ state; it disappears when the container is purged and recreated.
 
 `md start` creates the container, pushes your mapped branches, cached remote
 refs and selected tags into it, configures the remotes, upstreams and identity,
-checks out the primary branch, and records a sync point per branch. On the host
-it only adds the container remote. Your branches do not move.
+checks out the primary branch, and records an integration point per branch. On
+the host it only adds the container remote. Your branches do not move.
 
 `md start` refuses a container that is already running and tells you to `ssh`
-in. It revives a stopped one, without resetting its branches or its sync points,
-so work in progress survives a stop.
+in. It revives a stopped one, without resetting its branches or its integration
+points, so work in progress survives a stop.
 
 `md run` provisions a temporary container the same way, runs a command, then
 purges it. Whatever the command did is destroyed with the container unless you
@@ -93,9 +95,9 @@ pass `--apply-patch`, which pulls each repository back to the host first.
 new container from it, so the fork inherits the source's work including
 uncommitted changes. It then creates new host branches with the same upstreams,
 renames the primary inside the fork, fetches every committed mapped branch tip
-to the host, and records those tips as the fork's fresh sync points. Therefore
-inherited committed work is already synchronized and does not appear in
-`md diff`; inherited uncommitted work still appears.
+to the host, and records those tips as the fork's fresh integration points.
+Therefore inherited committed work is already present in the new host branches
+and does not appear in `md diff`; inherited uncommitted work still appears.
 
 The source container is not modified. Each forked repository's primary branch
 must have a new name; reusing any branch mapped by the source is refused. Its
@@ -118,8 +120,8 @@ not committed and can be overwritten if the host branch tracks the same path.
 The container's checked-out state is then replaced.
 
 It then force-pushes your mapped branches into the container, resets the
-container's branches to them, and moves each sync point to the pushed commit. So
-`md diff` reports nothing immediately after a push.
+container's branches to them, and moves each integration point to the pushed
+commit. So `md diff` reports nothing immediately after a push.
 
 It refuses to run when you have uncommitted changes on a mapped branch on the
 host, since those would not reach the container.
@@ -141,40 +143,43 @@ unless you pass `-no-describe`, fetches every mapped branch into
 
 So `md pull` can rewrite host commit IDs. It refuses to start when the host has
 staged or unstaged changes to tracked files, or when a rebase is in progress. It
-does not reset container branches from host state. It does update the
-container's remote configuration, cached remote refs and sync points, and it
-commits pending container work before integrating it.
+does not reset container branches from host state. After every mapped branch is
+integrated successfully, it updates the container's integration points. A
+failed integration leaves them unchanged, so unapplied work remains visible.
+It also updates the container's remote configuration and cached remote refs,
+and commits pending container work before integrating it.
 
 A library caller that wants the host to take only what the container committed
 can fetch without the commit step, with `Container.Fetch` and the zero
 `FetchOpts`. The container's history and working tree then stay untouched, its
-pending changes stay pending, and the sync point moves to the committed tip.
-Repeating that per agent turn gives each turn its own diff base.
+pending changes stay pending, and the exact fetched branch tips are returned.
+Only the host's remote-tracking refs move; the integration points and host
+branches do not.
 
 ### md diff
 
-`md diff` reports the checked-out container branch's changes since its sync
-point, including uncommitted and untracked files. `md diff -full` reports the
-whole branch from its upstream merge base instead.
+`md diff` reports the checked-out container branch's changes since its
+integration point, including uncommitted and untracked files. `md diff -full`
+reports the whole branch from its upstream merge base instead.
 
 It moves no branch on either side. Like every command it re-pushes the cached
 remote refs, and it first checks that every mapped branch still exists on the
 host with the same upstream the container records; on a mismatch it stops and
 asks for `md pull` or `md push`, which reconfigure the container.
 
-Two cases make the base something other than the last synchronization, and
+Two cases make the base something other than the last integration point, and
 `md diff` says so on stderr:
 
-- a branch created inside the container has no sync point, so the diff covers
-  the whole branch;
+- a branch created inside the container has no integration point, so the diff
+  covers the whole branch;
 - a branch moved onto a newer upstream carries the new upstream commits into the
   diff. Use `md diff -full` to see the branch against its upstream instead.
 
 The second note fires when the upstream tip is reachable from the branch but not
-from its sync point. A rebase that replays the upstream commits onto the
+from its integration point. A rebase that replays the upstream commits onto the
 branch's own work produces new commit IDs, which that test cannot recognize, so
 the note says the diff *may* include upstream commits rather than promising it.
 
 An interrupted rebase leaves the container's HEAD detached. `md diff` then
 recovers the branch being rebased from Git's rebase state, so it still compares
-against that branch's sync point.
+against that branch's integration point.
