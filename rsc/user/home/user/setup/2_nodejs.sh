@@ -27,7 +27,6 @@ corepack enable pnpm
 # 2. Install Global Node Packages
 pnpm add -g \
 	agent-browser \
-	@google/gemini-cli \
 	@kilocode/cli \
 	@earendil-works/pi-coding-agent \
 	@openai/codex \

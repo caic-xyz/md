@@ -3,7 +3,7 @@
 Each container is locked to a repository-branch pair. No confusion. Safe parallel work.
 
 **Safe parallel work with multiple AI coding agents.** Run Claude Code, Codex,
-Amp CLI, Gemini CLI, Kilo CLI, Pi, and other tools in isolated containers
+Amp CLI, Kilo CLI, Pi, and other tools in isolated containers
 without branch conflicts, file interference, or environmental headaches.
 
 [![codecov](https://codecov.io/gh/caic-xyz/md/graph/badge.svg?token=Q2ZK312LNF)](https://codecov.io/gh/caic-xyz/md)

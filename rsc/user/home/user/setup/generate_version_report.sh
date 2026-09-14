@@ -148,11 +148,6 @@
 
 	# AI Tools
 	check_version "Claude CLI" "claude" "--version"
-	if command -v gemini >/dev/null 2>&1; then
-		echo "| Gemini CLI | $(NODE_OPTIONS="--no-deprecation" gemini --version 2>/dev/null | head -n 1) |"
-	else
-		echo "| Gemini CLI | Not found |"
-	fi
 	check_version "Codex" "codex" "--version"
 	check_version "Kilo CLI" "kilo" "--version"
 	check_version "Qwen Code" "qwen" "--version"
