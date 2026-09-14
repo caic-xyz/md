@@ -48,6 +48,9 @@ remote. It holds:
   recently established in the host branch. This is what `md diff` compares
   against;
 - your Git identity, so commits made in the container are attributed to you.
+- the repository-local `core.hooksPath` when it is a relative path that stays
+  within the repository, so its hooks run in the container too. Absolute,
+  home-relative and repository-escaping hook paths are not transferred.
 
 Several subtleties follow.
 

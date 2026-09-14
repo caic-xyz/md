@@ -778,6 +778,36 @@ func (r *Repo) gitIdentity(ctx context.Context, logger *slog.Logger) (gitIdentit
 	return gitIdentity{name: name, email: email}, nil
 }
 
+func (r *Repo) containerHooksPath(ctx context.Context, logger *slog.Logger) (string, error) {
+	g := &git.Checkout{Root: r.GitRoot, Logger: logger}
+	hooksPath, err := g.RunGit(ctx, "config", "--local", "--get", "core.hooksPath")
+	if err != nil {
+		if exitErr, ok := errors.AsType[*exec.ExitError](err); ok && exitErr.ExitCode() == 1 {
+			return "", nil
+		}
+		return "", fmt.Errorf("read core.hooksPath for %s: %w", r.GitRoot, err)
+	}
+	if hooksPath == "" || filepath.IsAbs(hooksPath) || strings.HasPrefix(hooksPath, "~") {
+		return "", nil
+	}
+	repoRoot, err := filepath.Abs(r.GitRoot)
+	if err != nil {
+		return "", fmt.Errorf("resolve repository root %s: %w", r.GitRoot, err)
+	}
+	resolvedPath, err := filepath.Abs(filepath.Join(repoRoot, hooksPath))
+	if err != nil {
+		return "", fmt.Errorf("resolve core.hooksPath %q: %w", hooksPath, err)
+	}
+	relativePath, err := filepath.Rel(repoRoot, resolvedPath)
+	if err != nil {
+		return "", fmt.Errorf("relativize core.hooksPath %q: %w", hooksPath, err)
+	}
+	if relativePath == ".." || strings.HasPrefix(relativePath, ".."+string(filepath.Separator)) {
+		return "", nil
+	}
+	return filepath.ToSlash(hooksPath), nil
+}
+
 func optionalGitConfig(ctx context.Context, g *git.Checkout, key string) (string, error) {
 	value, err := g.RunGit(ctx, "config", "--get", key)
 	if err == nil {
@@ -2771,6 +2801,10 @@ func (c *Container) containerGitConfigCommands(ctx context.Context, repoIdx int,
 	if err != nil {
 		return nil, err
 	}
+	hooksPath, err := r.containerHooksPath(ctx, c.Logger)
+	if err != nil {
+		return nil, err
+	}
 	var upstreamCommands []string
 	if refreshUpstreams {
 		upstreamCommands, err = r.containerBranchUpstreamCommands(ctx, c.Logger)
@@ -2780,6 +2814,9 @@ func (c *Container) containerGitConfigCommands(ctx context.Context, repoIdx int,
 	}
 	commands := containerRemoteConfigCommands(r, configs)
 	commands = slices.Insert(commands, 1, gitIdentityCommands("--local", identity)...)
+	if hooksPath != "" {
+		commands = append(commands, "git config --local --replace-all core.hooksPath "+shellQuote(hooksPath))
+	}
 	commands = append(commands, postCommands...)
 	return append(commands, upstreamCommands...), nil
 }

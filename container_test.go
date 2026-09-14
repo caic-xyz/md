@@ -1017,6 +1017,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 		runTestGit(t, ctx, hostDir, "init", "-q")
 		runTestGit(t, ctx, hostDir, "config", "user.name", "Marc-Antoine Ruel")
 		runTestGit(t, ctx, hostDir, "config", "user.email", "maruel@example.com")
+		runTestGit(t, ctx, hostDir, "config", "core.hooksPath", "scripts/hooks")
 		runTestGit(t, ctx, containerDir, "init", "-q")
 
 		logger := testLogger(t)
@@ -1037,6 +1038,9 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 		}
 		if got := runTestGit(t, ctx, containerDir, "config", "--local", "user.email"); got != "maruel@example.com" {
 			t.Errorf("container user.email = %q, want maruel@example.com", got)
+		}
+		if got := runTestGit(t, ctx, containerDir, "config", "--local", "core.hooksPath"); got != "scripts/hooks" {
+			t.Errorf("container core.hooksPath = %q, want scripts/hooks", got)
 		}
 	})
 	t.Run("launch_rejects_extra_branch_tracking_primary_before_runtime_mutation", func(t *testing.T) {
@@ -3109,6 +3113,35 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			}
 		})
 	})
+}
+
+func TestRepoContainerHooksPath(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name      string
+		hooksPath string
+		want      string
+	}{
+		{name: "relative", hooksPath: "scripts/hooks", want: "scripts/hooks"},
+		{name: "absolute", hooksPath: filepath.Join(t.TempDir(), "hooks")},
+		{name: "home_relative", hooksPath: "~/.config/git/hooks"},
+		{name: "escapes_repository", hooksPath: "../hooks"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			runTestGit(t, t.Context(), dir, "init", "-q")
+			runTestGit(t, t.Context(), dir, "config", "core.hooksPath", tt.hooksPath)
+
+			got, err := (&Repo{GitRoot: dir}).containerHooksPath(t.Context(), testLogger(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tt.want {
+				t.Errorf("containerHooksPath() = %q, want %q", got, tt.want)
+			}
+		})
+	}
 }
 
 func TestFork(t *testing.T) {
