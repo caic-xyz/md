@@ -1,7 +1,7 @@
 #!/bin/bash
 # Pre-commit hook: rejects binary executables and checks file index is up to date.
 
-set -e
+set -euo pipefail
 
 binaries=$(git diff --cached --name-only --diff-filter=ACM -z | xargs -0 -r file --mime-type 2>/dev/null | grep -E 'application/(x-executable|x-mach-binary|x-dosexec|x-pie-executable|x-sharedlib)' | cut -d: -f1 || true)
 if [ -n "$binaries" ]; then
