@@ -24,8 +24,10 @@ A file to [guide coding agents](https://agents.md/).
 ## Git Hooks
 
 Run `scripts/install-git-hooks.sh` after cloning or whenever Git hooks need to be restored.
-Pre-commit rejects binary executables and stale file indexes; pre-push rejects binary
-executables, WIP commits, multi-commit pushes, and runs lint before pushes to `main`.
+Pre-commit rejects binary executables and stale file indexes; commit-msg requires a subject,
+blank line, and rationale body with body lines no longer than 120 characters, and rejects
+`Co-authored-by:` trailers; pre-push rejects binary executables, WIP commits, multi-commit
+pushes, and runs lint before pushes to `main`.
 
 ## Smoke Tests
 
