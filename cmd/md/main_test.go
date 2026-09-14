@@ -535,6 +535,29 @@ func TestDiffCommandError(t *testing.T) {
 	})
 }
 
+func TestCommitMessageTokensFromEnv(t *testing.T) {
+	t.Run("default", func(t *testing.T) {
+		t.Setenv("GIT_DESC_TOKENS", "")
+		got, err := commitMessageTokensFromEnv()
+		if err != nil || got != git.DefaultCommitMessageTokens {
+			t.Fatalf("commitMessageTokensFromEnv() = %d, %v", got, err)
+		}
+	})
+	t.Run("configured", func(t *testing.T) {
+		t.Setenv("GIT_DESC_TOKENS", "128000")
+		got, err := commitMessageTokensFromEnv()
+		if err != nil || got != 128_000 {
+			t.Fatalf("commitMessageTokensFromEnv() = %d, %v", got, err)
+		}
+	})
+	t.Run("invalid", func(t *testing.T) {
+		t.Setenv("GIT_DESC_TOKENS", "large")
+		if _, err := commitMessageTokensFromEnv(); err == nil {
+			t.Fatal("commitMessageTokensFromEnv() succeeded with invalid input")
+		}
+	})
+}
+
 func TestCmdDiff(t *testing.T) { //nolint:paralleltest // environment selects re-entered fake executables.
 	t.Run("quiet_setup_failure_exits_two", func(t *testing.T) { //nolint:paralleltest // initLogging mutates the global logger.
 		a := &app{client: &md.Client{Logger: testLogger(t)}}

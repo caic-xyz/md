@@ -1204,18 +1204,26 @@ func (a *app) cmdPush(ctx context.Context, args []string) error {
 }
 
 func (a *app) cmdPull(ctx context.Context, args []string) error {
+	contextTokens, err := commitMessageTokensFromEnv()
+	if err != nil {
+		return err
+	}
 	fs := flag.NewFlagSet("pull", flag.ExitOnError)
 	verbose := addVerboseFlag(fs)
 	cf := addContainerFlags(fs, false)
 	all := fs.Bool("all", false, "Operate on all repos, not just the current one")
 	noDescribe := fs.Bool("no-describe", false, "Skip AI-generated commit description; use a fixed commit message")
 	fs.BoolVar(noDescribe, "n", false, "Alias for -no-describe")
+	tokens := fs.Int("tokens", contextTokens, "Model context window in tokens (default: $GIT_DESC_TOKENS or 64000)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	initLogging(*verbose)
 	if err := checkArgs(fs, 0); err != nil {
 		return err
+	}
+	if *tokens < git.MinCommitMessageTokens {
+		return fmt.Errorf("--tokens must be at least %d", git.MinCommitMessageTokens)
 	}
 	ct, repoIdx, err := a.findContainerAndRepo(ctx, cf, "pull")
 	if err != nil {
@@ -1239,15 +1247,27 @@ func (a *app) cmdPull(ctx context.Context, args []string) error {
 		}
 	}
 	if !*all {
-		return ct.Pull(ctx, os.Stdout, os.Stderr, repoIdx, p)
+		return ct.Pull(ctx, os.Stdout, os.Stderr, repoIdx, &md.PullOpts{Provider: p, ContextTokens: *tokens})
 	}
 	eg, ctx2 := errgroup.WithContext(ctx)
 	for i := range ct.Repos {
 		eg.Go(func() error {
-			return ct.Pull(ctx2, os.Stdout, os.Stderr, i, p)
+			return ct.Pull(ctx2, os.Stdout, os.Stderr, i, &md.PullOpts{Provider: p, ContextTokens: *tokens})
 		})
 	}
 	return eg.Wait()
+}
+
+func commitMessageTokensFromEnv() (int, error) {
+	value := os.Getenv("GIT_DESC_TOKENS")
+	if value == "" {
+		return git.DefaultCommitMessageTokens, nil
+	}
+	tokens, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("GIT_DESC_TOKENS must be an integer: %w", err)
+	}
+	return tokens, nil
 }
 
 func (a *app) cmdDiff(ctx context.Context, args []string) error {

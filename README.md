@@ -57,6 +57,16 @@ names the direction it moves work:
 | `md push` | Saves the container's Git-visible work on timestamped backup branches, then replaces the container's mapped branches with your host state. |
 | `md fork` | Snapshots the container and starts a new one on new host branches. The source container is untouched. |
 
+### AI commit messages
+
+`md pull` uses an available LLM provider to describe pending container changes
+before committing them. Set `ASK_PROVIDER` and `ASK_MODEL` to select a provider
+and model, or let md discover one automatically. Set the model context window
+with `GIT_DESC_TOKENS` or override it for one pull with `--tokens`. Pass `-n`
+or `--no-describe` to use a fixed commit message without contacting a provider.
+See the [AI commit message documentation](https://docs.caic.xyz/md/commands#ai-commit-messages)
+for provider configuration and large-diff behavior.
+
 Every mapped host branch must exist and have an upstream, because the container
 branch tracks the same upstream. `md` reports an error and the repair command
 when that is not the case.

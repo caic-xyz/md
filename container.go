@@ -1164,10 +1164,22 @@ type FetchOpts struct {
 	// Provider generates the commit message when Commit is set. A nil Provider
 	// uses a fixed message.
 	Provider genai.Provider
+	// ContextTokens is the selected model's context window. Zero uses the
+	// commit-message generator default.
+	ContextTokens int
 	// Commit stages and commits the container's pending changes before
 	// fetching, so the host receives them as well. Leave it unset to observe
 	// the container without changing its history or its working tree.
 	Commit bool
+}
+
+// PullOpts configures [Container.Pull].
+type PullOpts struct {
+	// Provider generates the commit message. A nil Provider uses a fixed message.
+	Provider genai.Provider
+	// ContextTokens is the selected model's context window. Zero uses the
+	// commit-message generator default.
+	ContextTokens int
 }
 
 // FetchedBranch identifies an exact container branch tip observed by
@@ -1768,7 +1780,8 @@ func (c *Container) Fetch(ctx context.Context, stdout, stderr io.Writer, repoIdx
 		if _, err := c.runCmd(ctx, "", c.SSHCommand(nil, commitPrefix+" && git add . && git diff --quiet HEAD -- .")); err != nil {
 			metadata := c.gatherGitMetadata(ctx, r)
 			diff := c.gatherGitDiff(ctx, r)
-			if msg, err := git.GenerateCommitMsg(ctx, opts.Provider, metadata, diff, nil); err != nil {
+			msgOpts := &git.CommitMsgOptions{ContextTokens: opts.ContextTokens, Progress: stderr}
+			if msg, err := git.GenerateCommitMsg(ctx, opts.Provider, metadata, diff, msgOpts); err != nil {
 				c.Logger.Log(ctx, slog.LevelWarn, "failed to generate commit message", "err", err)
 			} else if msg != "" {
 				commitMsg = msg
@@ -1806,8 +1819,11 @@ func (c *Container) Fetch(ctx context.Context, stdout, stderr io.Writer, repoIdx
 // Pull fetches changes from the container and integrates all mapped branches
 // into the local repository.
 //
-// p controls AI commit message generation. Pass nil to use a default message.
-func (c *Container) Pull(ctx context.Context, stdout, stderr io.Writer, repoIdx int, p genai.Provider) error {
+// opts controls AI commit message generation. Pass nil to use a default message.
+func (c *Container) Pull(ctx context.Context, stdout, stderr io.Writer, repoIdx int, opts *PullOpts) error {
+	if opts == nil {
+		opts = &PullOpts{}
+	}
 	if len(c.Repos) == 0 {
 		return errors.New("container has no repos")
 	}
@@ -1855,7 +1871,7 @@ func (c *Container) Pull(ctx context.Context, stdout, stderr io.Writer, repoIdx 
 	}
 	// Pull integrates the container's work into the host branch, so anything
 	// still pending in the container has to become a commit first.
-	fetched, err := c.Fetch(ctx, stdout, stderr, repoIdx, &FetchOpts{Provider: p, Commit: true})
+	fetched, err := c.Fetch(ctx, stdout, stderr, repoIdx, &FetchOpts{Provider: opts.Provider, ContextTokens: opts.ContextTokens, Commit: true})
 	if err != nil {
 		return err
 	}
@@ -3341,15 +3357,17 @@ func (c *Container) waitForSSH(ctx context.Context, deadline time.Time) error {
 // the container. This data is always small.
 func (c *Container) gatherGitMetadata(ctx context.Context, r *Repo) string {
 	repo := shellQuote(r.ContainerPath)
-	cmd := "cd " + repo + " && " + gitBaseRefCommand() + " && echo '=== Branch ===' && git rev-parse --abbrev-ref HEAD && echo && echo '=== Files Changed ===' && git diff --stat --cached HEAD -- . && echo && echo '=== Recent Commits ===' && git log -5 \"$base_ref\" -- ."
+	cmd := "cd " + repo + " && " + gitBaseRefCommand() + " && echo '=== Branch ===' && git rev-parse --abbrev-ref HEAD && echo && echo '=== Files Changed ===' && git -c core.quotePath=true -c color.ui=false diff --no-color --no-ext-diff --no-textconv --stat --stat-width=80 --stat-name-width=60 --stat-count=100 --cached HEAD -- . && echo && echo '=== Recent Commits ===' && git -c color.ui=false log -5 --no-color --format='%H %s' \"$base_ref\" -- ."
 	out, _ := c.runCmd(ctx, "", c.SSHCommand(nil, cmd))
 	return out
 }
 
 // gatherGitDiff runs SSH to get the full patience diff from the container.
+// Explicit formatting flags keep repository and user Git configuration from
+// changing the patch consumed by the commit-message generator.
 func (c *Container) gatherGitDiff(ctx context.Context, r *Repo) string {
 	repo := shellQuote(r.ContainerPath)
-	cmd := "cd " + repo + " && git diff --patience -U10 --cached HEAD -- ."
+	cmd := "cd " + repo + " && git -c core.quotePath=true -c color.ui=false diff --no-color --no-ext-diff --no-textconv --patience --find-renames=50% --src-prefix=a/ --dst-prefix=b/ --output-indicator-new=+ --output-indicator-old=- --output-indicator-context=' ' --submodule=short --no-relative --unified=10 --cached HEAD -- ."
 	out, _ := c.runCmd(ctx, "", c.SSHCommand(nil, cmd))
 	return out
 }

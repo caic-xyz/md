@@ -7,508 +7,630 @@
 package git
 
 import (
-	"cmp"
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"math"
+	"os"
 	"path"
-	"slices"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/maruel/genai"
 	"golang.org/x/sync/errgroup"
 )
 
 const (
-	maxDiffLen       = 200_000
+	// DefaultCommitMessageTokens is the assumed model context window.
+	DefaultCommitMessageTokens = 64_000
+	// MinCommitMessageTokens is the smallest supported model context window.
+	MinCommitMessageTokens = 8_000
+
+	charsPerToken    = 3
+	reservedShare    = 0.25
 	reducedContext   = 3
+	maxDiffLine      = 1_000
 	maxParallelCalls = 4
+	requestTimeout   = 5 * time.Minute
 )
 
-// commitMsgPrompt is the system prompt used by GenerateCommitMsg for direct
-// commit message generation from a diff.
-const commitMsgPrompt = "Write a git commit message for the changes below. Follow these rules:\n" +
-	"- Subject: imperative mood, no period, max 72 chars (e.g. \"Fix timeout in retry loop\")\n" +
-	"- If the change is non-trivial, add a blank line then a body explaining what and why, not how\n" +
-	"- Wrap body lines at 72 chars\n" +
+const commitMsgPrompt = "Write a git commit message for the change below. Follow these rules:\n" +
+	"- Subject: imperative mood, no period, max 120 chars (e.g. \"Fix timeout in retry loop\")\n" +
+	"- Default to a body; omit it only for an obviously trivial, self-explanatory change such as a typo, formatting-only change, or comment-only change\n" +
+	"- Changes that affect behavior, interfaces, dependencies, data, architecture, or multiple meaningful concerns require a body after a blank line\n" +
+	"- Explain the rationale and consequential tradeoffs; do not merely restate the subject or diff\n" +
+	"- Keep every line at or below 120 chars\n" +
 	"- Match the style of recent upstream commits if provided\n" +
-	"- Focus on the meaningful changes; ignore ancillary updates (imports, test data, build files, dependency bumps, formatting) unless they are the primary purpose of the commit\n" +
+	"- Focus on the meaningful changes; ignore ancillary updates (imports, tests, build files, dependency bumps, formatting) unless they are the primary purpose of the change\n" +
 	"- No emojis\n" +
 	"- Output only the commit message, nothing else"
 
-// chunkPrompt is the system prompt used to summarize individual diff chunks
-// during parallel map-reduce for large diffs.
-const chunkPrompt = "Summarize the following diff chunk concisely. Focus on what changed and why. Keep it brief (2-5 sentences)."
+const partPrompt = "The input is one part of a larger change. Summarize what it changes and why in a few short paragraphs. Output only the summary."
 
-// synthesizePrompt is the system prompt used to combine chunk summaries into
-// a final commit message during parallel map-reduce for large diffs.
-const synthesizePrompt = "Below are descriptions of different parts of the same commit. " +
-	"Write a single unified git commit message following these rules:\n" +
-	"- Subject: imperative mood, no period, max 72 chars\n" +
-	"- If non-trivial, add a blank line then a body explaining what and why\n" +
-	"- Wrap body lines at 72 chars\n" +
+const finalPrompt = "Below are metadata and summaries of the parts of one change. " +
+	"Write a single git commit message for the change. Follow these rules:\n" +
+	"- Subject: imperative mood, no period, max 120 chars\n" +
+	"- Default to a body; omit it only for an obviously trivial, self-explanatory change such as a typo, formatting-only change, or comment-only change\n" +
+	"- Changes that affect behavior, interfaces, dependencies, data, architecture, or multiple meaningful concerns require a body after a blank line\n" +
+	"- Explain the rationale and consequential tradeoffs; do not merely restate the subject or summaries\n" +
+	"- Keep every line at or below 120 chars\n" +
 	"- Match the style of recent upstream commits if provided\n" +
 	"- No emojis\n" +
 	"- Output only the commit message, nothing else"
 
-// defaultDiffFilters is the default sequence of file predicates applied
-// progressively by GenerateCommitMsg when a diff exceeds the context limit.
-// Each filter is tried in order; matching files are removed only if the diff
-// is still too large after the previous step. Pass nil to GenerateCommitMsg
-// to use these defaults.
-var defaultDiffFilters = []func(string) bool{isTestFile, isDataFile, isGeneratedFile}
+const mergePrompt = "Below are summaries of parts of one change. Merge them into one summary. Keep every distinct point and drop repetition. Output only the summary."
 
-// hunk represents a single hunk in a unified diff.
+var hunkPattern = regexp.MustCompile(`^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*)$`)
+
+var defaultDiffFilters = []func(string) bool{isTestFile, isDataFile}
+
+// CommitMsgOptions configures [GenerateCommitMsg].
+type CommitMsgOptions struct {
+	// BriefMetadata replaces metadata in requests that summarize one diff part.
+	// When empty, GenerateCommitMsg removes the recent-commit section from metadata.
+	BriefMetadata string
+	// ContextTokens is the model context window. Zero reads GIT_DESC_TOKENS and
+	// then defaults to [DefaultCommitMessageTokens].
+	ContextTokens int
+	// Filters are applied progressively to omit low-value file bodies. Nil uses
+	// the default test and structured-data filters.
+	Filters []func(string) bool
+	// Progress receives notices when a diff is reduced, split, or merged.
+	Progress io.Writer
+}
+
 type hunk struct {
-	header string   // the @@ line
-	body   []string // lines after the header
+	oldStart int
+	newStart int
+	section  string
+	lines    []string
 }
 
-// fileDiff represents a single file's diff section.
-type fileDiff struct {
-	path   string   // file path extracted from "diff --git" header
-	header []string // "diff --git", "index", "---", "+++" lines
-	hunks  []hunk
+func (h *hunk) render() string {
+	oldCount, newCount := lineCounts(h.lines)
+	header := fmt.Sprintf("@@ -%d,%d +%d,%d @@%s\n", h.oldStart, oldCount, h.newStart, newCount, h.section)
+	return header + strings.Join(h.lines, "")
 }
 
-// parseDiff parses a unified diff string into structured fileDiff values.
-func parseDiff(diff string) []fileDiff {
-	if diff == "" {
-		return nil
+func (h *hunk) withContext(n int) hunk {
+	keep := make([]bool, len(h.lines))
+	for i := range keep {
+		keep[i] = true
 	}
-	lines := strings.Split(diff, "\n")
-	var files []fileDiff
-	cur := -1
-	inHunk := false
-	for _, line := range lines {
-		if strings.HasPrefix(line, "diff --git") {
-			files = append(files, fileDiff{path: extractPath(line)})
-			cur = len(files) - 1
-			inHunk = false
-			files[cur].header = append(files[cur].header, line)
+	lead := 0
+	for i := 0; i < len(h.lines); {
+		if !strings.HasPrefix(h.lines[i], " ") {
+			i++
 			continue
 		}
-		if cur < 0 {
+		start := i
+		for i < len(h.lines) && strings.HasPrefix(h.lines[i], " ") {
+			i++
+		}
+		dropStart := 0
+		var dropEnd int
+		switch {
+		case start == 0:
+			dropEnd = max(0, i-n)
+			lead = dropEnd
+		case i == len(h.lines):
+			dropStart, dropEnd = min(start+n, i), i
+		default:
+			dropStart, dropEnd = min(start+n, i), max(start, i-n)
+		}
+		for j := dropStart; j < dropEnd; j++ {
+			keep[j] = false
+		}
+	}
+	lines := make([]string, 0, len(h.lines)-lead)
+	for i, line := range h.lines {
+		if keep[i] {
+			lines = append(lines, line)
+		}
+	}
+	return hunk{oldStart: h.oldStart + lead, newStart: h.newStart + lead, section: h.section, lines: lines}
+}
+
+func (h *hunk) split(limit int) []hunk {
+	room := limit - len(h.render()) + len(strings.Join(h.lines, "")) - 8
+	groups := pack(h.lines, room)
+	result := make([]hunk, 0, len(groups))
+	oldStart, newStart := h.oldStart, h.newStart
+	for _, group := range groups {
+		result = append(result, hunk{oldStart: oldStart, newStart: newStart, section: h.section, lines: group})
+		oldCount, newCount := lineCounts(group)
+		oldStart += oldCount
+		newStart += newCount
+	}
+	return result
+}
+
+type fileDiff struct {
+	path    string
+	header  string
+	hunks   []hunk
+	omitted bool
+}
+
+func (f *fileDiff) render() string {
+	if f.omitted {
+		return f.header + "(content omitted)\n"
+	}
+	var b strings.Builder
+	b.WriteString(f.header)
+	for i := range f.hunks {
+		b.WriteString(f.hunks[i].render())
+	}
+	return b.String()
+}
+
+func (f *fileDiff) omit() fileDiff {
+	result := *f
+	if len(result.hunks) != 0 {
+		result.hunks = nil
+		result.omitted = true
+	}
+	return result
+}
+
+func (f *fileDiff) withContext(n int) fileDiff {
+	result := *f
+	result.hunks = make([]hunk, len(f.hunks))
+	for i := range f.hunks {
+		result.hunks[i] = f.hunks[i].withContext(n)
+	}
+	return result
+}
+
+func (f *fileDiff) split(limit int) []string {
+	if text := f.render(); len(text) <= limit {
+		return []string{text}
+	}
+	room := limit - len(f.header)
+	var hunks []string
+	for i := range f.hunks {
+		for _, part := range f.hunks[i].split(room) {
+			hunks = append(hunks, part.render())
+		}
+	}
+	groups := pack(hunks, room)
+	result := make([]string, len(groups))
+	for i, group := range groups {
+		result[i] = f.header + strings.Join(group, "")
+	}
+	return result
+}
+
+func lineCounts(lines []string) (oldCount, newCount int) {
+	for _, line := range lines {
+		oldCount += boolInt(strings.HasPrefix(line, " ") || strings.HasPrefix(line, "-"))
+		newCount += boolInt(strings.HasPrefix(line, " ") || strings.HasPrefix(line, "+"))
+	}
+	return oldCount, newCount
+}
+
+func boolInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
+}
+
+// parseDiff turns a unified patch into compact, stable LLM input. It accepts
+// externally supplied patches in addition to md's normalized Git output.
+// Path decoding and structural validation stay at this boundary. Low-value
+// headers, lock/deletion bodies, and long lines are
+// removed here before any request budget is calculated.
+func parseDiff(text string) ([]fileDiff, error) {
+	starts := regexp.MustCompile(`(?m)^diff --git `).FindAllStringIndex(text, -1)
+	files := make([]fileDiff, 0, len(starts))
+	for i, start := range starts {
+		end := len(text)
+		if i+1 < len(starts) {
+			end = starts[i+1][0]
+		}
+		f, err := parseFileDiff(text[start[0]:end])
+		if err != nil {
+			return nil, err
+		}
+		files = append(files, f)
+	}
+	return files, nil
+}
+
+func parseFileDiff(block string) (fileDiff, error) {
+	lines := strings.SplitAfter(block, "\n")
+	f := fileDiff{path: extractPath(strings.TrimSuffix(lines[0], "\n")), header: clipDiffLine(lines[0])}
+	for _, line := range lines[1:] {
+		if line == "" {
 			continue
 		}
 		if strings.HasPrefix(line, "@@") {
-			files[cur].hunks = append(files[cur].hunks, hunk{header: line})
-			inHunk = true
+			match := hunkPattern.FindStringSubmatch(strings.TrimSuffix(line, "\n"))
+			if match == nil {
+				return fileDiff{}, fmt.Errorf("malformed hunk header in %s: %s", f.path, strings.TrimSpace(line))
+			}
+			oldStart, _ := strconv.Atoi(match[1])
+			newStart, _ := strconv.Atoi(match[2])
+			f.hunks = append(f.hunks, hunk{oldStart: oldStart, newStart: newStart, section: match[3]})
 			continue
 		}
-		if inHunk {
-			h := &files[cur].hunks[len(files[cur].hunks)-1]
-			h.body = append(h.body, line)
-		} else {
-			files[cur].header = append(files[cur].header, line)
+		switch {
+		case len(f.hunks) != 0:
+			f.hunks[len(f.hunks)-1].lines = append(f.hunks[len(f.hunks)-1].lines, clipDiffLine(line))
+		case strings.HasPrefix(line, "+++ ") && strings.TrimSpace(line[4:]) != "/dev/null":
+			var err error
+			f.path, err = decodeGitPath(strings.TrimSpace(line[4:]))
+			if err != nil {
+				return fileDiff{}, err
+			}
+		case strings.HasPrefix(line, "rename to "):
+			var err error
+			f.path, err = decodeGitPath(strings.TrimSpace(line[len("rename to "):]))
+			if err != nil {
+				return fileDiff{}, err
+			}
+		case !strings.HasPrefix(line, "index ") && !strings.HasPrefix(line, "--- ") && !strings.HasPrefix(line, "+++ "):
+			f.header += clipDiffLine(line)
+		}
+	}
+	if isLockFile(f.path) || strings.Contains(f.header, "\ndeleted file mode ") {
+		f = f.omit()
+	}
+	return f, nil
+}
+
+func clipDiffLine(line string) string {
+	line = strings.TrimSuffix(line, "\n")
+	if len(line) > maxDiffLine {
+		end := maxDiffLine
+		for end > 0 && !utf8.ValidString(line[:end]) {
+			end--
+		}
+		line = line[:end] + " [truncated]"
+	}
+	return line + "\n"
+}
+
+func extractPath(line string) string {
+	const prefix = "diff --git a/"
+	if strings.HasPrefix(line, prefix) {
+		rest := line[len(prefix):]
+		if (len(rest)-3)%2 == 0 {
+			pathLen := (len(rest) - 3) / 2
+			if pathLen >= 0 && rest[pathLen:pathLen+3] == " b/" && rest[:pathLen] == rest[pathLen+3:] {
+				return rest[:pathLen]
+			}
+		}
+	}
+	payload := strings.TrimPrefix(line, "diff --git ")
+	if strings.HasPrefix(payload, `"`) {
+		escaped := false
+		for i := 1; i < len(payload); i++ {
+			switch payload[i] {
+			case '"':
+				if !escaped {
+					value, err := decodeGitPath(strings.TrimSpace(payload[i+1:]))
+					if err == nil {
+						return value
+					}
+					return ""
+				}
+				escaped = false
+			case '\\':
+				escaped = !escaped
+			default:
+				escaped = false
+			}
+		}
+	}
+	fields := strings.Fields(line)
+	if len(fields) >= 4 {
+		value, err := decodeGitPath(fields[len(fields)-1])
+		if err == nil {
+			return value
+		}
+	}
+	return ""
+}
+
+func decodeGitPath(value string) (string, error) {
+	if strings.HasPrefix(value, `"`) {
+		decoded, err := strconv.Unquote(value)
+		if err != nil {
+			return "", fmt.Errorf("malformed quoted Git path %q: %w", value, err)
+		}
+		value = decoded
+	}
+	if strings.HasPrefix(value, "a/") || strings.HasPrefix(value, "b/") {
+		value = value[2:]
+	}
+	return value, nil
+}
+
+func isTestFile(name string) bool {
+	return strings.Contains(strings.ToLower(path.Base(name)), "test")
+}
+
+func isDataFile(name string) bool {
+	switch strings.ToLower(path.Ext(name)) {
+	case ".json", ".jsonl", ".ndjson", ".yaml", ".yml":
+		return true
+	default:
+		return false
+	}
+}
+
+func isLockFile(name string) bool {
+	base := strings.ToLower(path.Base(name))
+	return strings.HasSuffix(base, ".lock") || base == "go.sum" || base == "npm-shrinkwrap.json" || base == "package-lock.json" || base == "pnpm-lock.yaml"
+}
+
+func reduceDiff(files []fileDiff, limit int, filters []func(string) bool, progress io.Writer) []fileDiff {
+	if renderedLen(files) > limit {
+		progressf(progress, "Diff is %d chars, over %d; reducing context to %d lines\n", renderedLen(files), limit, reducedContext)
+		for i := range files {
+			files[i] = files[i].withContext(reducedContext)
+		}
+	}
+	for _, filter := range filters {
+		if renderedLen(files) <= limit {
+			break
+		}
+		progressf(progress, "Diff is %d chars, over %d; omitting low-value file bodies\n", renderedLen(files), limit)
+		for i := range files {
+			if filter(files[i].path) {
+				files[i] = files[i].omit()
+			}
 		}
 	}
 	return files
 }
 
-// renderDiff serializes parsed file diffs back into a unified diff string.
-func renderDiff(files []fileDiff) string {
-	n := 0
-	for _, f := range files {
-		n += len(f.header)
-		for _, h := range f.hunks {
-			n += 1 + len(h.body)
-		}
-	}
-	lines := make([]string, 0, n)
-	for _, f := range files {
-		lines = append(lines, f.header...)
-		for _, h := range f.hunks {
-			lines = append(lines, h.header)
-			lines = append(lines, h.body...)
-		}
-	}
-	return strings.Join(lines, "\n")
-}
-
-// fileDiffLen returns the rendered length of a single fileDiff.
-func fileDiffLen(f *fileDiff) int {
-	n := 0
-	numLines := 0
-	for _, line := range f.header {
-		n += len(line)
-		numLines++
-	}
-	for _, h := range f.hunks {
-		n += len(h.header)
-		numLines++
-		for _, line := range h.body {
-			n += len(line)
-			numLines++
-		}
-	}
-	if numLines == 0 {
-		return 0
-	}
-	return n + numLines - 1
-}
-
-// renderDiffLen returns the length of the string that renderDiff would produce
-// without allocating it.
-func renderDiffLen(files []fileDiff) int {
-	if len(files) == 0 {
-		return 0
-	}
-	n := len(files) - 1 // \n separators between files
+func renderedLen(files []fileDiff) int {
+	size := 0
 	for i := range files {
-		n += fileDiffLen(&files[i])
+		size += len(files[i].render())
 	}
-	return n
+	return size
 }
 
-// extractPath parses the filename from a "diff --git a/path b/path" header line.
-func extractPath(diffLine string) string {
-	// Format: "diff --git a/X b/X" where both paths are identical (non-rename).
-	const prefix = "diff --git a/"
-	if !strings.HasPrefix(diffLine, prefix) {
-		return ""
-	}
-	rest := diffLine[len(prefix):] // "X b/X"
-	// For identical paths: rest = path + " b/" + path, so len = 2*pathLen + 3.
-	if (len(rest)-3)%2 == 0 {
-		pathLen := (len(rest) - 3) / 2
-		sep := pathLen // expected position of " b/" in rest
-		if sep >= 0 && sep+3 <= len(rest) && rest[sep:sep+3] == " b/" && rest[:pathLen] == rest[sep+3:] {
-			return rest[:pathLen]
-		}
-	}
-	// Fallback for renames (a/old b/new) where paths differ.
-	if i := strings.LastIndex(rest, " b/"); i >= 0 {
-		return rest[i+3:]
-	}
-	return ""
-}
-
-// isTestFile returns true if the basename contains "test" (case-insensitive).
-func isTestFile(name string) bool {
-	return strings.Contains(strings.ToLower(path.Base(name)), "test")
-}
-
-// isDataFile returns true for .json, .yaml, and .yml files.
-func isDataFile(name string) bool {
-	ext := strings.ToLower(path.Ext(name))
-	return ext == ".json" || ext == ".yaml" || ext == ".yml"
-}
-
-// isGeneratedFile returns true for lock files, generated code, and vendored
-// dependencies.
-func isGeneratedFile(name string) bool {
-	lower := strings.ToLower(name)
-	switch strings.ToLower(path.Base(name)) {
-	case "cargo.lock", "composer.lock", "gemfile.lock", "go.sum",
-		"package-lock.json", "pnpm-lock.yaml", "poetry.lock", "yarn.lock":
-		return true
-	}
-	if strings.HasSuffix(lower, ".pb.go") || strings.HasSuffix(lower, "_generated.go") {
-		return true
-	}
-	for part := range strings.SplitSeq(lower, "/") {
-		if part == "vendor" || part == "node_modules" {
-			return true
-		}
-	}
-	for part := range strings.SplitSeq(lower, "\\") {
-		if part == "vendor" || part == "node_modules" {
-			return true
-		}
-	}
-	return false
-}
-
-// buildContext concatenates metadata and diff with a separator.
-func buildContext(metadata, diff string) string {
-	return metadata + "=== Changes ===\n" + diff
-}
-
-// filteredAnnotation returns a comment line listing the files that were
-// omitted from the diff so the LLM knows they existed.
-func filteredAnnotation(removed []string) string {
-	if len(removed) == 0 {
-		return ""
-	}
-	return "# [filtered: " + strings.Join(removed, ", ") + " — omitted to fit context]\n"
-}
-
-// reduceFileDiffContext trims context lines in each hunk to at most target
-// lines before and after changed lines.
-func reduceFileDiffContext(files []fileDiff, target int) {
-	for i := range files {
-		for j := range files[i].hunks {
-			files[i].hunks[j].body, _ = trimHunkContext(files[i].hunks[j].body, target)
-		}
-	}
-}
-
-// reduceDiffContext rewrites a unified diff, trimming context lines in each
-// hunk to at most reducedContext lines before and after changed lines.
-func reduceDiffContext(diff string) string {
-	files := parseDiff(diff)
-	reduceFileDiffContext(files, reducedContext)
-	return renderDiff(files)
-}
-
-// hunkSpan marks a contiguous run of context or changed lines in a hunk body.
-type hunkSpan struct {
-	start, end int
-	context    bool
-}
-
-// trimHunkContext trims leading and trailing context-only runs and
-// inter-change context runs to at most target lines on each side.
-//
-// Returns the trimmed lines and the number of lines removed.
-func trimHunkContext(body []string, target int) (out []string, removedCount int) {
-	if len(body) == 0 {
-		return body, 0
-	}
-
-	// Identify which lines are context (start with ' ' or are empty context).
-	isCtx := func(line string) bool {
-		return line == "" || line[0] == ' '
-	}
-
-	// Find runs of context lines and changed lines.
-	var spans []hunkSpan
-	i := 0
-	for i < len(body) {
-		ctx := isCtx(body[i])
-		j := i + 1
-		for j < len(body) && isCtx(body[j]) == ctx {
-			j++
-		}
-		spans = append(spans, hunkSpan{i, j, ctx})
-		i = j
-	}
-
-	var removed int
-	for si, s := range spans {
-		if !s.context {
-			out = append(out, body[s.start:s.end]...)
-			continue
-		}
-		runLen := s.end - s.start
-		if runLen <= target*2 {
-			// Short enough, keep all.
-			out = append(out, body[s.start:s.end]...)
-			continue
-		}
-		// Leading context (first span or after a changed span).
-		// Trailing context (last span or before a changed span).
-		keepEnd := target   // trailing lines from this run (context before next change)
-		keepStart := target // leading lines from this run (context after prev change)
-		if si == 0 {
-			keepStart = target
-			keepEnd = 0
-		}
-		if si == len(spans)-1 {
-			keepStart = 0
-			keepEnd = target
-		}
-		if keepStart+keepEnd >= runLen {
-			out = append(out, body[s.start:s.end]...)
-			continue
-		}
-		if keepStart > 0 {
-			out = append(out, body[s.start:s.start+keepStart]...)
-		}
-		if keepEnd > 0 {
-			out = append(out, body[s.end-keepEnd:s.end]...)
-		}
-		removed += runLen - keepStart - keepEnd
-	}
-	return out, removed
-}
-
-// filterFiles partitions files into kept and removed based on the exclude
-// predicate.
-func filterFiles(files []fileDiff, exclude func(string) bool) (kept []fileDiff, removed []string) {
-	for _, f := range files {
-		if exclude(f.path) {
-			removed = append(removed, f.path)
-		} else {
-			kept = append(kept, f)
-		}
-	}
-	return kept, removed
-}
-
-// filterDiff removes file sections from a unified diff where exclude returns
-// true for the file path.
-func filterDiff(diff string, exclude func(string) bool) string {
-	files := parseDiff(diff)
-	kept, _ := filterFiles(files, exclude)
-	return renderDiff(kept)
-}
-
-// splitFiles splits file diffs into chunks that each fit under maxChunk bytes.
-// A single file that exceeds maxChunk is returned as its own chunk. Files are
-// sorted by path so that files in the same directory land in the same chunk.
-func splitFiles(files []fileDiff, maxChunk int) []string {
-	if len(files) == 0 {
+func pack(items []string, limit int) [][]string {
+	if len(items) == 0 {
 		return nil
 	}
-	sorted := make([]fileDiff, len(files))
-	copy(sorted, files)
-	slices.SortFunc(sorted, func(a, b fileDiff) int {
-		return cmp.Compare(a.path, b.path)
-	})
-	files = sorted
-	var chunks []string
-	var chunk []fileDiff
-	chunkLen := 0
+	total := 0
+	for _, item := range items {
+		total += len(item)
+	}
+	target := float64(total) / math.Max(1, math.Ceil(float64(total)/float64(limit)))
+	var groups [][]string
+	size := 0
+	for _, item := range items {
+		if len(groups) == 0 || size+len(item) > limit || float64(size)+float64(len(item))/2 > target {
+			groups = append(groups, nil)
+			size = 0
+		}
+		groups[len(groups)-1] = append(groups[len(groups)-1], item)
+		size += len(item)
+	}
+	return groups
+}
+
+func splitText(text string, limit int) []string {
+	var pieces []string
+	for len(text) > limit {
+		end := limit
+		for end > 0 && !utf8.RuneStart(text[end]) {
+			end--
+		}
+		if boundary := max(strings.LastIndex(text[:end], "\n"), strings.LastIndex(text[:end], " ")); boundary > 0 {
+			end = boundary + 1
+		}
+		pieces = append(pieces, text[:end])
+		text = text[end:]
+	}
+	if text != "" {
+		pieces = append(pieces, text)
+	}
+	return pieces
+}
+
+func splitDiff(files []fileDiff, limit int) []string {
+	pieces := make([]string, 0, len(files))
 	for i := range files {
-		fLen := fileDiffLen(&files[i])
-		if chunkLen > 0 && chunkLen+1+fLen > maxChunk {
-			chunks = append(chunks, renderDiff(chunk))
-			chunk = nil
-			chunkLen = 0
-		}
-		chunk = append(chunk, files[i])
-		if chunkLen == 0 {
-			chunkLen = fLen
+		pieces = append(pieces, files[i].split(limit)...)
+	}
+	groups := pack(pieces, limit)
+	result := make([]string, len(groups))
+	for i, group := range groups {
+		result[i] = strings.Join(group, "")
+	}
+	return result
+}
+
+func section(title, body string) string {
+	return "=== " + title + " ===\n" + strings.TrimSpace(body) + "\n\n"
+}
+
+func room(budget int, overhead string) (int, error) {
+	available := budget - len(overhead)
+	if available < 4*maxDiffLine {
+		return 0, fmt.Errorf("git metadata leaves %d of %d characters for changes; raise GIT_DESC_TOKENS", available, budget)
+	}
+	return available, nil
+}
+
+func contextBudget(tokens int) (int, error) {
+	if tokens == 0 {
+		if value := os.Getenv("GIT_DESC_TOKENS"); value != "" {
+			var err error
+			tokens, err = strconv.Atoi(value)
+			if err != nil {
+				return 0, fmt.Errorf("GIT_DESC_TOKENS must be an integer: %w", err)
+			}
 		} else {
-			chunkLen += 1 + fLen
+			tokens = DefaultCommitMessageTokens
 		}
 	}
-	if len(chunk) > 0 {
-		chunks = append(chunks, renderDiff(chunk))
+	if tokens < MinCommitMessageTokens {
+		return 0, fmt.Errorf("commit message context must be at least %d tokens", MinCommitMessageTokens)
 	}
-	return chunks
+	return int(float64(tokens) * (1 - reservedShare) * charsPerToken), nil
 }
 
-// splitDiff splits a unified diff at "diff --git" boundaries into chunks
-// that each fit under maxChunk bytes. A single file that exceeds maxChunk is
-// returned as its own chunk.
-func splitDiff(diff string, maxChunk int) []string {
-	files := parseDiff(diff)
-	if len(files) == 0 {
-		if diff != "" {
-			return []string{diff}
-		}
-		return nil
-	}
-	return splitFiles(files, maxChunk)
-}
-
-// progressiveFilter applies filters in order to reduce files until
-// renderDiffLen(result) + len(filteredAnnotation(removed)) fits within budget.
-// If a filter would eliminate all remaining files, it is skipped to ensure
-// there is always something to describe. Returns the kept files and all
-// removed file paths accumulated across applied filters.
-func progressiveFilter(files []fileDiff, filters []func(string) bool, budget int) (kept []fileDiff, removedPaths []string) {
-	var removed []string
-	for _, f := range filters {
-		kept, r := filterFiles(files, f)
-		if len(kept) == 0 {
-			// Skip: applying this filter would leave nothing to describe.
-			continue
-		}
-		files = kept
-		removed = append(removed, r...)
-		if renderDiffLen(files)+len(filteredAnnotation(removed)) <= budget {
-			break
-		}
-	}
-	return files, removed
-}
-
-// GenerateCommitMsg applies a progressive reduction pipeline to fit the diff
-// under the LLM context limit, then calls the LLM to produce a commit message.
+// GenerateCommitMsg generates a commit message from Git metadata and a unified diff.
 //
-// metadata should contain git context (branch name, file stats, recent commit
-// messages). diff should be a unified diff of the changes to describe.
-// filters is an ordered list of file predicates applied progressively to
-// reduce the diff size. Pass nil to use defaultDiffFilters.
-func GenerateCommitMsg(ctx context.Context, p genai.Provider, metadata, diff string, filters []func(string) bool) (string, error) {
+// The input budget is derived from opts.ContextTokens or GIT_DESC_TOKENS and
+// defaults to 64000.
+// Large changes are reduced, split, summarized in parallel, and merged in rounds
+// so every provider request remains within the budget. opts.Filters controls
+// the progressive file-body omissions; nil uses the defaults.
+func GenerateCommitMsg(ctx context.Context, p genai.Provider, metadata, diff string, opts *CommitMsgOptions) (string, error) {
+	if opts == nil {
+		opts = &CommitMsgOptions{}
+	}
+	filters := opts.Filters
 	if filters == nil {
 		filters = defaultDiffFilters
 	}
-	files := parseDiff(diff)
-	metaLen := len(metadata) + len("=== Changes ===\n")
-
-	// Step 0: try full diff.
-	if metaLen+renderDiffLen(files) <= maxDiffLen {
-		return genCommitMsg(ctx, p, commitMsgPrompt, buildContext(metadata, renderDiff(files)))
+	budget, err := contextBudget(opts.ContextTokens)
+	if err != nil {
+		return "", err
+	}
+	files, err := parseDiff(diff)
+	if err != nil {
+		return "", err
+	}
+	if len(files) == 0 {
+		return "", errors.New("no changes to describe")
+	}
+	available, err := room(budget, metadata+section("Changes", ""))
+	if err != nil {
+		return "", err
+	}
+	files = reduceDiff(files, available, filters, opts.Progress)
+	rendered := renderFiles(files)
+	if len(rendered) <= available {
+		return generate(ctx, p, commitMsgPrompt, metadata+section("Changes", rendered))
 	}
 
-	// Step 1: reduce context lines.
-	reduceFileDiffContext(files, reducedContext)
-	if metaLen+renderDiffLen(files) <= maxDiffLen {
-		return genCommitMsg(ctx, p, commitMsgPrompt, buildContext(metadata, renderDiff(files)))
+	brief := opts.BriefMetadata
+	if brief == "" {
+		brief = briefMetadata(metadata)
 	}
-
-	// Step 2+: apply each filter progressively until the diff fits.
-	files, removed := progressiveFilter(files, filters, maxDiffLen-metaLen)
-	annotation := filteredAnnotation(removed)
-	if metaLen+renderDiffLen(files)+len(annotation) <= maxDiffLen {
-		return genCommitMsg(ctx, p, commitMsgPrompt, buildContext(metadata, renderDiff(files)+annotation))
+	available, err = room(budget, brief+section("Partial changes", ""))
+	if err != nil {
+		return "", err
 	}
-
-	// Final fallback: parallel map-reduce. Include annotation in metadata so
-	// the synthesis step knows which files were omitted.
-	return parallelDescribe(ctx, p, metadata+annotation, files)
+	parts := splitDiff(files, available)
+	progressf(opts.Progress, "Diff is %d chars; splitting into %d parts\n", len(rendered), len(parts))
+	inputs := make([]string, len(parts))
+	for i, part := range parts {
+		inputs[i] = brief + section("Partial changes", part)
+	}
+	summaries, err := generateAll(ctx, p, partPrompt, inputs)
+	if err != nil {
+		return "", err
+	}
+	available, err = room(budget, metadata+section("Part summaries", ""))
+	if err != nil {
+		return "", err
+	}
+	for summariesLen(summaries) > available {
+		var pieces []string
+		for _, item := range summaryItems(summaries) {
+			pieces = append(pieces, splitText(item, available)...)
+		}
+		groups := pack(pieces, available)
+		progressf(opts.Progress, "Summaries are %d chars, over %d; merging into %d parts\n", summariesLen(summaries), available, len(groups))
+		mergeInputs := make([]string, len(groups))
+		for i, group := range groups {
+			mergeInputs[i] = strings.Join(group, "")
+		}
+		merged, mergeErr := generateAll(ctx, p, mergePrompt, mergeInputs)
+		if mergeErr != nil {
+			return "", mergeErr
+		}
+		if summariesLen(merged) >= summariesLen(summaries) {
+			return "", errors.New("merging commit summaries did not shorten them; raise GIT_DESC_TOKENS")
+		}
+		summaries = merged
+	}
+	return generate(ctx, p, finalPrompt, metadata+section("Part summaries", strings.Join(summaryItems(summaries), "")))
 }
 
-const maxMetadataPrefix = 10000
-
-// parallelDescribe splits the diff into chunks, summarizes each concurrently,
-// then synthesizes the summaries into a single commit message. Each chunk
-// prompt includes a truncated metadata header for context.
-func parallelDescribe(ctx context.Context, p genai.Provider, metadata string, files []fileDiff) (string, error) {
-	// Truncate metadata prefix for chunk prompts to avoid blowing the budget.
-	metaPrefix := metadata
-	if len(metaPrefix) > maxMetadataPrefix {
-		metaPrefix = metaPrefix[:maxMetadataPrefix] + "\n...[truncated]\n"
+func briefMetadata(metadata string) string {
+	if before, _, ok := strings.Cut(metadata, "=== Recent Commits ==="); ok {
+		return before
 	}
-	chunkOverhead := len(chunkPrompt) + len("\n\n") + len(metaPrefix) + len("\n") + 100
-	chunkSize := maxDiffLen - chunkOverhead
-	chunkSize = max(chunkSize, 1000)
-	chunks := splitFiles(files, chunkSize)
-	if len(chunks) == 0 {
-		return genCommitMsg(ctx, p, commitMsgPrompt, metadata)
-	}
+	return metadata
+}
 
-	summaries := make([]string, len(chunks))
-	g, gctx := errgroup.WithContext(ctx)
+func progressf(w io.Writer, format string, args ...any) {
+	if w != nil {
+		_, _ = fmt.Fprintf(w, format, args...)
+	}
+}
+
+func renderFiles(files []fileDiff) string {
+	var b strings.Builder
+	for i := range files {
+		b.WriteString(files[i].render())
+	}
+	return b.String()
+}
+
+func summaryItems(summaries []string) []string {
+	items := make([]string, len(summaries))
+	for i, summary := range summaries {
+		items[i] = summary + "\n\n"
+	}
+	return items
+}
+
+func summariesLen(summaries []string) int {
+	size := 0
+	for _, summary := range summaries {
+		size += len(summary) + 2
+	}
+	return size
+}
+
+func generateAll(ctx context.Context, p genai.Provider, prompt string, inputs []string) ([]string, error) {
+	results := make([]string, len(inputs))
+	g, groupCtx := errgroup.WithContext(ctx)
 	g.SetLimit(maxParallelCalls)
-	for i, chunk := range chunks {
+	for i, input := range inputs {
 		g.Go(func() error {
-			header := fmt.Sprintf("(part %d/%d)\n", i+1, len(chunks))
-			content := metaPrefix + "\n" + header + chunk
-			summary, err := genCommitMsg(gctx, p, chunkPrompt, content)
+			result, err := generate(groupCtx, p, prompt, input)
 			if err != nil {
 				return err
 			}
-			summaries[i] = summary
+			results[i] = result
 			return nil
 		})
 	}
 	if err := g.Wait(); err != nil {
-		return "", err
+		return nil, err
 	}
-
-	// Synthesize.
-	combined := metadata + "\n=== Chunk Summaries ===\n" + strings.Join(summaries, "\n---\n")
-	return genCommitMsg(ctx, p, synthesizePrompt, combined)
+	return results, nil
 }
 
-// genCommitMsg generates a commit message using an already-initialized provider.
-//
-// The system prompt contains instructions; the user content contains the diff
-// and metadata. Separating them lets the LLM weight instructions correctly.
-func genCommitMsg(ctx context.Context, p genai.Provider, systemPrompt, content string) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+func generate(ctx context.Context, p genai.Provider, systemPrompt, content string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
 	defer cancel()
-	res, err := p.GenSync(ctx, genai.Messages{genai.NewTextMessage(content)}, &genai.GenOptionText{
-		SystemPrompt: systemPrompt,
-	})
+	res, err := p.GenSync(ctx, genai.Messages{genai.NewTextMessage(content)}, &genai.GenOptionText{SystemPrompt: systemPrompt})
 	if err != nil {
 		return "", err
 	}
-	return strings.TrimSpace(res.String()), nil
+	answer := strings.TrimSpace(res.String())
+	if answer == "" {
+		return "", errors.New("commit message provider returned no output")
+	}
+	return answer, nil
 }
