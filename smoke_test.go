@@ -55,10 +55,11 @@ func newSmokeClient(t *testing.T, rt string) *Client {
 	client.env = clientEnv
 
 	// podman system reset cleans up overlay storage before t.TempDir removal,
-	// avoiding permission errors.
+	// avoiding permission errors. Removing a large image can exceed 30 seconds
+	// on a loaded CI runner.
 	if rt == "podman" {
 		t.Cleanup(func() {
-			ctx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 30*time.Second)
+			ctx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 2*time.Minute)
 			defer cancel()
 			if _, err := client.Runtime.Run(ctx, "", "system", "reset", "-f"); err != nil {
 				t.Errorf("podman system reset cleanup: %v", err)
