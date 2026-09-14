@@ -13,6 +13,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -23,6 +25,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/maruel/genai"
 
 	"github.com/caic-xyz/md"
 	"github.com/caic-xyz/md/containers"
@@ -905,6 +909,30 @@ func TestResolveEnvSpecs(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestNewProvider(t *testing.T) {
+	t.Parallel()
+	const apiKey = "test-api-key"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %q, want %q", r.Method, http.MethodPost)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer "+apiKey {
+			t.Errorf("Authorization = %q, want %q", got, "Bearer "+apiKey)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"Describe changes"}}]}`)
+	}))
+	t.Cleanup(server.Close)
+
+	p, err := newProvider(t.Context(), "openaicompatible", "test-model", server.URL, apiKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.GenSync(t.Context(), genai.Messages{genai.NewTextMessage("Describe changes")}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestShellSplit(t *testing.T) {

@@ -16,6 +16,7 @@ import (
 	"io"
 	"log/slog"
 	"maps"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -31,6 +32,7 @@ import (
 
 	"github.com/maruel/genai"
 	"github.com/maruel/genai/providers"
+	"github.com/maruel/roundtrippers"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/caic-xyz/md"
@@ -1221,7 +1223,18 @@ func (a *app) cmdPull(ctx context.Context, args []string) error {
 	}
 	var p genai.Provider
 	if !*noDescribe {
-		if p, err = newProvider(ctx, os.Getenv("ASK_PROVIDER"), os.Getenv("ASK_MODEL")); err != nil {
+		apiKeyName := os.Getenv("ASK_API_KEY_NAME")
+		apiKey := ""
+		if apiKeyName != "" {
+			apiKey = os.Getenv(apiKeyName)
+			if apiKey == "" {
+				err = fmt.Errorf("environment variable %s named by ASK_API_KEY_NAME is empty", apiKeyName)
+			}
+		}
+		if err == nil {
+			p, err = newProvider(ctx, os.Getenv("ASK_PROVIDER"), os.Getenv("ASK_MODEL"), os.Getenv("ASK_REMOTE"), apiKey)
+		}
+		if err != nil {
 			slog.WarnContext(ctx, "md", "msg", "failed to initialize provider", "err", err)
 		}
 	}
@@ -2040,7 +2053,7 @@ func shellSplit(s string) ([]string, error) {
 	return args, nil
 }
 
-func newProvider(ctx context.Context, provider, model string) (genai.Provider, error) {
+func newProvider(ctx context.Context, provider, model, remote, apiKey string) (genai.Provider, error) {
 	m := genai.ProviderOptionModel(model)
 	if m == "" {
 		m = genai.ModelCheap
@@ -2050,7 +2063,21 @@ func newProvider(ctx context.Context, provider, model string) (genai.Provider, e
 		if !ok {
 			return nil, fmt.Errorf("unknown provider %q", provider)
 		}
-		return cfg.Factory(ctx, m)
+		opts := []genai.ProviderOption{m}
+		if provider == "openaicompatible" {
+			if remote != "" {
+				opts = append(opts, genai.ProviderOptionRemote(remote))
+			}
+			if apiKey != "" {
+				opts = append(opts, genai.ProviderOptionTransportWrapper(func(h http.RoundTripper) http.RoundTripper {
+					return &roundtrippers.Header{
+						Header:    http.Header{"Authorization": {"Bearer " + apiKey}},
+						Transport: h,
+					}
+				}))
+			}
+		}
+		return cfg.Factory(ctx, opts...)
 	}
 	// Auto-discover: prefer CLI-based providers, then alphabetically.
 	provs := providers.Available(ctx)
