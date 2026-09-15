@@ -38,29 +38,22 @@ const (
 	requestTimeout   = 5 * time.Minute
 )
 
-const commitMsgPrompt = "Write a git commit message for the change below. Follow these rules:\n" +
-	"- Subject: imperative mood, no period, max 120 chars (e.g. \"Fix timeout in retry loop\")\n" +
+const commitMsgRules = "- Subject: imperative mood, no period, max 120 chars (e.g. \"Fix timeout in retry loop\")\n" +
 	"- Default to a body; omit it only for an obviously trivial, self-explanatory change such as a typo, formatting-only change, or comment-only change\n" +
 	"- Changes that affect behavior, interfaces, dependencies, data, architecture, or multiple meaningful concerns require a body after a blank line\n" +
-	"- Explain the rationale and consequential tradeoffs; do not merely restate the subject or diff\n" +
-	"- Keep every line at or below 120 chars\n" +
-	"- Match the style of recent upstream commits if provided\n" +
+	"- Explain the rationale and consequential tradeoffs; do not merely restate the subject or input\n" +
+	"- Wrap body lines at 80 columns\n" +
+	"- Match the style of recent upstream commits only when it does not conflict with these rules\n" +
 	"- Focus on the meaningful changes; ignore ancillary updates (imports, tests, build files, dependency bumps, formatting) unless they are the primary purpose of the change\n" +
 	"- No emojis\n" +
 	"- Output only the commit message, nothing else"
 
+const commitMsgPrompt = "Write a git commit message for the change below. Follow these rules:\n" + commitMsgRules
+
 const partPrompt = "The input is one part of a larger change. Summarize what it changes and why in a few short paragraphs. Output only the summary."
 
 const finalPrompt = "Below are metadata and summaries of the parts of one change. " +
-	"Write a single git commit message for the change. Follow these rules:\n" +
-	"- Subject: imperative mood, no period, max 120 chars\n" +
-	"- Default to a body; omit it only for an obviously trivial, self-explanatory change such as a typo, formatting-only change, or comment-only change\n" +
-	"- Changes that affect behavior, interfaces, dependencies, data, architecture, or multiple meaningful concerns require a body after a blank line\n" +
-	"- Explain the rationale and consequential tradeoffs; do not merely restate the subject or summaries\n" +
-	"- Keep every line at or below 120 chars\n" +
-	"- Match the style of recent upstream commits if provided\n" +
-	"- No emojis\n" +
-	"- Output only the commit message, nothing else"
+	"Write a single git commit message for the change. Follow these rules:\n" + commitMsgRules
 
 const mergePrompt = "Below are summaries of parts of one change. Merge them into one summary. Keep every distinct point and drop repetition. Output only the summary."
 
