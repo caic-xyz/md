@@ -152,6 +152,11 @@ failed integration leaves them unchanged, so unapplied work remains visible.
 It also updates the container's remote configuration and cached remote refs,
 and commits pending container work before integrating it.
 
+Because that container commit runs in the repository checkout, it triggers the
+repository's own `pre-commit` and `commit-msg` hooks. Pass `-no-verify` to
+commit with `git commit --no-verify` instead, skipping both hooks. The flag
+also applies to `md pull -all`.
+
 A library caller that wants the host to take only what the container committed
 can fetch without the commit step, with `Container.Fetch` and the zero
 `FetchOpts`. The container's history and working tree then stay untouched, its

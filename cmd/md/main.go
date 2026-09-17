@@ -1214,6 +1214,7 @@ func (a *app) cmdPull(ctx context.Context, args []string) error {
 	all := fs.Bool("all", false, "Operate on all repos, not just the current one")
 	noDescribe := fs.Bool("no-describe", false, "Skip AI-generated commit description; use a fixed commit message")
 	fs.BoolVar(noDescribe, "n", false, "Alias for -no-describe")
+	noVerify := fs.Bool("no-verify", false, "Skip pre-commit and commit-msg hooks when committing container changes")
 	tokens := fs.Int("tokens", contextTokens, "Model context window in tokens (default: $GIT_DESC_TOKENS or 64000)")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -1247,12 +1248,12 @@ func (a *app) cmdPull(ctx context.Context, args []string) error {
 		}
 	}
 	if !*all {
-		return ct.Pull(ctx, os.Stdout, os.Stderr, repoIdx, &md.PullOpts{Provider: p, ContextTokens: *tokens})
+		return ct.Pull(ctx, os.Stdout, os.Stderr, repoIdx, &md.PullOpts{Provider: p, ContextTokens: *tokens, NoVerify: *noVerify})
 	}
 	eg, ctx2 := errgroup.WithContext(ctx)
 	for i := range ct.Repos {
 		eg.Go(func() error {
-			return ct.Pull(ctx2, os.Stdout, os.Stderr, i, &md.PullOpts{Provider: p, ContextTokens: *tokens})
+			return ct.Pull(ctx2, os.Stdout, os.Stderr, i, &md.PullOpts{Provider: p, ContextTokens: *tokens, NoVerify: *noVerify})
 		})
 	}
 	return eg.Wait()

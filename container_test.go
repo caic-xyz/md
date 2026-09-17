@@ -164,6 +164,23 @@ func setupMultiBranchPullTest(t *testing.T) (ct *Container, hostDir, containerDi
 	return ct, hostDir, containerDir
 }
 
+// installRejectingHooks installs pre-commit and commit-msg hooks that always
+// fail, so a container commit succeeds only when Git skips them.
+func installRejectingHooks(t *testing.T, repoDir string) {
+	hooksDir := filepath.Join(repoDir, ".git", "hooks")
+	if err := os.MkdirAll(hooksDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"pre-commit", "commit-msg"} {
+		path := filepath.Join(hooksDir, name)
+		writeTestFile(t, path, "#!/bin/sh\necho rejected by "+name+" >&2\nexit 1\n")
+		// #nosec G302 -- Git requires hooks to be executable.
+		if err := os.Chmod(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func TestShellQuote(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -2743,6 +2760,36 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			}
 			if !strings.Contains(string(sshLog), "git commit -a -q") {
 				t.Fatalf("missing commit in ssh command:\n%s", sshLog)
+			}
+		})
+		t.Run("hooks_reject_container_commit", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
+			if runtime.GOOS == "windows" {
+				t.Skip("Git hooks require a POSIX executable in this test")
+			}
+			ctx := t.Context()
+			ct, _, containerDir := setupPullTest(t)
+			installRejectingHooks(t, containerDir)
+			writeTestFile(t, filepath.Join(containerDir, "container.txt"), "container\n")
+
+			err := ct.Pull(ctx, io.Discard, io.Discard, 0, nil)
+			if err == nil || !strings.Contains(err.Error(), "committing in container") {
+				t.Fatalf("Pull with rejecting hooks error = %v, want a committing error", err)
+			}
+		})
+		t.Run("no_verify_skips_container_hooks", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
+			if runtime.GOOS == "windows" {
+				t.Skip("Git hooks require a POSIX executable in this test")
+			}
+			ctx := t.Context()
+			ct, hostDir, containerDir := setupPullTest(t)
+			installRejectingHooks(t, containerDir)
+			writeTestFile(t, filepath.Join(containerDir, "container.txt"), "container\n")
+
+			if err := ct.Pull(ctx, io.Discard, io.Discard, 0, &PullOpts{NoVerify: true}); err != nil {
+				t.Fatalf("Pull with NoVerify: %v", err)
+			}
+			if got := runTestGit(t, ctx, hostDir, "show", "main:container.txt"); got != "container" {
+				t.Fatalf("host container.txt = %q, want container", got)
 			}
 		})
 		t.Run("multiple_mapped_branches", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.

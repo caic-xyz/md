@@ -64,6 +64,8 @@ before committing them. Set `ASK_PROVIDER` and `ASK_MODEL` to select a provider
 and model, or let md discover one automatically. Set the model context window
 with `GIT_DESC_TOKENS` or override it for one pull with `--tokens`. Pass `-n`
 or `--no-describe` to use a fixed commit message without contacting a provider.
+Pass `-no-verify` to skip the repository's pre-commit and commit-msg hooks while
+committing the container's pending changes.
 See the [AI commit message documentation](https://docs.caic.xyz/md/commands#ai-commit-messages)
 for provider configuration and large-diff behavior.
 

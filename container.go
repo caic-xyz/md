@@ -1171,6 +1171,9 @@ type FetchOpts struct {
 	// fetching, so the host receives them as well. Leave it unset to observe
 	// the container without changing its history or its working tree.
 	Commit bool
+	// NoVerify passes --no-verify to the container commit, skipping the
+	// pre-commit and commit-msg hooks. It has no effect unless Commit is set.
+	NoVerify bool
 }
 
 // PullOpts configures [Container.Pull].
@@ -1180,6 +1183,9 @@ type PullOpts struct {
 	// ContextTokens is the selected model's context window. Zero uses the
 	// commit-message generator default.
 	ContextTokens int
+	// NoVerify passes --no-verify to the container commit, skipping the
+	// pre-commit and commit-msg hooks.
+	NoVerify bool
 }
 
 // FetchedBranch identifies an exact container branch tip observed by
@@ -1762,6 +1768,10 @@ func (c *Container) Fetch(ctx context.Context, stdout, stderr io.Writer, repoIdx
 	}
 	commitPrefix := strings.Join(commitCommands, " && ")
 	commitMsg := "Pull from md"
+	verifyFlag := ""
+	if opts.NoVerify {
+		verifyFlag = " --no-verify"
+	}
 	switch {
 	case !opts.Commit:
 		// The container's remote and upstream configuration still has to match
@@ -1772,7 +1782,7 @@ func (c *Container) Fetch(ctx context.Context, stdout, stderr io.Writer, repoIdx
 	case opts.Provider == nil:
 		// With the fixed commit message, one remote script can stage, check, and
 		// commit. A clean tree exits successfully; real git errors still propagate.
-		commitCmd := commitPrefix + " && git add . && diff_status=0 && { git diff --quiet HEAD -- . || diff_status=$?; if [ \"$diff_status\" -eq 0 ]; then exit 0; fi; if [ \"$diff_status\" -gt 1 ]; then exit \"$diff_status\"; fi; echo " + shellQuote(commitMsg) + " | git commit -a -q -F -; }"
+		commitCmd := commitPrefix + " && git add . && diff_status=0 && { git diff --quiet HEAD -- . || diff_status=$?; if [ \"$diff_status\" -eq 0 ]; then exit 0; fi; if [ \"$diff_status\" -gt 1 ]; then exit \"$diff_status\"; fi; echo " + shellQuote(commitMsg) + " | git commit -a -q" + verifyFlag + " -F -; }"
 		if err := c.runCmdOut(ctx, "", c.SSHCommand(nil, commitCmd), stdout, stderr); err != nil {
 			return nil, fmt.Errorf("committing in container: %w", err)
 		}
@@ -1786,7 +1796,7 @@ func (c *Container) Fetch(ctx context.Context, stdout, stderr io.Writer, repoIdx
 			} else if msg != "" {
 				commitMsg = msg
 			}
-			commitCmd := commitPrefix + " && echo " + shellQuote(commitMsg) + " | git commit -a -q -F -"
+			commitCmd := commitPrefix + " && echo " + shellQuote(commitMsg) + " | git commit -a -q" + verifyFlag + " -F -"
 			if err := c.runCmdOut(ctx, "", c.SSHCommand(nil, commitCmd), stdout, stderr); err != nil {
 				return nil, fmt.Errorf("committing in container: %w", err)
 			}
@@ -1871,7 +1881,7 @@ func (c *Container) Pull(ctx context.Context, stdout, stderr io.Writer, repoIdx 
 	}
 	// Pull integrates the container's work into the host branch, so anything
 	// still pending in the container has to become a commit first.
-	fetched, err := c.Fetch(ctx, stdout, stderr, repoIdx, &FetchOpts{Provider: opts.Provider, ContextTokens: opts.ContextTokens, Commit: true})
+	fetched, err := c.Fetch(ctx, stdout, stderr, repoIdx, &FetchOpts{Provider: opts.Provider, ContextTokens: opts.ContextTokens, Commit: true, NoVerify: opts.NoVerify})
 	if err != nil {
 		return err
 	}
