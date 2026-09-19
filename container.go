@@ -2031,16 +2031,26 @@ func gitDiffCommand(req *diffRequest) string {
 		`tmp_index=$(mktemp) || exit 2`,
 		`diff_stdout=$(mktemp) || exit 2`,
 		`diff_stderr=$(mktemp) || exit 2`,
+		`add_stderr=$(mktemp) || exit 2`,
 		`untracked_paths=$(mktemp) || exit 2`,
-		`trap 'rm -f "$tmp_index" "$diff_stdout" "$diff_stderr" "$untracked_paths"' EXIT`,
+		`trap 'rm -f "$tmp_index" "$diff_stdout" "$diff_stderr" "$add_stderr" "$untracked_paths"' EXIT`,
 		// Preserve the index timestamp so Git keeps its racy-clean checks valid.
 		// Recreating it before a retry also drops intent-to-add entries for files
-		// that vanished during the previous diff.
+		// that vanished during the previous diff. A path that is already gone when
+		// the index is built -- a build rewriting generated files -- has no contents
+		// to diff and is skipped rather than failing the whole run.
 		`prepare_diff_index() {
 	cp -p "$index_path" "$tmp_index" &&
 		git ls-files -z --others --exclude-standard -- . > "$untracked_paths" || return 1
 	while IFS= read -r -d '' path; do
-		GIT_INDEX_FILE="$tmp_index" git add -N -- "$path" || return 1
+		# An untracked nested repository is reported as a directory and has no
+		# file contents to diff.
+		if [ -d "$path" ]; then continue; fi
+		if ! GIT_INDEX_FILE="$tmp_index" git add -N -- "$path" 2> "$add_stderr"; then
+			if [ ! -e "$path" ] && [ ! -L "$path" ]; then continue; fi
+			cat "$add_stderr" >&2
+			return 1
+		fi
 	done < "$untracked_paths"
 }`,
 		`prepare_diff_index || exit 2`,

@@ -365,6 +365,21 @@ func fakeGitDiffOnce(t *testing.T, vanishPath string) []string {
 	}
 }
 
+// gitShimPATH writes a git wrapper that runs inject before delegating to the
+// real git, and returns a PATH value that puts the wrapper first.
+func gitShimPATH(t *testing.T, inject string) string {
+	gitPath, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	script := "#!/bin/sh\n" + inject + "\nexec " + shellQuote(gitPath) + ` "$@"` + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "git"), []byte(script), 0o700); err != nil { //nolint:gosec // the wrapper must be executable.
+		t.Fatal(err)
+	}
+	return dir + string(os.PathListSeparator) + os.Getenv("PATH")
+}
+
 func TestDiff(t *testing.T) {
 	t.Parallel()
 	t.Run("valid", func(t *testing.T) {
@@ -444,6 +459,52 @@ func TestDiff(t *testing.T) {
 		}
 		if strings.Contains(stderr.String(), "fatal: stat") {
 			t.Errorf("diff leaked the recovered transient error:\n%s", stderr.String())
+		}
+	})
+	t.Run("valid_skips_an_untracked_file_that_vanishes_before_add", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		dir := setupDiffTestRepo(t, ctx)
+		vanishedPath := filepath.Join(dir, "vanished.txt")
+		writeTestFile(t, vanishedPath, "vanished\n")
+		writeTestFile(t, filepath.Join(dir, "retained.txt"), "retained\n")
+
+		shim := gitShimPATH(t, `if [ "$1" = add ] && [ ! -e "$MD_TEST_ADD_MARKER" ]; then
+	: > "$MD_TEST_ADD_MARKER"
+	rm -f `+shellQuote(vanishedPath)+`
+fi`)
+		cmd := exec.CommandContext(ctx, "bash", "-c", gitDiffCommand(&diffRequest{repo: dir, primaryBranch: "main", defaultRemote: "host", defaultBranch: "main", extraArgs: []string{"--stat"}})) //nolint:gosec // repo path is a test temp dir
+		cmd.Env = append(os.Environ(), "LANG=C", "PATH="+shim, "MD_TEST_ADD_MARKER="+filepath.Join(t.TempDir(), "marker"))
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("diff command: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+		}
+		if !strings.Contains(stdout.String(), "retained.txt") {
+			t.Errorf("diff --stat output missing retained.txt:\n%s", stdout.String())
+		}
+		if strings.Contains(stdout.String(), "vanished.txt") || strings.Contains(stderr.String(), "did not match any files") {
+			t.Errorf("skipped add failure leaked:\nstdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
+		}
+	})
+	t.Run("valid_ignores_an_untracked_nested_repository", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		dir := setupDiffTestRepo(t, ctx)
+		writeTestFile(t, filepath.Join(dir, "retained.txt"), "retained\n")
+		nested := filepath.Join(dir, "nested")
+		if err := os.Mkdir(nested, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		runTestGit(t, ctx, nested, "init", "-q", "--initial-branch=main")
+
+		stdout, stderr := runTestDiffCommand(t, ctx, &diffRequest{repo: dir, primaryBranch: "main", defaultRemote: "host", defaultBranch: "main", extraArgs: []string{"--stat"}})
+		if !strings.Contains(stdout, "retained.txt") {
+			t.Errorf("diff --stat output missing retained.txt:\n%s", stdout)
+		}
+		if strings.Contains(stderr, "adding files failed") || strings.Contains(stdout, "nested/") {
+			t.Errorf("nested repository leaked into the diff:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
 		}
 	})
 	t.Run("error_does_not_retry_unrelated_git_failure", func(t *testing.T) {
