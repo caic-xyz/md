@@ -26,8 +26,9 @@ A file to [guide coding agents](https://agents.md/).
 Run `scripts/install-git-hooks.sh` after cloning or whenever Git hooks need to be restored.
 Pre-commit rejects binary executables and stale file indexes; commit-msg requires a subject,
 a blank separator before any body, and message lines no longer than 120 characters, and rejects
-`Co-authored-by:` trailers; pre-push rejects binary executables, WIP commits, multi-commit
-pushes, and runs lint before pushes to `main`.
+`Co-authored-by:` trailers; pre-push only allows the checked-out commit (deleting a remote ref
+is the exception), rejecting dirty worktrees, unexpected binary files, WIP commits, and
+multi-commit pushes to `main`, then runs `golangci-lint run ./...`.
 
 ## Smoke Tests
 
