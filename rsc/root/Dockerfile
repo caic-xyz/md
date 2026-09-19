@@ -46,6 +46,13 @@ RUN --mount=type=secret,id=github_token \
     measure_exec.sh "radare2" /root/setup/6_radare2.sh
 RUN measure_exec.sh "Podman" /root/setup/7_podman.sh
 
+# Keep /etc/localtime a regular file. Debian points it at
+# /usr/share/zoneinfo/Etc/UTC, and md bind-mounts the host /etc/localtime over
+# /etc/localtime at container start; mounting over a symlink follows it and
+# clobbers /usr/share/zoneinfo/Etc/UTC, so TZ=UTC resolves to the host zone. Run
+# this last: any later tzdata configure would restore the symlink.
+RUN rm -f /etc/localtime && cp /usr/share/zoneinfo/Etc/UTC /etc/localtime
+
 # Stage to export root build timings
 FROM scratch AS reports
 COPY --from=final /var/log/build_timings.md /

@@ -3708,7 +3708,9 @@ func (c *Container) launchContainer(ctx context.Context, stdout, stderr io.Write
 		"--hostname", c.Name,
 		"-p", "127.0.0.1::22",
 		// Localtime: mount the host timezone file. Docker Desktop on Windows/macOS provides
-		// a virtual /etc/localtime inside the VM, so the flag is universal.
+		// a virtual /etc/localtime inside the VM, so the flag is universal. The image keeps
+		// /etc/localtime a regular file; mounting over a symlink would follow it and clobber
+		// /usr/share/zoneinfo/Etc/UTC, breaking TZ=UTC inside the container.
 		"-v", "/etc/localtime:/etc/localtime:ro",
 	}
 	if opts.MaxCPUs > 0 {

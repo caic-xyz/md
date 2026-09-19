@@ -121,6 +121,7 @@ apt-get install -qq -y --no-install-recommends \
 	time \
 	tmux \
 	tokei \
+	tzdata \
 	uidmap \
 	unzip \
 	w3m \

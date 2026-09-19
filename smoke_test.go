@@ -451,6 +451,18 @@ func TestSmoke(t *testing.T) {
 						}
 					})
 
+					t.Run("timezone", func(t *testing.T) {
+						// The host /etc/localtime mount must not follow a symlink and
+						// clobber /usr/share/zoneinfo/Etc/UTC.
+						out, err := ct.runCmd(t.Context(), "", ct.SSHCommand(nil, "TZ=UTC date +%z"))
+						if err != nil {
+							t.Fatalf("TZ=UTC date: %v", err)
+						}
+						if out != "+0000" {
+							t.Fatalf("TZ=UTC date +%%z = %q, want +0000", out)
+						}
+					})
+
 					t.Run("list", func(t *testing.T) {
 						containers, err := client.List(t.Context())
 						if err != nil {
