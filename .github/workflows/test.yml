@@ -112,8 +112,9 @@ jobs:
           go install github.com/google/addlicense@latest
       - name: "Check: no executable was committed (ubuntu)"
         if: always() && matrix.os == 'ubuntu-latest'
+        # ./custom-gcl is the gitignored golangci-lint binary built by `make lint`.
         run: |
-          if find . -type f -not -path './.git/*' -not -path './cache/*' -not -path './py/venv/*' -not -name '*.desktop' -perm /111 -exec sh -c 'test "$(head -c2 "$1")" != "#!"' _ {} \; -print | grep -e . ; then
+          if find . -type f -not -path './.git/*' -not -path './cache/*' -not -path './py/venv/*' -not -path './custom-gcl' -not -name '*.desktop' -perm /111 -exec sh -c 'test "$(head -c2 "$1")" != "#!"' _ {} \; -print | grep -e . ; then
             echo 'Do not commit executables that are not scripts (missing #! shebang)'
             false
           fi
