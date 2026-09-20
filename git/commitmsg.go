@@ -149,6 +149,48 @@ type fileDiff struct {
 	omitted bool
 }
 
+func parseFileDiff(block string) (fileDiff, error) {
+	lines := strings.SplitAfter(block, "\n")
+	f := fileDiff{path: extractPath(strings.TrimSuffix(lines[0], "\n")), header: clipDiffLine(lines[0])}
+	for _, line := range lines[1:] {
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "@@") {
+			match := hunkPattern.FindStringSubmatch(strings.TrimSuffix(line, "\n"))
+			if match == nil {
+				return fileDiff{}, fmt.Errorf("malformed hunk header in %s: %s", f.path, strings.TrimSpace(line))
+			}
+			oldStart, _ := strconv.Atoi(match[1])
+			newStart, _ := strconv.Atoi(match[2])
+			f.hunks = append(f.hunks, hunk{oldStart: oldStart, newStart: newStart, section: match[3]})
+			continue
+		}
+		switch {
+		case len(f.hunks) != 0:
+			f.hunks[len(f.hunks)-1].lines = append(f.hunks[len(f.hunks)-1].lines, clipDiffLine(line))
+		case strings.HasPrefix(line, "+++ ") && strings.TrimSpace(line[4:]) != "/dev/null":
+			var err error
+			f.path, err = decodeGitPath(strings.TrimSpace(line[4:]))
+			if err != nil {
+				return fileDiff{}, err
+			}
+		case strings.HasPrefix(line, "rename to "):
+			var err error
+			f.path, err = decodeGitPath(strings.TrimSpace(line[len("rename to "):]))
+			if err != nil {
+				return fileDiff{}, err
+			}
+		case !strings.HasPrefix(line, "index ") && !strings.HasPrefix(line, "--- ") && !strings.HasPrefix(line, "+++ "):
+			f.header += clipDiffLine(line)
+		}
+	}
+	if isLockFile(f.path) || strings.Contains(f.header, "\ndeleted file mode ") {
+		f = f.omit()
+	}
+	return f, nil
+}
+
 func (f *fileDiff) render() string {
 	if f.omitted {
 		return f.header + "(content omitted)\n"
@@ -233,48 +275,6 @@ func parseDiff(text string) ([]fileDiff, error) {
 		files = append(files, f)
 	}
 	return files, nil
-}
-
-func parseFileDiff(block string) (fileDiff, error) {
-	lines := strings.SplitAfter(block, "\n")
-	f := fileDiff{path: extractPath(strings.TrimSuffix(lines[0], "\n")), header: clipDiffLine(lines[0])}
-	for _, line := range lines[1:] {
-		if line == "" {
-			continue
-		}
-		if strings.HasPrefix(line, "@@") {
-			match := hunkPattern.FindStringSubmatch(strings.TrimSuffix(line, "\n"))
-			if match == nil {
-				return fileDiff{}, fmt.Errorf("malformed hunk header in %s: %s", f.path, strings.TrimSpace(line))
-			}
-			oldStart, _ := strconv.Atoi(match[1])
-			newStart, _ := strconv.Atoi(match[2])
-			f.hunks = append(f.hunks, hunk{oldStart: oldStart, newStart: newStart, section: match[3]})
-			continue
-		}
-		switch {
-		case len(f.hunks) != 0:
-			f.hunks[len(f.hunks)-1].lines = append(f.hunks[len(f.hunks)-1].lines, clipDiffLine(line))
-		case strings.HasPrefix(line, "+++ ") && strings.TrimSpace(line[4:]) != "/dev/null":
-			var err error
-			f.path, err = decodeGitPath(strings.TrimSpace(line[4:]))
-			if err != nil {
-				return fileDiff{}, err
-			}
-		case strings.HasPrefix(line, "rename to "):
-			var err error
-			f.path, err = decodeGitPath(strings.TrimSpace(line[len("rename to "):]))
-			if err != nil {
-				return fileDiff{}, err
-			}
-		case !strings.HasPrefix(line, "index ") && !strings.HasPrefix(line, "--- ") && !strings.HasPrefix(line, "+++ "):
-			f.header += clipDiffLine(line)
-		}
-	}
-	if isLockFile(f.path) || strings.Contains(f.header, "\ndeleted file mode ") {
-		f = f.omit()
-	}
-	return f, nil
 }
 
 func clipDiffLine(line string) string {

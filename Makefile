@@ -30,14 +30,21 @@ tools:
 # entrypoints and the VNC helpers carry no .sh suffix.
 SHELL_SCRIPTS = git ls-files '*.sh'; git ls-files -s | awk '$$1 == "100755" { print $$4 }' | while IFS= read -r f; do case "$$(head -n 1 "$$f")" in *'/sh'* | *'/bash'* | *'env sh'* | *'env bash'*) printf '%s\n' "$$f";; esac; done
 
+
+# methodfilecheck (see .golangci.yml) is a golangci-lint module plugin, so the
+# Go linting must run through the custom binary built from the published
+# plugin module.
+custom-gcl: .custom-gcl.yml
+	@golangci-lint custom --version $(GOLANGCI_LINT_VERSION)
+
 build:
 	@go build ./...
 
 test:
 	@go test ./...
 
-lint: tools
-	@golangci-lint run --show-stats=false ./...
+lint: tools custom-gcl
+	@./custom-gcl run --show-stats=false ./...
 	@pylint --score=n .
 	@ruff check --quiet .
 	@files=$$($(SHELL_SCRIPTS)); [ -z "$$files" ] || shellcheck -x $$files
@@ -45,7 +52,7 @@ lint: tools
 	@python3 scripts/update_agents_file_index.py --check
 
 lint-fix: tools
-	@golangci-lint run --show-stats=false ./... --fix
+	@./custom-gcl run --show-stats=false ./... --fix
 	@ruff check --quiet --fix .
 	@ruff format --quiet .
 	@python3 scripts/update_agents_file_index.py

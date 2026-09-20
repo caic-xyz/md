@@ -1261,6 +1261,85 @@ type Container struct {
 	tailscaleEphemeral bool
 }
 
+// unmarshalContainer parses docker/podman ps JSON output, converting the
+// CreatedAt timestamp string into a time.Time and extracting md.* labels.
+// The returned Container has a nil Client; callers must set it.
+func unmarshalContainer(ctx context.Context, client *Client, data []byte) (Container, error) {
+	var raw containerJSON
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return Container{}, err
+	}
+	ct := Container{
+		Logger: client.Logger.With(slog.String("cntr", string(raw.Names))),
+		Name:   string(raw.Names),
+		State:  raw.State,
+		Labels: maps.Clone(map[string]string(raw.Labels)),
+	}
+	if raw.CreatedAt != "" {
+		t, err := parseCreatedAt(raw.CreatedAt)
+		if err != nil {
+			return Container{}, err
+		}
+		ct.CreatedAt = t
+	}
+	for k, v := range raw.Labels {
+		switch k {
+		case "md.repos":
+			if data, err := base64.StdEncoding.DecodeString(v); err == nil {
+				if err := json.Unmarshal(data, &ct.Repos); err != nil {
+					ct.Logger.Log(ctx, slog.LevelWarn, "failed to unmarshal repos label", "err", err)
+				}
+				ct.migrateRepoRemotes(ctx)
+				for i := range ct.Repos {
+					if err := ct.Repos[i].Validate(); err != nil {
+						return Container{}, fmt.Errorf("unmarshal repos[%d]: %w", i, err)
+					}
+				}
+			}
+		case "md.display":
+			ct.Display = v == "1"
+		case "md.tailscale":
+			ct.Tailscale = v == "1"
+		case "md.usb":
+			ct.USB = v == "1"
+		case "md.sudo":
+			ct.Sudo = v == "1"
+		}
+	}
+	// Parse port mappings: "0.0.0.0:32768->22/tcp, 0.0.0.0:32769->5901/tcp"
+	for mapping := range strings.SplitSeq(string(raw.Ports), ",") {
+		mapping = strings.TrimSpace(mapping)
+		if mapping == "" {
+			continue
+		}
+		// Cut on "->" to get host:port and containerPort/proto.
+		hostPart, containerPart, ok := strings.Cut(mapping, "->")
+		if !ok {
+			continue
+		}
+		containerPortStr, _, _ := strings.Cut(containerPart, "/")
+		hostPortStr := hostPart
+		if idx := strings.LastIndex(hostPart, ":"); idx >= 0 {
+			hostPortStr = hostPart[idx+1:]
+		}
+		hostPort, err := strconv.ParseInt(hostPortStr, 10, 32)
+		if err != nil {
+			continue
+		}
+		containerPort, err := strconv.ParseInt(containerPortStr, 10, 32)
+		if err != nil {
+			continue
+		}
+		switch int32(containerPort) {
+		case 22:
+			ct.SSHPort = int32(hostPort)
+		case 5901:
+			ct.VNCPort = int32(hostPort)
+		}
+	}
+	return ct, nil
+}
+
 // SSHCommand returns SSH command args for this container.
 // opts are SSH flags (e.g. "-q", "-t"); cmd is the remote command.
 // The container name is always included as the SSH host target.
@@ -4512,85 +4591,6 @@ func parseCreatedAt(s string) (time.Time, error) {
 		}
 	}
 	return time.Time{}, fmt.Errorf("cannot parse CreatedAt %q", s)
-}
-
-// unmarshalContainer parses docker/podman ps JSON output, converting the
-// CreatedAt timestamp string into a time.Time and extracting md.* labels.
-// The returned Container has a nil Client; callers must set it.
-func unmarshalContainer(ctx context.Context, client *Client, data []byte) (Container, error) {
-	var raw containerJSON
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return Container{}, err
-	}
-	ct := Container{
-		Logger: client.Logger.With(slog.String("cntr", string(raw.Names))),
-		Name:   string(raw.Names),
-		State:  raw.State,
-		Labels: maps.Clone(map[string]string(raw.Labels)),
-	}
-	if raw.CreatedAt != "" {
-		t, err := parseCreatedAt(raw.CreatedAt)
-		if err != nil {
-			return Container{}, err
-		}
-		ct.CreatedAt = t
-	}
-	for k, v := range raw.Labels {
-		switch k {
-		case "md.repos":
-			if data, err := base64.StdEncoding.DecodeString(v); err == nil {
-				if err := json.Unmarshal(data, &ct.Repos); err != nil {
-					ct.Logger.Log(ctx, slog.LevelWarn, "failed to unmarshal repos label", "err", err)
-				}
-				ct.migrateRepoRemotes(ctx)
-				for i := range ct.Repos {
-					if err := ct.Repos[i].Validate(); err != nil {
-						return Container{}, fmt.Errorf("unmarshal repos[%d]: %w", i, err)
-					}
-				}
-			}
-		case "md.display":
-			ct.Display = v == "1"
-		case "md.tailscale":
-			ct.Tailscale = v == "1"
-		case "md.usb":
-			ct.USB = v == "1"
-		case "md.sudo":
-			ct.Sudo = v == "1"
-		}
-	}
-	// Parse port mappings: "0.0.0.0:32768->22/tcp, 0.0.0.0:32769->5901/tcp"
-	for mapping := range strings.SplitSeq(string(raw.Ports), ",") {
-		mapping = strings.TrimSpace(mapping)
-		if mapping == "" {
-			continue
-		}
-		// Cut on "->" to get host:port and containerPort/proto.
-		hostPart, containerPart, ok := strings.Cut(mapping, "->")
-		if !ok {
-			continue
-		}
-		containerPortStr, _, _ := strings.Cut(containerPart, "/")
-		hostPortStr := hostPart
-		if idx := strings.LastIndex(hostPart, ":"); idx >= 0 {
-			hostPortStr = hostPart[idx+1:]
-		}
-		hostPort, err := strconv.ParseInt(hostPortStr, 10, 32)
-		if err != nil {
-			continue
-		}
-		containerPort, err := strconv.ParseInt(containerPortStr, 10, 32)
-		if err != nil {
-			continue
-		}
-		switch int32(containerPort) {
-		case 22:
-			ct.SSHPort = int32(hostPort)
-		case 5901:
-			ct.VNCPort = int32(hostPort)
-		}
-	}
-	return ct, nil
 }
 
 func parseInspectInfo(runtimeName, requestedName string, data []byte) (*InspectInfo, error) {
