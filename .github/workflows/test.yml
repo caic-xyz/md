@@ -94,58 +94,18 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - run: go install mvdan.cc/sh/v3/cmd/shfmt@latest
-        if: runner.os == 'Linux'
-      - name: "Check: shellcheck"
-        if: runner.os == 'Linux'
-        run: |
-          mapfile -d '' shell_files < <(
-            find rsc -type f \( -name '*.sh' -o -perm /111 \) -print0 |
-              while IFS= read -r -d '' file; do
-                first_line=$(head -n 1 "$file")
-                case "$file:$first_line" in
-                  *.sh:* | *:'#!'*'/sh'* | *:'#!'*'/bash'* | *:'#!'*'env sh'* | *:'#!'*'env bash'*)
-                    printf '%s\0' "$file"
-                    ;;
-                esac
-              done
-          )
-          shellcheck -x "${shell_files[@]}"
-      - name: "Check: shfmt"
-        if: runner.os == 'Linux'
-        run: |
-          mapfile -d '' shell_files < <(
-            find rsc -type f \( -name '*.sh' -o -perm /111 \) -print0 |
-              while IFS= read -r -d '' file; do
-                first_line=$(head -n 1 "$file")
-                case "$file:$first_line" in
-                  *.sh:* | *:'#!'*'/sh'* | *:'#!'*'/bash'* | *:'#!'*'env sh'* | *:'#!'*'env bash'*)
-                    printf '%s\0' "$file"
-                    ;;
-                esac
-              done
-          )
-          unformatted=$("$HOME/go/bin/shfmt" -l "${shell_files[@]}")
-          if [ -n "$unformatted" ]; then
-            echo "These shell files need shfmt:"
-            echo "$unformatted"
-            exit 1
-          fi
       - uses: actions/setup-python@v6
         if: runner.os == 'Linux'
         with:
           python-version-file: '.python-version'
-      - run: pip install pylint ruff
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         if: runner.os == 'Linux'
-      - run: pylint .
-        if: runner.os == 'Linux'
-      - run: ruff check --no-cache
-        if: runner.os == 'Linux'
-
-      - name: "Check: golangci-lint"
-        run: |
-          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
-          golangci-lint run ./...
+      - name: "Check: lint; golangci-lint, pylint, ruff, shellcheck, binary, file index (ubuntu)"
+        if: always() && runner.os == 'Linux'
+        run: make lint
+      - name: "Check: formatting; gofmt, goimports, ruff format, shfmt (ubuntu)"
+        if: always() && runner.os == 'Linux'
+        run: make format-check
       - name: "go install necessary tools (ubuntu)"
         if: always() && matrix.os == 'ubuntu-latest'
         run: |

@@ -10,8 +10,8 @@ mkdir -p "$HOME/.gradle/wrapper"
 ARCH=$(uname -m)
 # linux/arm64 is still not supported; see https://issuetracker.google.com/issues/227219818
 if [ "$ARCH" == "aarch64" ]; then
-	echo "  Skipping Android SDK installation on $ARCH"
-	exit 0
+  echo "  Skipping Android SDK installation on $ARCH"
+  exit 0
 fi
 
 ANDROID_SDK_ROOT="$HOME/.local/share/android-sdk"
@@ -27,8 +27,8 @@ trap 'rm -rf "${TMPDIR}"' EXIT
 # the page layout changes.
 SDK_URL=$(curl -fsSL "https://developer.android.com/studio" | grep -o 'https://dl\.google\.com/android/repository/commandlinetools-linux-[0-9]*_latest\.zip' | head -n 1)
 if [ -z "$SDK_URL" ]; then
-	echo "Failed to determine SDK URL" >&2
-	exit 1
+  echo "Failed to determine SDK URL" >&2
+  exit 1
 fi
 curl -fsSL "$SDK_URL" -o "${TMPDIR}/cmdline-tools.zip"
 unzip -q "${TMPDIR}/cmdline-tools.zip" -d "${TMPDIR}"
@@ -49,8 +49,8 @@ LATEST_BUILD_TOOLS=$(echo "$AVAILABLE_PACKAGES" | grep -E '^build-tools;[0-9.]+$
 LATEST_PLATFORM=$(echo "$AVAILABLE_PACKAGES" | grep -E '^platforms;android-[0-9]+$' | sort -V | tail -n 1)
 
 if [ -z "$LATEST_BUILD_TOOLS" ] || [ -z "$LATEST_PLATFORM" ]; then
-	echo "Error: Could not determine latest Android SDK versions."
-	exit 1
+  echo "Error: Could not determine latest Android SDK versions."
+  exit 1
 fi
 
 echo "Selected Build Tools: $LATEST_BUILD_TOOLS"
@@ -58,9 +58,9 @@ echo "Selected Platform: $LATEST_PLATFORM"
 
 # Install required SDK components
 SDK_PACKAGES=(
-	"$LATEST_BUILD_TOOLS"
-	"platform-tools"
-	"$LATEST_PLATFORM"
+  "$LATEST_BUILD_TOOLS"
+  "platform-tools"
+  "$LATEST_PLATFORM"
 )
 
 "$SDKMANAGER" "${SDK_PACKAGES[@]}"

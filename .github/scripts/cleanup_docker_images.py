@@ -18,7 +18,7 @@ import os
 import re
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -33,9 +33,7 @@ class OwnerInfo:
     kind: str
 
 
-def _request(
-    url: str, method: str = "GET", headers: dict[str, str] | None = None
-) -> tuple[int, bytes]:
+def _request(url: str, method: str = "GET", headers: dict[str, str] | None = None) -> tuple[int, bytes]:
     req = Request(url, method=method)
     for k, v in (headers or {}).items():
         req.add_header(k, v)
@@ -49,9 +47,7 @@ def _request(
         return 0, b""
 
 
-def github_api(
-    url: str, token: str, method: str = "GET"
-) -> tuple[int, bytes]:
+def github_api(url: str, token: str, method: str = "GET") -> tuple[int, bytes]:
     """Make an authenticated GitHub API request."""
     return _request(
         url,
@@ -92,15 +88,10 @@ def _get_ghcr_token(owner: str, repo: str, github_token: str) -> str:
     return json.loads(body).get("token", "")
 
 
-def _fetch_manifest_refs(
-    owner: str, repo: str, registry_token: str, tag: str
-) -> set[str]:
+def _fetch_manifest_refs(owner: str, repo: str, registry_token: str, tag: str) -> set[str]:
     """Return digests of platform images referenced by a manifest list."""
     url = f"https://ghcr.io/v2/{owner}/{repo}/manifests/{tag}"
-    accept = (
-        "application/vnd.oci.image.index.v1+json,"
-        "application/vnd.docker.distribution.manifest.list.v2+json"
-    )
+    accept = "application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json"
     status, body = _request(
         url,
         headers={"Authorization": f"Bearer {registry_token}", "Accept": accept},
@@ -143,7 +134,7 @@ def main():
     repo = get_env("PACKAGE_NAME")
     token = get_env("GITHUB_TOKEN")
     print(f"Starting cleanup for image package: {owner}/{repo}")
-    cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+    cutoff = datetime.now(UTC) - timedelta(days=7)
     print(f"Cutoff date: {cutoff}")
 
     package_api_base = _package_api_base(owner, repo, token)
@@ -171,10 +162,7 @@ def main():
             refs = _fetch_manifest_refs(owner, repo, registry_token, tag)
             referenced_digests.update(refs)
         if referenced_digests:
-            print(
-                f"Protecting {len(referenced_digests)} platform digests"
-                " referenced by kept manifests"
-            )
+            print(f"Protecting {len(referenced_digests)} platform digests referenced by kept manifests")
     else:
         print("Warning: could not get GHCR token, skipping manifest resolution")
     for v in versions:
@@ -209,17 +197,14 @@ def main():
             failed_count += 1
             processed.append((label, created_fmt, f"Failed ({del_status})"))
 
-    print(
-        f"Cleanup complete. Deleted: {deleted_count},"
-        f" Failed: {failed_count}, Kept/Skipped: {kept_count}"
-    )
+    print(f"Cleanup complete. Deleted: {deleted_count}, Failed: {failed_count}, Kept/Skipped: {kept_count}")
 
     summary_path = os.environ.get("GITHUB_STEP_SUMMARY", "")
     if summary_path:
         with open(summary_path, "a", encoding="utf-8") as f:
             f.write("# Docker Image Cleanup Report\n\n")
             f.write(f"**Repository:** {owner}/{repo}\n")
-            f.write(f"**Date:** {datetime.now(timezone.utc)}\n")
+            f.write(f"**Date:** {datetime.now(UTC)}\n")
             f.write(f"**Cutoff Date:** {cutoff}\n\n")
             f.write("## Summary\n")
             f.write("| Status | Count |\n")

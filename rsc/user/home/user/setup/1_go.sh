@@ -9,8 +9,8 @@ trap 'rm -rf "${TMPDIR}"' EXIT
 
 GO_VERSION="$(curl -fsSL https://go.dev/VERSION?m=text | head -n1 | tr -d '\r')"
 if [[ -z "${GO_VERSION}" ]]; then
-	echo "Failed to resolve Go version" >&2
-	exit 1
+  echo "Failed to resolve Go version" >&2
+  exit 1
 fi
 
 # Install Go to user's home directory
@@ -27,50 +27,50 @@ mkdir -p "$HOME/go/bin"
 # GitHub API auth header
 AUTH_HEADER=()
 if [[ -n "${GITHUB_TOKEN:-}" ]]; then
-	AUTH_HEADER=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
+  AUTH_HEADER=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
 fi
 
 # download_github_binary downloads a bare binary from a GitHub release.
 # Usage: download_github_binary <repo> <asset_pattern> <name>
 download_github_binary() {
-	local repo="$1" pattern="$2" name="$3"
-	local api_url="https://api.github.com/repos/${repo}/releases/latest"
-	local url
-	url="$(
-		curl -fsSL "${AUTH_HEADER[@]}" -H 'Accept: application/vnd.github+json' "${api_url}" |
-			jq -r --arg pat "${pattern}" '.assets[]? | select(.name | test($pat)) | .browser_download_url' |
-			head -n1
-	)"
-	if [[ -z "${url}" ]]; then
-		echo "Failed to find release asset for ${repo} matching ${pattern}" >&2
-		return 1
-	fi
-	curl -fsSL "${url}" -o "$HOME/go/bin/${name}"
-	chmod +x "$HOME/go/bin/${name}"
+  local repo="$1" pattern="$2" name="$3"
+  local api_url="https://api.github.com/repos/${repo}/releases/latest"
+  local url
+  url="$(
+    curl -fsSL "${AUTH_HEADER[@]}" -H 'Accept: application/vnd.github+json' "${api_url}" |
+      jq -r --arg pat "${pattern}" '.assets[]? | select(.name | test($pat)) | .browser_download_url' |
+      head -n1
+  )"
+  if [[ -z "${url}" ]]; then
+    echo "Failed to find release asset for ${repo} matching ${pattern}" >&2
+    return 1
+  fi
+  curl -fsSL "${url}" -o "$HOME/go/bin/${name}"
+  chmod +x "$HOME/go/bin/${name}"
 }
 
 # download_github_tarball downloads a .tar.gz from a GitHub release and extracts a binary.
 # Usage: download_github_tarball <repo> <asset_pattern> <binary_name>
 download_github_tarball() {
-	local repo="$1" pattern="$2" name="$3"
-	local api_url="https://api.github.com/repos/${repo}/releases/latest"
-	local url
-	url="$(
-		curl -fsSL "${AUTH_HEADER[@]}" -H 'Accept: application/vnd.github+json' "${api_url}" |
-			jq -r --arg pat "${pattern}" '.assets[]? | select(.name | test($pat)) | .browser_download_url' |
-			head -n1
-	)"
-	if [[ -z "${url}" ]]; then
-		echo "Failed to find release asset for ${repo} matching ${pattern}" >&2
-		return 1
-	fi
-	local tmpdir
-	tmpdir="$(mktemp -d)"
-	curl -fsSL "${url}" -o "${tmpdir}/archive.tar.gz"
-	tar xzf "${tmpdir}/archive.tar.gz" -C "${tmpdir}"
-	mv "${tmpdir}/${name}" "$HOME/go/bin/${name}"
-	chmod +x "$HOME/go/bin/${name}"
-	rm -rf "${tmpdir}"
+  local repo="$1" pattern="$2" name="$3"
+  local api_url="https://api.github.com/repos/${repo}/releases/latest"
+  local url
+  url="$(
+    curl -fsSL "${AUTH_HEADER[@]}" -H 'Accept: application/vnd.github+json' "${api_url}" |
+      jq -r --arg pat "${pattern}" '.assets[]? | select(.name | test($pat)) | .browser_download_url' |
+      head -n1
+  )"
+  if [[ -z "${url}" ]]; then
+    echo "Failed to find release asset for ${repo} matching ${pattern}" >&2
+    return 1
+  fi
+  local tmpdir
+  tmpdir="$(mktemp -d)"
+  curl -fsSL "${url}" -o "${tmpdir}/archive.tar.gz"
+  tar xzf "${tmpdir}/archive.tar.gz" -C "${tmpdir}"
+  mv "${tmpdir}/${name}" "$HOME/go/bin/${name}"
+  chmod +x "$HOME/go/bin/${name}"
+  rm -rf "${tmpdir}"
 }
 
 # Pre-built binary downloads

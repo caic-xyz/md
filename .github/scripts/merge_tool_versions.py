@@ -19,7 +19,7 @@ def parse_markdown_table(file_path):
         print(f"Warning: {file_path} not found.")
         return tools
 
-    with open(file_path, "r", encoding="utf-8") as f:
+    with open(file_path, encoding="utf-8") as f:
         for line in f:
             # Match markdown table row: | Tool | Version |
             match = re.match(r"^\|\s*(.*?)\s*\|\s*(.*?)\s*\|$", line)
@@ -50,7 +50,7 @@ def main():
         print("Error: At least one of --amd64 or --arm64 must be provided.", file=sys.stderr)
         sys.exit(1)
 
-    now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    now = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
 
     amd64_tools = parse_markdown_table(amd64_path) if amd64_path else {}
     arm64_tools = parse_markdown_table(arm64_path) if arm64_path else {}

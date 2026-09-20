@@ -11,13 +11,13 @@ cd "$HOME"
 # Resolve the version first so GITHUB_TOKEN avoids the installer's unauthenticated API limit.
 github_headers=()
 if [[ -n "${GITHUB_TOKEN:-}" ]]; then
-	github_headers=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
+  github_headers=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
 fi
 opencode_version="$(
-	curl -fsSL "${github_headers[@]}" \
-		-H 'Accept: application/vnd.github+json' \
-		https://api.github.com/repos/anomalyco/opencode/releases/latest |
-		jq -er '.tag_name | ltrimstr("v")'
+  curl -fsSL "${github_headers[@]}" \
+    -H 'Accept: application/vnd.github+json' \
+    https://api.github.com/repos/anomalyco/opencode/releases/latest |
+    jq -er '.tag_name | ltrimstr("v")'
 )"
 readonly opencode_version
 curl -fsSL https://opencode.ai/install | VERSION="$opencode_version" bash
@@ -30,7 +30,7 @@ curl -fsSL https://ampcode.com/install.sh | bash
 # Handling configuration linking for the installer
 mkdir -p "$HOME/.claude"
 if [ ! -f "$HOME/.claude/claude.json" ]; then
-	echo "{}" >"$HOME/.claude/claude.json"
+  echo "{}" >"$HOME/.claude/claude.json"
 fi
 ln -sf "$HOME/.claude/claude.json" "$HOME/.claude.json"
 curl -fsSL https://claude.ai/install.sh | bash

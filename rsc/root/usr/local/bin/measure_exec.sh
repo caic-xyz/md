@@ -4,8 +4,8 @@
 set -e
 
 if [ "$#" -lt 2 ]; then
-	echo "Usage: $0 <Label> <Command> [Args...]"
-	exit 1
+  echo "Usage: $0 <Label> <Command> [Args...]"
+  exit 1
 fi
 
 LABEL="$1"
