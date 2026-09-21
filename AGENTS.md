@@ -174,7 +174,9 @@ bundled image's packages exist. A capability is either:
 
 - **always required**: sshd, the md SSH key, and the fixed UID/GID 1000 `user` account. `ensure_account`
   provisions the account when UID/GID 1000 are free and fails clearly when they are taken; `ensure_directories`
-  creates the directories md relies on. Both are idempotent.
+  creates the directories md relies on. Runtimes other than rootless Podman additionally map `user` to the host
+  UID/GID; that identity must not already belong to a different base-image account or group, which startup rejects
+  rather than creating an ambiguous shared identity. Both setup steps are idempotent.
 - **requested by an md option**: `-display` (`MD_DISPLAY`), `-tailscale` (`MD_TAILSCALE`), `-sudo`
   (`MD_SUDO_PASSWORD`), `-usb` (`/dev/bus/usb`, serial adapters), and `/dev/kvm`.
 - **optional**: DBus, which is skipped when `dbus-launch` is absent.

@@ -189,12 +189,23 @@ RUN apt-get update \
 
 // smokeForeignMetadataDockerfile adds an inherited ENTRYPOINT and a non-root
 // USER, which md resets: the base image's USER would otherwise run the build's
-// own layers and its ENTRYPOINT would run instead of the md entrypoint.
-const smokeForeignMetadataDockerfile = smokeForeignBaseDockerfile + `RUN groupadd --gid 1001 app && useradd --uid 1001 --gid 1001 -m -s /bin/sh app
+// own layers and its ENTRYPOINT would run instead of the md entrypoint. Its
+// identity deliberately differs from the account md maps to the host, so this
+// fixture isolates metadata handling from the separate collision rejection.
+func smokeForeignMetadataDockerfile(uid, gid int) string {
+	appUID, appGID := 1001, 1001
+	if appUID == uid {
+		appUID++
+	}
+	if appGID == gid {
+		appGID++
+	}
+	return fmt.Sprintf(smokeForeignBaseDockerfile+`RUN groupadd --gid %d app && useradd --uid %d --gid %d -m -s /bin/sh app
 USER app
 ENTRYPOINT ["/bin/false"]
 CMD ["/bin/false"]
-`
+`, appGID, appUID, appGID)
+}
 
 // ensureSmokeFixture builds (or reuses) a fixture image from dockerfile. The tag
 // carries a hash of the Dockerfile so editing the fixture rebuilds it instead of
@@ -1195,7 +1206,9 @@ func TestSmoke(t *testing.T) {
 			t.Run("foreign_base", func(t *testing.T) {
 				slim := "debian:stable-slim"
 				reduced := ensureSmokeFixture(t, t.Context(), client, "debian-slim", smokeForeignBaseDockerfile)
-				metadata := ensureSmokeFixture(t, t.Context(), client, "debian-slim-metadata", smokeForeignMetadataDockerfile)
+				metadataUID, metadataGID := smokeContainerUser(t, client)
+				metadata := ensureSmokeFixture(t, t.Context(), client, "debian-slim-metadata",
+					smokeForeignMetadataDockerfile(metadataUID, metadataGID))
 
 				t.Run("reduced_image_reaches_ssh", func(t *testing.T) {
 					prebuildSpecializedImage(t, t.Context(), client, reduced, nil)

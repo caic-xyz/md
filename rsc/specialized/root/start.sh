@@ -241,18 +241,18 @@ configure_host_user_id() {
   local old_uid old_gid
   old_uid="$(id -u "$MD_USER")"
   old_gid="$(id -g "$MD_USER")"
+  local uid_owner gid_owner
+  uid_owner="$(awk -F: -v id="$target_uid" -v name="$MD_USER" '$3 == id && $1 != name { print $1; exit }' /etc/passwd)"
+  gid_owner="$(awk -F: -v id="$target_gid" -v name="$MD_GROUP" '$3 == id && $1 != name { print $1; exit }' /etc/group)"
+  if [ -n "$uid_owner" ]; then
+    fail "md startup cannot map $MD_USER to requested host UID $target_uid: it is already used by '$uid_owner'"
+  fi
+  if [ -n "$gid_owner" ]; then
+    fail "md startup cannot map $MD_GROUP to requested host GID $target_gid: it is already used by '$gid_owner'"
+  fi
   if [ "$target_uid" = "$old_uid" ] && [ "$target_gid" = "$old_gid" ]; then
     log "$MD_USER account already has requested host UID/GID $target_uid:$target_gid"
     return
-  fi
-  local uid_owner gid_owner
-  uid_owner="$(getent passwd "$target_uid" | awk -F: -v name="$MD_USER" '$1 != name { print $1; exit }' || true)"
-  gid_owner="$(getent group "$target_gid" | awk -F: -v name="$MD_GROUP" '$1 != name { print $1; exit }' || true)"
-  if [ -n "$uid_owner" ]; then
-    log "WARNING: requested host UID $target_uid is already assigned to '$uid_owner'; $MD_USER will share that UID"
-  fi
-  if [ -n "$gid_owner" ]; then
-    log "WARNING: requested host GID $target_gid is already assigned to '$gid_owner'; $MD_GROUP will share that GID"
   fi
   log "changing $MD_USER account identity from $old_uid:$old_gid to requested host UID/GID $target_uid:$target_gid"
   rewrite_user_identity "$target_uid" "$target_gid"
