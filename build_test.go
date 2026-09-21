@@ -787,6 +787,29 @@ func TestGenerateDockerfile(t *testing.T) {
 		}
 	})
 
+	t.Run("owns_startup_metadata", func(t *testing.T) {
+		t.Parallel()
+		got := generateDockerfile("mybase:latest", nil, nil, testUserOwner, "", "", "", "")
+		// The base image's USER must not run the layers below it, and its
+		// ENTRYPOINT must not run instead of the md entrypoint.
+		if !strings.Contains(got, "USER root\n") {
+			t.Errorf("missing USER root in:\n%s", got)
+		}
+		if firstRun := strings.Index(got, "RUN "); firstRun < 0 || strings.Index(got, "USER root") > firstRun {
+			t.Errorf("USER root must precede the first RUN in:\n%s", got)
+		}
+		if !strings.Contains(got, "ENTRYPOINT []\n") {
+			t.Errorf("missing ENTRYPOINT reset in:\n%s", got)
+		}
+		// The base image must satisfy the md contract or fail this build.
+		if !strings.Contains(got, "command -v bash") {
+			t.Errorf("missing bash check in:\n%s", got)
+		}
+		if !strings.Contains(got, "RUN /root/start.sh --check\n") {
+			t.Errorf("missing contract check in:\n%s", got)
+		}
+	})
+
 	t.Run("recursive_cache", func(t *testing.T) {
 		t.Parallel()
 		active := []activeCM{{

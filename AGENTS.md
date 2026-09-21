@@ -48,15 +48,15 @@ go test -tags=smoke -run TestSmoke -v -timeout 30m
 The test requires a container runtime (docker or podman) in PATH. Nested podman subtests are skipped under rootless podman due to user namespace stacking (`newuidmap` fails with `EPERM`).
 
 The `foreign_base` subtest covers the md startup capability contract on an image md does not control, using
-`debian:stable-slim` for both halves: a reduced fixture (`sshd` + `git`, no `user` account, no Xvnc/tailscaled/DBus)
-must reach SSH with the account provisioned by `rsc/specialized/root/start.sh`, md must be able to push a repository
-into it and clone, commit and diff it as `user`, and images missing a requested capability (`-display`) or a
-mandatory one (no sshd at all) must exit nonzero naming the capability and the md option. The fixture is built from a
-Dockerfile inside `smoke_test.go` and is tagged with a hash of that content, so it rebuilds whenever the fixture
-changes. It builds even with `-short`, since it is small next to the `md-root`/`md-user` builds that `-short` skips;
-`-short` therefore still needs registry and Debian package network access. The subtest is skipped when md runs as
-root, because the specialized image is then chowned to the `user` name, which a base image without that account
-cannot resolve.
+`debian:stable-slim` fixtures: a reduced fixture (`sshd` + `git`, no `user` account, no Xvnc/tailscaled/DBus) must
+reach SSH with the account provisioned by `rsc/specialized/root/start.sh`, md must be able to push a repository into
+it and clone, commit and diff it as `user`, and a fixture that adds an inherited `ENTRYPOINT` with a non-root `USER`
+must still start. A base image missing a mandatory capability (plain `debian:stable-slim` has no sshd) must fail its
+specialized image build naming what is missing, and requesting a capability the image does not satisfy (`-display`
+without Xvnc) must exit the container nonzero naming the capability and the md option. The fixtures are built from
+Dockerfiles inside `smoke_test.go`, each tagged with a hash of its content so editing one rebuilds it instead of
+silently reusing a stale image. They build even with `-short`, since they are small next to the `md-root`/`md-user`
+builds that `-short` skips; `-short` therefore still needs registry and Debian package network access.
 
 ## md Tool: Image Build and Cache Injection
 
@@ -182,6 +182,25 @@ bundled image's packages exist. A capability is either:
 `preflight` validates every requested capability before any side effect, and `require_capability` reports all
 missing requirements at once, naming the capability and the requesting option. Preserve this model when adding
 startup steps: do not assume a bundled-image dependency exists, and add new requirements to `preflight`.
+
+## Base Image Contract
+
+`preflight` is the single definition of what an image must provide. Beyond the md-owned files the specialized build
+copies in, a conforming base image provides bash, the POSIX userland `start.sh` drives (including the `passwd`
+tooling that provisions the account), `git` for md's post-SSH provisioning, sshd with `/etc/ssh/sshd_config`, and the
+packages each requested capability needs. The reduced `debian:stable-slim` fixture in `smoke_test.go` is the
+reference image; `smoke_test.go`'s `foreign_base` group is its verification.
+
+The generated specialized Dockerfile enforces that contract without restating it:
+
+- `RUN /root/start.sh --check` runs `preflight` inside the build, so an image that cannot carry md fails to build
+  with the missing entry named, before any container exists. The build also probes for bash first, because the
+  contract check is a bash script.
+- `USER root` keeps an inherited non-root `USER` from running md's own build layers, and `ENTRYPOINT []` keeps an
+  inherited entrypoint from running instead of `/root/start.sh`.
+- md owns the content it copies in numerically: the host UID/GID, or the fixed 1000:1000 contract identity when md
+  runs as root (it passes no `MD_HOST_UID` then) or under rootless Podman, so a base image does not need the `user`
+  account to build at all.
 
 ## For End Users: Remote GUI Access
 

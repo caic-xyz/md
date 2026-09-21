@@ -1602,7 +1602,7 @@ func (c *Container) Revive(ctx context.Context, stdout, stderr io.Writer) error 
 	}
 	port := c.SSHPort
 	if port == 0 {
-		return fmt.Errorf("container %s has no SSH port mapping after revive", c.Name)
+		return c.containerNotListening(ctx, "has no SSH port mapping after revive")
 	}
 
 	// Rewrite SSH config with the new port. The known_hosts file also
@@ -3511,6 +3511,28 @@ func (c *Container) checkContainerState(ctx context.Context, policy containerSta
 	return nil
 }
 
+// containerNotListening explains why a started container is not reachable. A
+// container that already exited reports its state and the tail of its log,
+// which is where md's startup writes the reason it refused to run: Docker drops
+// the port bindings of a stopped container, so a port-mapping message alone
+// hides the cause.
+func (c *Container) containerNotListening(ctx context.Context, reason string) error {
+	if c.State == "running" {
+		return fmt.Errorf("container %s %s", c.Name, reason)
+	}
+	err := fmt.Errorf("container %s %s (state %s)", c.Name, reason, c.State)
+	// Both streams: startup logs to stdout and reports capability errors on stderr.
+	var logs strings.Builder
+	if logErr := c.Runtime.RunOut(ctx, "", &logs, &logs, "logs", "--tail", "50", c.Name); logErr == nil {
+		if tail := strings.TrimSpace(logs.String()); tail != "" {
+			err = fmt.Errorf("%w\nlast container log lines:\n%s", err, tail)
+		}
+	}
+	return err
+}
+
+// refreshRuntimeFields re-reads the container state, port mappings, labels and
+// creation time from the runtime.
 func (c *Container) refreshRuntimeFields(ctx context.Context) error {
 	raw, err := c.Runtime.InspectContainer(ctx, c.Name)
 	if err != nil {
@@ -3985,7 +4007,7 @@ func (c *Container) launchContainer(ctx context.Context, stdout, stderr io.Write
 	}
 	port := c.SSHPort
 	if port == 0 {
-		return fmt.Errorf("container %s has no SSH port mapping", c.Name)
+		return c.containerNotListening(ctx, "has no SSH port mapping")
 	}
 	if !opts.Quiet {
 		_, _ = fmt.Fprintf(stdout, "- Found ssh port %d\n", port)
@@ -4072,8 +4094,10 @@ func rootlessPodmanUserNSArg() string {
 }
 
 func hostUserEnv(rootlessPodman bool) []string {
-	uid := os.Getuid()
-	gid := os.Getgid()
+	return hostUserEnvFor(os.Getuid(), os.Getgid(), rootlessPodman)
+}
+
+func hostUserEnvFor(uid, gid int, rootlessPodman bool) []string {
 	if uid <= 0 || gid <= 0 {
 		return nil
 	}

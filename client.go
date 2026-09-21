@@ -808,11 +808,18 @@ func hashEmbeddedTree(w io.Writer, prefix string) error {
 	})
 }
 
+// hostUserOwner returns the numeric owner md gives the content it copies into a
+// specialized image. Running as root is the one case that cannot name that
+// owner: hostUserEnv passes no MD_HOST_UID then, so start.sh leaves the account
+// at the fixed contract identity instead of chowning by name, which a base image
+// without the account cannot resolve.
 func hostUserOwner() string {
-	uid := os.Getuid()
-	gid := os.Getgid()
-	if uid == 0 || gid == 0 {
-		return "user:user"
+	return hostUserOwnerFor(os.Getuid(), os.Getgid())
+}
+
+func hostUserOwnerFor(uid, gid int) string {
+	if uid <= 0 || gid <= 0 {
+		return fmt.Sprintf("%d:%d", containerUserUID, containerUserGID)
 	}
 	return fmt.Sprintf("%d:%d", uid, gid)
 }
@@ -1211,6 +1218,10 @@ func resolveCaches(caches []CacheMount, home string, mountPaths []string) (activ
 func generateDockerfile(baseImage string, active []activeCM, dirs []string, userOwner, baseDigest, contextSHA, activeKey, manifestDigest string) string {
 	var df strings.Builder
 	fmt.Fprintf(&df, "FROM %s\n", baseImage)
+	// md owns the build-time identity and the startup metadata: an inherited
+	// non-root USER would run the RUN layers below, and an inherited ENTRYPOINT
+	// would run instead of the md entrypoint.
+	df.WriteString("USER root\n")
 	df.WriteString("COPY --chown=root:root --chmod=755 root/ /root/\n")
 	df.WriteString("COPY --chown=root:root ssh_host_ed25519_key /etc/ssh/ssh_host_ed25519_key\n")
 	df.WriteString("COPY --chown=root:root ssh_host_ed25519_key.pub /etc/ssh/ssh_host_ed25519_key.pub\n")
@@ -1254,6 +1265,13 @@ func generateDockerfile(baseImage string, active []activeCM, dirs []string, user
 		fmt.Fprintf(&run, " && chown -R root:root %s && chmod -R a-w %s", joined, joined)
 	}
 	fmt.Fprintf(&df, "RUN %s\n", run.String())
+	// Refuse to build an image that cannot carry md, naming what the base image
+	// is missing: a container that starts and then dies is far harder to
+	// diagnose. The requirements are preflight's in start.sh, so the contract has
+	// one definition; bash itself is checked first because the contract check is
+	// a bash script.
+	df.WriteString("RUN command -v bash >/dev/null 2>&1 || { echo \"md: the base image is missing bash, which the md startup contract requires\" >&2; exit 1; }\n")
+	df.WriteString("RUN /root/start.sh --check\n")
 	fmt.Fprintf(&df, "LABEL md.image_type=%q\n", imageTypeSpecialized)
 	fmt.Fprintf(&df, "LABEL md.base_image=%q\n", baseImage)
 	fmt.Fprintf(&df, "LABEL md.base_digest=%q\n", baseDigest)
@@ -1261,6 +1279,7 @@ func generateDockerfile(baseImage string, active []activeCM, dirs []string, user
 	fmt.Fprintf(&df, "LABEL md.cache_key=%q\n", activeKey)
 	fmt.Fprintf(&df, "LABEL md.cache_spec=%q\n", activeCacheSpecLabel(active))
 	fmt.Fprintf(&df, "LABEL md.base_manifest_digest=%q\n", manifestDigest)
+	df.WriteString("ENTRYPOINT []\n")
 	df.WriteString("CMD [\"/root/start.sh\"]\n")
 	return df.String()
 }
@@ -1489,14 +1508,20 @@ func (c *Client) buildSpecializedImage(ctx context.Context, stdout, stderr io.Wr
 	buildArgs = append(buildArgs, filepath.ToSlash(contextDir))
 
 	if quiet {
-		if _, err := c.Runtime.Run(ctx, "", buildArgs...); err != nil {
-			buildErr := fmt.Errorf("building image: %w", err)
+		// Capture both streams. A contract failure prints its reason from md's own
+		// startup check, and the runtimes do not agree on whether build output
+		// goes to stdout or stderr.
+		var output strings.Builder
+		err := c.Runtime.RunOut(ctx, "", &output, &output, buildArgs...)
+		if err != nil {
+			buildErr := buildImageError(err, output.String())
 			if isStaleBuilderCacheErr(buildErr) {
 				if _, pruneErr := c.Runtime.Run(ctx, "", "builder", "prune", "-f"); pruneErr != nil {
 					return "", buildErr
 				}
-				if _, err2 := c.Runtime.Run(ctx, "", buildArgs...); err2 != nil {
-					return "", fmt.Errorf("building image: %w", err2)
+				var retryOutput strings.Builder
+				if err2 := c.Runtime.RunOut(ctx, "", &retryOutput, &retryOutput, buildArgs...); err2 != nil {
+					return "", buildImageError(err2, retryOutput.String())
 				}
 			} else {
 				return "", buildErr
@@ -1577,6 +1602,21 @@ func isStaleBuilderCacheErr(err error) bool {
 	}
 	s := err.Error()
 	return strings.Contains(s, "failed to compute cache key") || strings.Contains(s, "failed to calculate checksum of ref")
+}
+
+// buildImageError wraps a failed image build with the tail of its output, so the
+// reason is visible whichever stream the runtime used. A conforming base image
+// failure is the md startup contract check, which exits naming what is missing.
+func buildImageError(err error, output string) error {
+	const maxLines = 100
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	if len(lines) > maxLines {
+		lines = lines[len(lines)-maxLines:]
+	}
+	if tail := strings.TrimSpace(strings.Join(lines, "\n")); tail != "" {
+		return fmt.Errorf("building image: %w\n%s", err, tail)
+	}
+	return fmt.Errorf("building image: %w", err)
 }
 
 // dirStats returns the number of regular files and total byte size under dir.

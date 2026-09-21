@@ -97,7 +97,9 @@ remove_environment_var() {
 }
 
 # preflight resolves SSHD_BIN and reports every missing requirement of the
-# requested capabilities before any side effect.
+# requested capabilities before any side effect. It is the single definition of
+# the md image contract: the specialized image build runs it through --check, and
+# runtime startup runs it before preparing the container.
 preflight() {
   SSHD_BIN=""
   if command -v sshd >/dev/null 2>&1; then
@@ -110,7 +112,7 @@ preflight() {
   require_capability "md startup" "md start" \
     cmd:useradd cmd:groupadd cmd:usermod cmd:getent cmd:id \
     cmd:chown cmd:chmod cmd:install cmd:awk cmd:mktemp cmd:find \
-    cmd:grep cmd:groupmod cmd:head cmd:hostname cmd:passwd cmd:sleep cmd:stat cmd:tr \
+    cmd:git cmd:grep cmd:groupmod cmd:head cmd:hostname cmd:passwd cmd:sleep cmd:stat cmd:tr \
     file:/etc/ssh/sshd_config file:/etc/ssh/ssh_host_ed25519_key \
     "file:$MD_HOME/.ssh/authorized_keys"
 
@@ -410,6 +412,22 @@ start_sshd() {
     exit 1
   fi
 }
+
+# The specialized image build runs this script with --check so that a base image
+# which cannot carry md fails its own build, naming what is missing, before any
+# container exists. Runtime starts use no argument.
+case "${1:-}" in
+"")
+  ;;
+--check)
+  preflight
+  log "image satisfies the md startup contract"
+  exit 0
+  ;;
+*)
+  fail "unexpected argument '$1'"
+  ;;
+esac
 
 preflight
 ensure_account

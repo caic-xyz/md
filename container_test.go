@@ -1874,18 +1874,33 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			}
 		}
 	})
-	t.Run("rootless_podman_user_environment", func(t *testing.T) {
+	t.Run("host_user_environment", func(t *testing.T) {
 		t.Parallel()
 		if got, want := rootlessPodmanUserNSArg(), "--userns=keep-id:uid=1000,gid=1000"; got != want {
 			t.Errorf("rootlessPodmanUserNSArg() = %q, want %q", got, want)
 		}
-		if os.Getuid() <= 0 || os.Getgid() <= 0 {
-			t.Skip("host UID/GID environment is omitted for root")
-		}
-		got := hostUserEnv(true)
-		want := []string{"-e", "MD_HOST_UID=1000", "-e", "MD_HOST_GID=1000"}
-		if !slices.Equal(got, want) {
-			t.Fatalf("hostUserEnv(true) = %q, want %q", got, want)
+		for _, tc := range []struct {
+			name           string
+			uid, gid       int
+			rootlessPodman bool
+			want           []string
+		}{
+			{name: "host_identity", uid: 1001, gid: 1002, want: []string{"-e", "MD_HOST_UID=1001", "-e", "MD_HOST_GID=1002"}},
+			{name: "rootless_podman", uid: 1001, gid: 1002, rootlessPodman: true, want: []string{"-e", "MD_HOST_UID=1000", "-e", "MD_HOST_GID=1000"}},
+			// md running as root passes no MD_HOST_UID/MD_HOST_GID. start.sh then
+			// leaves the account at the fixed contract identity, which is why the
+			// specialized image owns its content 1000:1000 in that case.
+			{name: "root", uid: 0, gid: 0},
+			{name: "root_uid", uid: 0, gid: 1002},
+			{name: "root_gid", uid: 1001, gid: 0},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				got := hostUserEnvFor(tc.uid, tc.gid, tc.rootlessPodman)
+				if !slices.Equal(got, tc.want) {
+					t.Errorf("hostUserEnvFor(%d, %d, %v) = %q, want %q", tc.uid, tc.gid, tc.rootlessPodman, got, tc.want)
+				}
+			})
 		}
 	})
 	t.Run("runGitDir_overrides_client_environment", func(t *testing.T) {

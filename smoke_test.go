@@ -187,25 +187,34 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 `
 
-// ensureSmokeForeignBase builds (or reuses) the foreign base image. The tag
+// smokeForeignMetadataDockerfile adds an inherited ENTRYPOINT and a non-root
+// USER, which md resets: the base image's USER would otherwise run the build's
+// own layers and its ENTRYPOINT would run instead of the md entrypoint.
+const smokeForeignMetadataDockerfile = smokeForeignBaseDockerfile + `RUN groupadd --gid 1001 app && useradd --uid 1001 --gid 1001 -m -s /bin/sh app
+USER app
+ENTRYPOINT ["/bin/false"]
+CMD ["/bin/false"]
+`
+
+// ensureSmokeFixture builds (or reuses) a fixture image from dockerfile. The tag
 // carries a hash of the Dockerfile so editing the fixture rebuilds it instead of
-// silently reusing a stale image. The build is small enough to also run with
+// silently reusing a stale image. These builds are small enough to also run with
 // -short, which only skips the multi-gigabyte md-root/md-user builds.
-func ensureSmokeForeignBase(t *testing.T, ctx context.Context, c *Client) string {
+func ensureSmokeFixture(t *testing.T, ctx context.Context, c *Client, name, dockerfile string) string {
 	t.Helper()
-	sum := sha256.Sum256([]byte(smokeForeignBaseDockerfile))
-	image := fmt.Sprintf("md-smoke-debian-slim-%x", sum[:4])
+	sum := sha256.Sum256([]byte(dockerfile))
+	image := fmt.Sprintf("md-smoke-%s-%x", name, sum[:4])
 	if hasImage(ctx, c, image) {
-		t.Log("reusing foreign base image " + image)
+		t.Log("reusing fixture image " + image)
 		return image
 	}
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(smokeForeignBaseDockerfile), 0o600); err != nil {
-		t.Fatalf("writing foreign base Dockerfile: %v", err)
+	if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(dockerfile), 0o600); err != nil {
+		t.Fatalf("writing %s Dockerfile: %v", name, err)
 	}
-	t.Log("building foreign base image " + image + " ...")
+	t.Log("building fixture image " + image + " ...")
 	if out, err := c.Runtime.Run(ctx, dir, "build", "-t", image, "."); err != nil {
-		t.Fatalf("building foreign base image: %v\n%s", err, out)
+		t.Fatalf("building fixture image %s: %v\n%s", name, err, out)
 	}
 	return image
 }
@@ -228,6 +237,19 @@ func newSmokeContainer(t *testing.T, ctx context.Context, c *Client, name string
 		}
 	})
 	return ct
+}
+
+// smokeContainerUser returns the UID/GID the md account ends up with inside a
+// container for this host and runtime. start.sh leaves the account at the fixed
+// contract identity when md passes no MD_HOST_UID/MD_HOST_GID, which is what md
+// does when it runs as root, and rootless Podman maps the host user onto that
+// same identity.
+func smokeContainerUser(t *testing.T, c *Client) (int, int) {
+	t.Helper()
+	if os.Getuid() <= 0 || os.Getgid() <= 0 || c.Runtime.IsRootless() {
+		return containerUserUID, containerUserGID
+	}
+	return os.Getuid(), os.Getgid()
 }
 
 // waitForSmokeContainerExit waits for a container to stop and returns its exit
@@ -1167,17 +1189,13 @@ func TestSmoke(t *testing.T) {
 
 			// Foreign base images: md must run on an image it does not control.
 			// debian:stable-slim is the reference Debian-family base for both halves
-			// of the md startup capability contract: a reduced image that satisfies
-			// it reaches SSH, and an image that does not refuses to start, naming the
-			// missing capability and the md option that requested it.
+			// of the md startup capability contract: an image that satisfies it reaches
+			// SSH however hostile the metadata it inherited, and an image that cannot
+			// carry md fails its own build, naming the missing capability.
 			t.Run("foreign_base", func(t *testing.T) {
-				if os.Getuid() == 0 {
-					// md running as root chowns the specialized image to user:user,
-					// which a base image without the account cannot resolve.
-					t.Skip("skipping: md as root needs the user account in the base image")
-				}
 				slim := "debian:stable-slim"
-				reduced := ensureSmokeForeignBase(t, t.Context(), client)
+				reduced := ensureSmokeFixture(t, t.Context(), client, "debian-slim", smokeForeignBaseDockerfile)
+				metadata := ensureSmokeFixture(t, t.Context(), client, "debian-slim-metadata", smokeForeignMetadataDockerfile)
 
 				t.Run("reduced_image_reaches_ssh", func(t *testing.T) {
 					prebuildSpecializedImage(t, t.Context(), client, reduced, nil)
@@ -1200,12 +1218,9 @@ func TestSmoke(t *testing.T) {
 						}
 					}
 
-					// Docker passes the host UID/GID through, rootless Podman maps the
-					// host user onto the fixed UID/GID 1000 contract in docs/ROOTLESS.md.
-					wantUID, wantGID := os.Getuid(), os.Getgid()
-					if client.Runtime.IsRootless() {
-						wantUID, wantGID = containerUserUID, containerUserGID
-					}
+					// Docker passes the host UID/GID through, rootless Podman and a root
+					// host leave the account at the fixed contract identity.
+					wantUID, wantGID := smokeContainerUser(t, client)
 					wantOwner := fmt.Sprintf("%d:%d", wantUID, wantGID)
 					out, err := ct.runCmd(t.Context(), "", ct.SSHCommand(nil,
 						"id -un; id -u; id -g; stat -c %u:%g /home/user /home/user/.ssh/authorized_keys; git --version"))
@@ -1272,12 +1287,35 @@ func TestSmoke(t *testing.T) {
 					}
 				})
 
+				// md resets the ENTRYPOINT and USER it inherits, so a base image that
+				// sets both still reaches SSH instead of failing its build layer or
+				// running /bin/false as its entrypoint.
+				t.Run("inherited_metadata_reset", func(t *testing.T) {
+					prebuildSpecializedImage(t, t.Context(), client, metadata, nil)
+					ct := launchSmokeContainer(t, t.Context(), client, metadata, rt+"-debian-slim-metadata", false)
+					out, err := ct.runCmd(t.Context(), "", ct.SSHCommand(nil, "id -un; id -u"))
+					if err != nil {
+						t.Fatalf("inspecting container from the metadata fixture: %v", err)
+					}
+					wantUID, _ := smokeContainerUser(t, client)
+					want := fmt.Sprintf("user\n%d", wantUID)
+					if got := strings.TrimSpace(out); got != want {
+						t.Errorf("account = %q, want %q", got, want)
+					}
+				})
+
 				t.Run("missing_requested_capability", func(t *testing.T) {
-					// -display on an image without Xvnc must refuse to start.
+					// -display on an image without Xvnc must leave a container that exited
+					// nonzero, naming the capability and the option. Launch itself may fail:
+					// Docker drops the port bindings of a container that exited before md
+					// read them, so md reports that failure with the container log attached.
 					ct := newSmokeContainer(t, t.Context(), client, "md-smoke-debian-slim-display")
 					opts := &StartOpts{BaseImage: reduced, Display: true, Quiet: true}
-					if err := ct.Launch(t.Context(), io.Discard, io.Discard, opts); err != nil {
-						t.Fatalf("Launch: %v", err)
+					launchErr := ct.Launch(t.Context(), io.Discard, io.Discard, opts)
+					if launchErr != nil && !strings.Contains(launchErr.Error(), "desktop capability") {
+						// The container never came to exist, so this is not the rejection
+						// under test: fail with the original error.
+						t.Fatalf("Launch: %v", launchErr)
 					}
 					code, logs := waitForSmokeContainerExit(t, t.Context(), client, ct.Name)
 					if code != 1 {
@@ -1291,21 +1329,18 @@ func TestSmoke(t *testing.T) {
 				})
 
 				t.Run("missing_mandatory_capability", func(t *testing.T) {
-					// Plain debian:stable-slim has no sshd at all: md cannot manage it.
-					prebuildSpecializedImage(t, t.Context(), client, slim, nil)
+					// Plain debian:stable-slim has no sshd at all, so the specialized image
+					// must not build: failing here names what is missing before any
+					// container exists.
 					ct := newSmokeContainer(t, t.Context(), client, "md-smoke-debian-slim-nosshd")
-					opts := &StartOpts{BaseImage: slim, Quiet: true}
-					if err := ct.Launch(t.Context(), io.Discard, io.Discard, opts); err != nil {
-						t.Fatalf("Launch: %v", err)
+					platform := Platform("").Resolve()
+					removeSmokeImageIfPresent(t, t.Context(), client, userImageName(slim, activeCacheKey(nil, ct.Home), platform.String()))
+					_, err := ct.ensureImage(t.Context(), io.Discard, io.Discard, slim, "", nil, true)
+					if err == nil {
+						t.Fatal("expected the specialized image build to fail for a base image without sshd")
 					}
-					code, logs := waitForSmokeContainerExit(t, t.Context(), client, ct.Name)
-					if code != 1 {
-						t.Errorf("exit code = %d, want 1:\n%s", code, logs)
-					}
-					for _, want := range []string{"md startup is missing sshd", "requested by md start"} {
-						if !strings.Contains(logs, want) {
-							t.Errorf("container log does not contain %q:\n%s", want, logs)
-						}
+					if !strings.Contains(err.Error(), "sshd") {
+						t.Errorf("build failure does not name the missing capability:\n%v", err)
 					}
 				})
 			})

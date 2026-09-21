@@ -263,6 +263,29 @@ func TestClient(t *testing.T) {
 			})
 		}
 	})
+	t.Run("host_user_owner", func(t *testing.T) {
+		t.Parallel()
+		// A root host passes no MD_HOST_UID, so start.sh leaves the image account
+		// at the fixed contract identity instead of chowning by name, which a base
+		// image without that account cannot resolve.
+		for _, tc := range []struct {
+			name     string
+			uid, gid int
+			want     string
+		}{
+			{name: "host_identity", uid: 123, gid: 456, want: "123:456"},
+			{name: "root", uid: 0, gid: 0, want: "1000:1000"},
+			{name: "root_uid", uid: 0, gid: 456, want: "1000:1000"},
+			{name: "root_gid", uid: 123, gid: 0, want: "1000:1000"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				if got := hostUserOwnerFor(tc.uid, tc.gid); got != tc.want {
+					t.Errorf("hostUserOwnerFor(%d, %d) = %q, want %q", tc.uid, tc.gid, got, tc.want)
+				}
+			})
+		}
+	})
 	t.Run("AgentMounts", func(t *testing.T) {
 		t.Parallel()
 		home := t.TempDir()
@@ -435,6 +458,35 @@ func TestClient(t *testing.T) {
 			}
 		})
 	})
+}
+
+// TestContainerNotListening checks the failure md reports when a started
+// container is not reachable. Docker drops the port bindings of a container that
+// exited before md read them, so the container's own log has to carry the reason.
+func TestContainerNotListening(t *testing.T) { //nolint:paralleltest // fakeRuntime uses t.Setenv, which cannot run in parallel tests.
+	home := t.TempDir()
+	c := newTestClient(t, home, fakeRuntime(t, filepath.Join(t.TempDir(), "runtime.log"), true))
+	ct, err := c.Container()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ct.Name = "md-one"
+	ct.State = "exited"
+	err = ct.containerNotListening(t.Context(), "has no SSH port mapping")
+	if err == nil {
+		t.Fatal("containerNotListening: got nil error")
+	}
+	for _, want := range []string{"has no SSH port mapping", "state exited", "md startup is missing sshd"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not contain %q", err, want)
+		}
+	}
+	// A running container has no exit to explain, so no log is attached.
+	ct.State = "running"
+	err = ct.containerNotListening(t.Context(), "has no SSH port mapping")
+	if err == nil || strings.Contains(err.Error(), "last container log lines") {
+		t.Errorf("running container error = %v, want the plain port-mapping error", err)
+	}
 }
 
 func TestBuildSpecializedImage(t *testing.T) { //nolint:tparallel // fakeRuntime uses t.Setenv, which cannot run in parallel tests.
@@ -1022,6 +1074,10 @@ func runFakeRuntime(args []string, logPath string, localBase bool, containerStat
 	}
 	if len(args) >= 2 && args[0] == "manifest" && args[1] == "inspect" {
 		_, _ = fmt.Fprintln(os.Stdout, `{"manifests":[{"digest":"sha256:remote","platform":{"architecture":"amd64","os":"linux"}}]}`)
+		return 0
+	}
+	if len(args) >= 1 && args[0] == "logs" {
+		_, _ = fmt.Fprintln(os.Stdout, "[start.sh] ERROR: md startup is missing sshd, requested by md start")
 		return 0
 	}
 	if len(args) >= 1 && args[0] == "builder" {
