@@ -100,19 +100,16 @@ jobs:
           python-version-file: '.python-version'
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         if: runner.os == 'Linux'
-      - name: "Check: lint; golangci-lint, pylint, ruff, shellcheck, binary, file index (ubuntu)"
+      - name: "Check: verify; golangci-lint, gofmt, pylint, ruff, shfmt, shellcheck, binary, file index (ubuntu)"
         if: always() && runner.os == 'Linux'
-        run: make lint-check
-      - name: "Check: formatting; gofmt, goimports, ruff format, shfmt (ubuntu)"
-        if: always() && runner.os == 'Linux'
-        run: make format-check
+        run: make verify
       - name: "go install necessary tools (ubuntu)"
         if: always() && matrix.os == 'ubuntu-latest'
         run: |
           go install github.com/google/addlicense@latest
       - name: "Check: no executable was committed (ubuntu)"
         if: always() && matrix.os == 'ubuntu-latest'
-        # ./custom-gcl is the gitignored golangci-lint binary built by `make lint-check`.
+        # ./custom-gcl is the gitignored golangci-lint binary built by `make verify`.
         run: |
           if find . -type f -not -path './.git/*' -not -path './cache/*' -not -path './py/venv/*' -not -path './custom-gcl' -not -name '*.desktop' -perm /111 -exec sh -c 'test "$(head -c2 "$1")" != "#!"' _ {} \; -print | grep -e . ; then
             echo 'Do not commit executables that are not scripts (missing #! shebang)'

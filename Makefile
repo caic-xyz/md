@@ -1,5 +1,7 @@
 # Build, test, lint, and format the repository.
-.PHONY: build test lint lint-check format format-check verify git-hooks tools
+
+.DEFAULT_GOAL := help
+.PHONY: help build test fix verify git-hooks tools custom-gcl
 
 # Tool versions. The tools target installs a tool that is missing or at another version, so
 # these are the only places the versions are written down.
@@ -30,12 +32,45 @@ tools:
 # entrypoints and the VNC helpers carry no .sh suffix.
 SHELL_SCRIPTS = git ls-files '*.sh'; git ls-files -s | awk '$$1 == "100755" { print $$4 }' | while IFS= read -r f; do case "$$(head -n 1 "$$f")" in *'/sh'* | *'/bash'* | *'env sh'* | *'env bash'*) printf '%s\n' "$$f";; esac; done
 
+# The custom-gcl binary is not byte-reproducible (golangci-lint custom builds
+# in a random temp directory and stamps VCS metadata), so staleness is tracked
+# by hashing the build inputs instead of comparing mtimes: the plugin config
+# plus the pinned golangci-lint version and the Go toolchain. A branch switch
+# that recreates .custom-gcl.yml with a fresh timestamp must not trigger a
+# rebuild; a version or config change must.
+.PHONY: custom-gcl
+custom-gcl:
+	@want=$$({ sha256sum .custom-gcl.yml | cut -d" " -f1; echo "$(GOLANGCI_LINT_VERSION)"; go env GOVERSION; } | sha256sum | cut -d" " -f1); \
+	if [ -x custom-gcl ] && [ "$$want" = "$$(cat .custom-gcl.sha 2>/dev/null)" ]; then exit 0; fi; \
+	echo 'Building custom-gcl with the methodfilecheck plugin (one-off; runs when the config, golangci-lint version, or Go toolchain changes)...'; \
+	golangci-lint custom --version $(GOLANGCI_LINT_VERSION) && echo "$$want" > .custom-gcl.sha
 
-# methodfilecheck (see .golangci.yml) is a golangci-lint module plugin, so the
-# Go linting must run through the custom binary built from the published
-# plugin module.
-custom-gcl: .custom-gcl.yml
-	@golangci-lint custom --version $(GOLANGCI_LINT_VERSION)
+# The one static gate. The gofmt and goimports formatters are checked by
+# custom-gcl run itself (formatters section of .golangci.yml) with its warm
+# analysis cache; a separate `golangci-lint fmt --diff` pass would re-typecheck
+# the whole tree without that cache. Caveat: when another linter fails on the
+# same file, run reports the lint error only, so a formatting problem there
+# surfaces on the next verify after the lint fix. fix applies the formatters
+# through `golangci-lint fmt`.
+verify: tools custom-gcl
+	@./custom-gcl run --show-stats=false ./...
+	@pylint --score=n .
+	@ruff format --check --quiet .
+	@ruff check --quiet .
+	@files=$$($(SHELL_SCRIPTS)); [ -z "$$files" ] || shellcheck -x $$files
+	@files=$$($(SHELL_SCRIPTS)); [ -z "$$files" ] || { out=$$(shfmt -l $$files); [ -z "$$out" ] || { echo 'Shell files need shfmt:' >&2; echo "$$out" >&2; exit 1; }; }
+	@python3 scripts/lint_binaries.py
+	@python3 scripts/update_agents_file_index.py --check
+
+# Apply every autofix, then refresh the generated file index. Does not
+# re-check; run verify for that. pylint and shellcheck have no autofixes.
+fix: tools custom-gcl
+	@./custom-gcl run --show-stats=false ./... --fix
+	@golangci-lint fmt
+	@ruff check --quiet --fix .
+	@ruff format --quiet .
+	@files=$$($(SHELL_SCRIPTS)); [ -z "$$files" ] || shfmt -w $$files
+	@python3 scripts/update_agents_file_index.py
 
 build:
 	@go build ./...
@@ -43,35 +78,15 @@ build:
 test:
 	@go test ./...
 
-lint-check: tools custom-gcl
-	@./custom-gcl run --show-stats=false ./...
-	@pylint --score=n .
-	@ruff check --quiet .
-	@files=$$($(SHELL_SCRIPTS)); [ -z "$$files" ] || shellcheck -x $$files
-	@python3 scripts/lint_binaries.py
-	@python3 scripts/update_agents_file_index.py --check
-
-# Apply the autofixes, then report what is left to fix by hand.
-lint: tools custom-gcl
-	@./custom-gcl run --show-stats=false ./... --fix
-	@ruff check --quiet --fix .
-	@python3 scripts/update_agents_file_index.py
-	@$(MAKE) --no-print-directory lint-check
-
-# Apply and verify the shared formatters: gofmt and goimports through
-# golangci-lint for Go, ruff format for the Python scripts, and shfmt for the
-# shell scripts.
-format: tools
-	@golangci-lint fmt
-	@ruff format --quiet .
-	@files=$$($(SHELL_SCRIPTS)); [ -z "$$files" ] || shfmt -w $$files
-
-format-check: tools
-	@out=$$(golangci-lint fmt --diff); [ -z "$$out" ] || { echo 'Go files need formatting (gofmt, goimports):' >&2; echo "$$out" >&2; exit 1; }
-	@ruff format --check --quiet .
-	@files=$$($(SHELL_SCRIPTS)); [ -z "$$files" ] || { out=$$(shfmt -l $$files); [ -z "$$out" ] || { echo 'Shell files need shfmt:' >&2; echo "$$out" >&2; exit 1; }; }
-
-verify: format-check lint-check
-
 git-hooks:
 	@./scripts/install-git-hooks.sh
+
+help:
+	@echo 'md - coding agent container'
+	@echo ''
+	@echo 'Available targets:'
+	@printf '  %-14s - %s\n' 'make fix' 'Apply every autofix, then refresh the file index'
+	@printf '  %-14s - %s\n' 'make verify' 'Fast static gate: gofmt, ruff, pylint, shfmt, shellcheck, docs (pre-push gate)'
+	@printf '  %-14s - %s\n' 'make test' 'Run Go tests'
+	@printf '  %-14s - %s\n' 'make build' 'Build all Go packages'
+	@printf '  %-14s - %s\n' 'make git-hooks' 'Install git hooks'

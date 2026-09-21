@@ -4,12 +4,11 @@ A file to [guide coding agents](https://agents.md/).
 
 ## Requirements
 
-- Run `make lint`, then `make format`, then `make verify` before handing off. `make lint` applies the
-  autofixes and then runs `make lint-check`, the read-only check that `make verify` and CI run. `make verify` re-checks
-  gofmt, `ruff format`, `ruff check`, `pylint`, `shfmt`, `shellcheck`, and the binary and file-index checks;
-  `.editorconfig` is the source of truth for indentation and width, while Ruff keeps its own copy of the
-  width in `pyproject.toml`.
-- `make lint` runs shellcheck over the container scripts, including the executable helpers under `rsc/`
+- Run `make fix`, then `make verify` before handing off. `make fix` applies every autofix and refreshes the
+  file index; `make verify` is the read-only gate (also run by CI and the pre-push hook) re-checking gofmt,
+  `ruff format`, `ruff check`, `pylint`, `shfmt`, `shellcheck`, and the binary and file-index checks;
+  `.editorconfig` is the source of truth for indentation and width.
+- `make verify` runs shellcheck over the container scripts, including the executable helpers under `rsc/`
   that carry no `.sh` suffix.
 - Update this file (AGENTS.md) everytime you make a change that affects this project's requirements.
 - Update rsc/user/home/user/src/AGENTS.md everytime you make a change that affects the agent inside the container.
@@ -17,13 +16,11 @@ A file to [guide coding agents](https://agents.md/).
 - When adding a new setup script in `rsc/root/root/setup/`, add a corresponding `RUN` command to `rsc/root/Dockerfile`. When adding a new setup script in `rsc/user/home/user/setup/`, add a corresponding `RUN` command to `rsc/user/Dockerfile`.
 - No tests should be written for Python or shell script changes.
 - **NEVER run `go build ./cmd/md/` without `-o`** — the repo root contains a Python script named `md` and `go build` will overwrite it. Always use `go build -o /tmp/md-test ./cmd/md/` or similar.
-- For Go code changes, ensure code passes `go test ./...`, `go vet ./...`, and `make lint`.
 - **Cross-platform fake executables in Go tests**: Prefer re-entering the current test binary with `os.Executable()` plus `TestMain`/environment switches. Do not create POSIX shell-script fake executables for tests that must run on Windows CI; Windows cannot execute a temp `docker` shell script without a native `.exe`/`.cmd` wrapper.
 - **Cross-platform paths**: When passing host paths to Docker CLI or SSH config files, always use `filepath.ToSlash()`.
   Docker Desktop on Windows expects forward slashes; SSH config uses POSIX convention.
 - **Docker knowledge is outdated by default**: when a change depends on Docker behavior, run `git clone https://github.com/docker/docs` and read the relevant site documentation as the source of truth.
 - **Podman knowledge is outdated by default**: when a change depends on Podman behavior, run `git clone https://github.com/containers/podman` and read the relevant documentation under `docs/source/markdown/` as the source of truth.
-- For Python code changes, ensure code passes `make lint`.
 - Before changing what `md start`, `md run`, `md fork`, `md push`, `md pull` or `md diff` do to either checkout, read `docs/GIT_MODEL.md`. It describes the branch state on each side and the invariants behind it.
 - When adding new tools to the system, they must also be added to `rsc/user/home/user/setup/generate_version_report.sh` to ensure they appear in version reports. The script generates `/home/user/src/tool_versions.md` which is used in release notes and build reports
 
@@ -108,7 +105,7 @@ When installing a new tool in the container, ensure you update:
 3. Add version check to `rsc/user/home/user/setup/generate_version_report.sh`
 4. Update `rsc/user/home/user/src/AGENTS.md` "Preinstalled Tools" section to reflect the change
 5. If the tool needs PATH setup, update `rsc/user/home/user/.config/bash.d/80-path.sh` (see [Shell Environment](#shell-environment-bash_env))
-6. Run `make lint`, then `make format`
+6. Run `make fix`
 
 ## Shell Environment (BASH_ENV)
 
