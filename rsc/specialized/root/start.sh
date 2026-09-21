@@ -139,6 +139,7 @@ preflight() {
 ensure_account() {
   if id -u "$MD_USER" >/dev/null 2>&1; then
     MD_GROUP="$(id -gn "$MD_USER")"
+    log "using existing $MD_USER account (UID/GID $(id -u "$MD_USER"):$(id -g "$MD_USER"))"
     return
   fi
   if getent passwd 1000 >/dev/null 2>&1; then
@@ -241,8 +242,19 @@ configure_host_user_id() {
   old_uid="$(id -u "$MD_USER")"
   old_gid="$(id -g "$MD_USER")"
   if [ "$target_uid" = "$old_uid" ] && [ "$target_gid" = "$old_gid" ]; then
+    log "$MD_USER account already has requested host UID/GID $target_uid:$target_gid"
     return
   fi
+  local uid_owner gid_owner
+  uid_owner="$(getent passwd "$target_uid" | awk -F: -v name="$MD_USER" '$1 != name { print $1; exit }' || true)"
+  gid_owner="$(getent group "$target_gid" | awk -F: -v name="$MD_GROUP" '$1 != name { print $1; exit }' || true)"
+  if [ -n "$uid_owner" ]; then
+    log "WARNING: requested host UID $target_uid is already assigned to '$uid_owner'; $MD_USER will share that UID"
+  fi
+  if [ -n "$gid_owner" ]; then
+    log "WARNING: requested host GID $target_gid is already assigned to '$gid_owner'; $MD_GROUP will share that GID"
+  fi
+  log "changing $MD_USER account identity from $old_uid:$old_gid to requested host UID/GID $target_uid:$target_gid"
   rewrite_user_identity "$target_uid" "$target_gid"
   for path in "$MD_HOME" "$MD_HOME/.ssh" "$MD_HOME/.ssh/authorized_keys"; do
     if [ -e "$path" ] || [ -L "$path" ]; then

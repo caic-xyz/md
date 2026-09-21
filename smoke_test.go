@@ -1300,7 +1300,12 @@ func TestSmoke(t *testing.T) {
 					wantUID, _ := smokeContainerUser(t, client)
 					want := fmt.Sprintf("user\n%d", wantUID)
 					if got := strings.TrimSpace(out); got != want {
-						t.Errorf("account = %q, want %q", got, want)
+						logs, logsErr := client.Runtime.Run(t.Context(), "", "logs", ct.Name)
+						if logsErr != nil {
+							t.Errorf("account = %q, want %q; reading startup log: %v", got, want, logsErr)
+						} else {
+							t.Errorf("account = %q, want %q; startup log:\n%s", got, want, logs)
+						}
 					}
 				})
 
