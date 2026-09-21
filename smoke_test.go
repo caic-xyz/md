@@ -10,6 +10,7 @@ package md
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"maps"
@@ -17,6 +18,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -171,6 +173,99 @@ func launchSmokeContainer(t *testing.T, ctx context.Context, c *Client, baseImag
 		t.Fatalf("Connect: %v", err)
 	}
 	return ct
+}
+
+// smokeForeignBaseDockerfile builds the reference Debian-family base image used
+// by the foreign_base subtests. It carries only what the md startup contract
+// needs beyond sshd itself: git, which md's post-SSH provisioning drives. It
+// deliberately has none of the md-specific packages (no Xvnc, no tailscaled,
+// no DBus, no sudo) and no `user` account, so start.sh has to provision the
+// account and tolerate the subsystems md did not request.
+const smokeForeignBaseDockerfile = `FROM debian:stable-slim
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends git openssh-server \
+ && rm -rf /var/lib/apt/lists/*
+`
+
+// ensureSmokeForeignBase builds (or reuses) the foreign base image. The tag
+// carries a hash of the Dockerfile so editing the fixture rebuilds it instead of
+// silently reusing a stale image. The build is small enough to also run with
+// -short, which only skips the multi-gigabyte md-root/md-user builds.
+func ensureSmokeForeignBase(t *testing.T, ctx context.Context, c *Client) string {
+	t.Helper()
+	sum := sha256.Sum256([]byte(smokeForeignBaseDockerfile))
+	image := fmt.Sprintf("md-smoke-debian-slim-%x", sum[:4])
+	if hasImage(ctx, c, image) {
+		t.Log("reusing foreign base image " + image)
+		return image
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(smokeForeignBaseDockerfile), 0o600); err != nil {
+		t.Fatalf("writing foreign base Dockerfile: %v", err)
+	}
+	t.Log("building foreign base image " + image + " ...")
+	if out, err := c.Runtime.Run(ctx, dir, "build", "-t", image, "."); err != nil {
+		t.Fatalf("building foreign base image: %v\n%s", err, out)
+	}
+	return image
+}
+
+// newSmokeContainer creates a named container without launching it, removing a
+// leftover container with the same name and registering cleanup.
+func newSmokeContainer(t *testing.T, ctx context.Context, c *Client, name string) *Container {
+	t.Helper()
+	ct, err := c.Container()
+	if err != nil {
+		t.Fatalf("Container: %v", err)
+	}
+	ct.Name = name
+	removeSmokeContainerIfPresent(t, ctx, c, name)
+	t.Cleanup(func() {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		if err := ct.Purge(cleanupCtx, io.Discard, io.Discard); err != nil {
+			t.Logf("cleanup %s: %v", name, err)
+		}
+	})
+	return ct
+}
+
+// waitForSmokeContainerExit waits for a container to stop and returns its exit
+// code and combined logs. start.sh answers a missing capability by exiting
+// nonzero with the capability and the requesting option on stderr, and md would
+// otherwise wait out its two-minute SSH timeout for a container that is already
+// gone.
+func waitForSmokeContainerExit(t *testing.T, ctx context.Context, c *Client, name string) (int, string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Minute)
+	for {
+		out, err := c.Runtime.Run(ctx, "", "inspect", "--format", "{{.State.Running}}", name)
+		if err != nil {
+			t.Fatalf("inspect %s: %v", name, err)
+		}
+		if strings.TrimSpace(out) == "false" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("container %s is still running", name)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	out, err := c.Runtime.Run(ctx, "", "inspect", "--format", "{{.State.ExitCode}}", name)
+	if err != nil {
+		t.Fatalf("inspect exit code of %s: %v", name, err)
+	}
+	code, err := strconv.Atoi(strings.TrimSpace(out))
+	if err != nil {
+		t.Fatalf("parsing exit code %q of %s: %v", out, name, err)
+	}
+	// Both streams are needed: start.sh logs to stdout and writes capability
+	// errors to stderr.
+	var logs strings.Builder
+	if err := c.Runtime.RunOut(ctx, "", &logs, &logs, "logs", name); err != nil {
+		t.Fatalf("logs of %s: %v", name, err)
+	}
+	return code, logs.String()
 }
 
 func launchSmokeRepoContainer(t *testing.T, ctx context.Context, c *Client, baseImage string, caches []CacheMount, repo *Repo) *Container {
@@ -1068,6 +1163,151 @@ func TestSmoke(t *testing.T) {
 						t.Errorf("label %s missing from md-user-local", label)
 					}
 				}
+			})
+
+			// Foreign base images: md must run on an image it does not control.
+			// debian:stable-slim is the reference Debian-family base for both halves
+			// of the md startup capability contract: a reduced image that satisfies
+			// it reaches SSH, and an image that does not refuses to start, naming the
+			// missing capability and the md option that requested it.
+			t.Run("foreign_base", func(t *testing.T) {
+				if os.Getuid() == 0 {
+					// md running as root chowns the specialized image to user:user,
+					// which a base image without the account cannot resolve.
+					t.Skip("skipping: md as root needs the user account in the base image")
+				}
+				slim := "debian:stable-slim"
+				reduced := ensureSmokeForeignBase(t, t.Context(), client)
+
+				t.Run("reduced_image_reaches_ssh", func(t *testing.T) {
+					prebuildSpecializedImage(t, t.Context(), client, reduced, nil)
+					ct := launchSmokeContainer(t, t.Context(), client, reduced, rt+"-debian-slim", false)
+
+					// start.sh provisions the account, since the base image has none.
+					logs, err := client.Runtime.Run(t.Context(), "", "logs", ct.Name)
+					if err != nil {
+						t.Fatalf("logs: %v", err)
+					}
+					for _, want := range []string{
+						"created the user account (UID/GID 1000)",
+						// The reduced image has neither Xvnc nor DBus: unrequested
+						// subsystems must be skipped, not fail startup.
+						"MD_DISPLAY not set, skipping X/VNC startup",
+						"Skipping DBus",
+					} {
+						if !strings.Contains(logs, want) {
+							t.Errorf("container log does not contain %q:\n%s", want, logs)
+						}
+					}
+
+					// Docker passes the host UID/GID through, rootless Podman maps the
+					// host user onto the fixed UID/GID 1000 contract in docs/ROOTLESS.md.
+					wantUID, wantGID := os.Getuid(), os.Getgid()
+					if client.Runtime.IsRootless() {
+						wantUID, wantGID = containerUserUID, containerUserGID
+					}
+					wantOwner := fmt.Sprintf("%d:%d", wantUID, wantGID)
+					out, err := ct.runCmd(t.Context(), "", ct.SSHCommand(nil,
+						"id -un; id -u; id -g; stat -c %u:%g /home/user /home/user/.ssh/authorized_keys; git --version"))
+					if err != nil {
+						t.Fatalf("inspecting reduced container: %v", err)
+					}
+					lines := strings.Split(strings.TrimSpace(out), "\n")
+					if len(lines) != 6 {
+						t.Fatalf("expected 6 lines of container state, got %d:\n%s", len(lines), out)
+					}
+					for i, want := range []string{"user", strconv.Itoa(wantUID), strconv.Itoa(wantGID), wantOwner, wantOwner} {
+						if got := strings.TrimSpace(lines[i]); got != want {
+							t.Errorf("container state line %d = %q, want %q", i+1, got, want)
+						}
+					}
+					if got := strings.TrimSpace(lines[5]); !strings.HasPrefix(got, "git version") {
+						t.Errorf("git --version = %q, want a git version (md's post-SSH provisioning needs git)", got)
+					}
+				})
+
+				t.Run("repo_workflow", func(t *testing.T) {
+					// md pushes a repository over SSH into a tree it initializes as
+					// `user`, so this covers a home start.sh had to create for an account
+					// the base image never had.
+					repo := createSmokeGitRepo(t, "main", "main", false)
+					cp := "/home/user/src/smoke-" + rt + "-debian-slim-repo"
+					ct := launchSmokeRepoContainer(t, t.Context(), client, reduced, nil, &Repo{
+						GitRoot:       repo,
+						Branches:      []string{"main"},
+						ContainerPath: cp,
+					})
+
+					// The refs md pushed and the resulting working tree survived the
+					// transfer.
+					mainCommit := runSmokeGit(t, t.Context(), repo, "rev-parse", "refs/remotes/origin/main")
+					assertSmokeContainerGitRef(t, ct, cp, "refs/remotes/origin/main", mainCommit)
+					assertSmokeContainerNoDiff(t, ct, 0)
+
+					// Everything md created for the account must belong to `user`: the
+					// base image has no `user`, so the specialized image cannot pre-own
+					// the home it copied the SSH key into.
+					out, err := ct.runCmd(t.Context(), "", ct.SSHCommand(nil,
+						"stat -c %U:%G "+cp+" && find "+cp+" -not -user user -print"))
+					if err != nil {
+						t.Fatalf("checking ownership of %s: %v\n%s", cp, err, out)
+					}
+					lines := strings.Split(strings.TrimSpace(out), "\n")
+					if len(lines) == 0 || lines[0] != "user:user" {
+						t.Errorf("%s owner = %q, want user:user", cp, out)
+					} else if len(lines) > 1 {
+						t.Errorf("paths not owned by user:\n%s", strings.Join(lines[1:], "\n"))
+					}
+
+					// A clone and a commit in the container prove `user` can read and
+					// write the repository, not merely have refs pushed at it. The
+					// identity is explicit because the host identity may be unset.
+					runSmokeContainerGit(t, ct, cp, "-c", "user.name=smoke", "-c", "user.email=smoke@example.invalid",
+						"commit", "-q", "--allow-empty", "-m", "smoke commit")
+					head := runSmokeContainerGit(t, ct, cp, "rev-parse", "HEAD")
+					clone := "/home/user/src/smoke-" + rt + "-debian-slim-clone"
+					runSmokeContainerGit(t, ct, cp, "clone", "--quiet", ".", clone)
+					if got := runSmokeContainerGit(t, ct, clone, "rev-parse", "HEAD"); got != head {
+						t.Errorf("clone HEAD = %q, want %q", got, head)
+					}
+				})
+
+				t.Run("missing_requested_capability", func(t *testing.T) {
+					// -display on an image without Xvnc must refuse to start.
+					ct := newSmokeContainer(t, t.Context(), client, "md-smoke-debian-slim-display")
+					opts := &StartOpts{BaseImage: reduced, Display: true, Quiet: true}
+					if err := ct.Launch(t.Context(), io.Discard, io.Discard, opts); err != nil {
+						t.Fatalf("Launch: %v", err)
+					}
+					code, logs := waitForSmokeContainerExit(t, t.Context(), client, ct.Name)
+					if code != 1 {
+						t.Errorf("exit code = %d, want 1:\n%s", code, logs)
+					}
+					for _, want := range []string{"the desktop capability is missing", "startxfce4", "-display"} {
+						if !strings.Contains(logs, want) {
+							t.Errorf("container log does not contain %q:\n%s", want, logs)
+						}
+					}
+				})
+
+				t.Run("missing_mandatory_capability", func(t *testing.T) {
+					// Plain debian:stable-slim has no sshd at all: md cannot manage it.
+					prebuildSpecializedImage(t, t.Context(), client, slim, nil)
+					ct := newSmokeContainer(t, t.Context(), client, "md-smoke-debian-slim-nosshd")
+					opts := &StartOpts{BaseImage: slim, Quiet: true}
+					if err := ct.Launch(t.Context(), io.Discard, io.Discard, opts); err != nil {
+						t.Fatalf("Launch: %v", err)
+					}
+					code, logs := waitForSmokeContainerExit(t, t.Context(), client, ct.Name)
+					if code != 1 {
+						t.Errorf("exit code = %d, want 1:\n%s", code, logs)
+					}
+					for _, want := range []string{"md startup is missing sshd", "requested by md start"} {
+						if !strings.Contains(logs, want) {
+							t.Errorf("container log does not contain %q:\n%s", want, logs)
+						}
+					}
+				})
 			})
 		})
 	}
