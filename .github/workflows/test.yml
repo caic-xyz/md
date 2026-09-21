@@ -102,7 +102,7 @@ jobs:
         if: runner.os == 'Linux'
       - name: "Check: lint; golangci-lint, pylint, ruff, shellcheck, binary, file index (ubuntu)"
         if: always() && runner.os == 'Linux'
-        run: make lint
+        run: make lint-check
       - name: "Check: formatting; gofmt, goimports, ruff format, shfmt (ubuntu)"
         if: always() && runner.os == 'Linux'
         run: make format-check
@@ -112,7 +112,7 @@ jobs:
           go install github.com/google/addlicense@latest
       - name: "Check: no executable was committed (ubuntu)"
         if: always() && matrix.os == 'ubuntu-latest'
-        # ./custom-gcl is the gitignored golangci-lint binary built by `make lint`.
+        # ./custom-gcl is the gitignored golangci-lint binary built by `make lint-check`.
         run: |
           if find . -type f -not -path './.git/*' -not -path './cache/*' -not -path './py/venv/*' -not -path './custom-gcl' -not -name '*.desktop' -perm /111 -exec sh -c 'test "$(head -c2 "$1")" != "#!"' _ {} \; -print | grep -e . ; then
             echo 'Do not commit executables that are not scripts (missing #! shebang)'

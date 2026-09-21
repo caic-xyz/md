@@ -4,7 +4,8 @@ A file to [guide coding agents](https://agents.md/).
 
 ## Requirements
 
-- Run `make lint-fix`, then `make format`, then `make verify` before handing off. `make verify` re-checks
+- Run `make lint`, then `make format`, then `make verify` before handing off. `make lint` applies the
+  autofixes and then runs `make lint-check`, the read-only check that `make verify` and CI run. `make verify` re-checks
   gofmt, `ruff format`, `ruff check`, `pylint`, `shfmt`, `shellcheck`, and the binary and file-index checks;
   `.editorconfig` is the source of truth for indentation and width, while Ruff keeps its own copy of the
   width in `pyproject.toml`.
