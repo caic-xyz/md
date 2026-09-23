@@ -78,15 +78,17 @@ func mainImpl() (retErr error) {
 	// Pre-parse to support flags before the subcommand (e.g. "md -v start").
 	pre := flag.NewFlagSet("md", flag.ContinueOnError)
 	preVerbose := addVerboseFlag(pre)
-	preRuntime := pre.String("runtime", "", "Container runtime: docker or podman (default: auto-detect)")
+	pre.Var(&a.runtimeOverride, "runtime", "Container runtime: docker or podman (default: auto-detect)")
 	preControlMaster := pre.Bool("control-master", false, "Enable SSH ControlMaster connection multiplexing")
-	// Ignore errors: unknown flags here are subcommand flags, parsed later.
-	_ = pre.Parse(os.Args[1:])
-	initLogging(*preVerbose)
-	a.runtimeOverride = *preRuntime
-	if a.runtimeOverride != "" && a.runtimeOverride != "docker" && a.runtimeOverride != "podman" {
-		return fmt.Errorf("--runtime must be \"docker\" or \"podman\", got %q", a.runtimeOverride)
+	// Ignore unknown subcommand flags, but preserve invalid global flag values.
+	if err := pre.Parse(os.Args[1:]); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			usage()
+			return nil
+		}
+		return err
 	}
+	initLogging(*preVerbose)
 	a.controlMasterEnabled = *preControlMaster && runtime.GOOS != "windows"
 	remaining := pre.Args()
 
@@ -218,7 +220,7 @@ func (cf *containerFlags) baseImage() (string, error) {
 }
 
 type app struct {
-	runtimeOverride      string
+	runtimeOverride      md.Runtime
 	controlMasterEnabled bool
 	client               *md.Client
 }
@@ -236,9 +238,9 @@ func (a *app) newClient() (*md.Client, error) {
 	}
 	logger := slog.Default()
 	var rt containers.Runtime
-	if a.runtimeOverride != "" {
+	if a.runtimeOverride != md.RuntimeAuto {
 		var err error
-		rt, err = containers.New(a.runtimeOverride, slog.Default(), nil)
+		rt, err = containers.New(string(a.runtimeOverride), slog.Default(), nil)
 		if err != nil {
 			return nil, err
 		}
@@ -255,8 +257,8 @@ func (a *app) newClient() (*md.Client, error) {
 }
 
 func (a *app) availableRuntimes() ([]containers.Runtime, error) {
-	if a.runtimeOverride != "" {
-		rt, err := containers.New(a.runtimeOverride, slog.Default(), nil)
+	if a.runtimeOverride != md.RuntimeAuto {
+		rt, err := containers.New(string(a.runtimeOverride), slog.Default(), nil)
 		if err != nil {
 			return nil, err
 		}

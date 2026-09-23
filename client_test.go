@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"iter"
@@ -122,6 +123,76 @@ func isFakeGitExecutable(name string) bool {
 func isFakeSSHExecutable(name string) bool {
 	base := filepath.Base(name)
 	return base == "ssh" || base == "ssh.exe"
+}
+
+func TestRuntime(t *testing.T) {
+	t.Parallel()
+	t.Run("set", func(t *testing.T) {
+		t.Parallel()
+		t.Run("valid", func(t *testing.T) {
+			t.Parallel()
+			for _, want := range []Runtime{RuntimeAuto, RuntimeDocker, RuntimePodman} {
+				var got Runtime
+				if err := got.Set(want.String()); err != nil {
+					t.Fatalf("Set(%q): %v", want, err)
+				}
+				if got != want {
+					t.Fatalf("Set(%q) = %q, want %q", want, got, want)
+				}
+			}
+		})
+		t.Run("error", func(t *testing.T) {
+			t.Parallel()
+			got := RuntimeDocker
+			if err := got.Set("invalid"); err == nil {
+				t.Fatal("Set(invalid) succeeded")
+			}
+			if got != RuntimeDocker {
+				t.Fatalf("runtime changed to %q after invalid Set", got)
+			}
+		})
+	})
+	t.Run("flag", func(t *testing.T) {
+		t.Parallel()
+		t.Run("valid", func(t *testing.T) {
+			t.Parallel()
+			var selected Runtime
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			fs.SetOutput(io.Discard)
+			fs.Var(&selected, "runtime", "workspace runtime")
+			if err := fs.Parse([]string{"--runtime=podman"}); err != nil {
+				t.Fatalf("parse valid runtime: %v", err)
+			}
+			if selected != RuntimePodman {
+				t.Fatalf("runtime = %q, want %q", selected, RuntimePodman)
+			}
+		})
+		t.Run("error", func(t *testing.T) {
+			t.Parallel()
+			var selected Runtime
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			fs.SetOutput(io.Discard)
+			fs.Var(&selected, "runtime", "workspace runtime")
+			if err := fs.Parse([]string{"--runtime=invalid"}); err == nil || !strings.Contains(err.Error(), "invalid runtime") {
+				t.Fatalf("parse invalid runtime error = %v, want invalid runtime", err)
+			}
+		})
+	})
+	t.Run("valid", func(t *testing.T) {
+		t.Parallel()
+		for _, rt := range []Runtime{RuntimeAuto, RuntimeDocker, RuntimePodman} {
+			if !rt.Valid() {
+				t.Errorf("%q.Valid() = false, want true", rt)
+			}
+		}
+	})
+	t.Run("error", func(t *testing.T) {
+		t.Parallel()
+		invalid := Runtime("invalid")
+		if invalid.Valid() {
+			t.Error("invalid.Valid() = true, want false")
+		}
+	})
 }
 
 func TestSanitizeDockerName(t *testing.T) {
