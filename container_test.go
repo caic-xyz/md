@@ -4805,3 +4805,132 @@ func TestResolveMountPaths(t *testing.T) {
 		})
 	})
 }
+
+func TestParseDotenv(t *testing.T) {
+	t.Parallel()
+	t.Run("valid", func(t *testing.T) {
+		t.Parallel()
+		data := "\ufeff" + strings.Join([]string{
+			"# comment",
+			"",
+			"ADB_MDNS_OPENSCREEN=0",
+			"GEMINI_API_KEY = \"AIza secret\"",
+			"GRADLE_OPTS = \"-Dorg.gradle.daemon=false\"",
+			"OPENROUTER_API_KEY=sk-or-v1",
+			"ASK_MODEL='qwen3-8-27b'",
+			"export MODE=production",
+			"WITH_COMMENT=value # note",
+			"WITH_HASH=va#lue",
+			"EMPTY=",
+			`ESCAPED="line1\nline2"`,
+			`EXPANDED="$HOME/bin:$PATH"`,
+			"PLAIN=$HOME/bin",
+			"LITERAL='$HOME/bin'",
+		}, "\n")
+		lines := parseDotenv([]byte(data))
+		want := []string{
+			"# comment",
+			"ADB_MDNS_OPENSCREEN='0'",
+			"GEMINI_API_KEY='AIza secret'",
+			"GRADLE_OPTS='-Dorg.gradle.daemon=false'",
+			"OPENROUTER_API_KEY='sk-or-v1'",
+			"ASK_MODEL='qwen3-8-27b'",
+			"MODE='production'",
+			"WITH_COMMENT='value'",
+			"WITH_HASH='va#lue'",
+			"EMPTY=''",
+			"ESCAPED='line1\nline2'",
+			`EXPANDED="$HOME/bin:$PATH"`,
+			"PLAIN=$HOME/bin",
+			"LITERAL='$HOME/bin'",
+		}
+		if !slices.Equal(lines, want) {
+			t.Errorf("parseDotenv() = %q, want %q", lines, want)
+		}
+	})
+	t.Run("error", func(t *testing.T) {
+		t.Parallel()
+		data := strings.Join([]string{
+			"NO_EQUALS",
+			"1BAD=value",
+			"=value",
+			`UNTERMINATED="value`,
+			"UNTERMINATED_SINGLE='value",
+			`TRAILING="value" junk`,
+		}, "\n")
+		if lines := parseDotenv([]byte(data)); len(lines) != 0 {
+			t.Errorf("parseDotenv() = %q, want none", lines)
+		}
+	})
+}
+
+func TestEnvFileContent(t *testing.T) {
+	t.Parallel()
+	first := t.TempDir()
+	second := t.TempDir()
+	empty := t.TempDir()
+	if err := os.WriteFile(filepath.Join(first, ".env"), []byte("A = \"1\"\nBAD\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(second, ".env"), []byte("B=2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	content, err := envFileContent([]string{first, second, empty}, []string{"C=c'c", "D="})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "A='1'\nB='2'\nC='c'\\''c'\nunset D\n"
+	if string(content) != want {
+		t.Errorf("envFileContent() = %q, want %q", content, want)
+	}
+
+	missing, err := envFileContent([]string{empty}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if missing != nil {
+		t.Errorf("envFileContent() = %q, want no content", missing)
+	}
+}
+
+// TestEnvFileContentSourced verifies the generated content is valid shell and
+// that dotenv values survive sourcing, including the space-padded assignment
+// that used to make the container print a shell diagnostic on every command.
+func TestEnvFileContentSourced(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	source := strings.Join([]string{
+		"# comment",
+		`GEMINI_API_KEY = "AIzaSyTEST"`,
+		`A = "hello world"`,
+		`B="it's"`,
+		"EMPTY=",
+		"WITH_COMMENT=value # note",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	content, err := envFileContent([]string{dir}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	generated := filepath.Join(t.TempDir(), "generated.env")
+	if err := os.WriteFile(generated, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	script := ". " + shellQuote(generated) + ` && printf '%s\n%s\n%s\n%s' "$GEMINI_API_KEY" "$A" "$B" "$WITH_COMMENT"`
+	cmd := exec.CommandContext(t.Context(), "bash", "-c", script) //nolint:gosec // script is generated from test literals.
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("sourcing generated .env: %v: %s", err, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("sourcing generated .env printed %q, want nothing", stderr.String())
+	}
+	want := "AIzaSyTEST\nhello world\nit's\nvalue"
+	if string(out) != want {
+		t.Errorf("sourced variables = %q, want %q", out, want)
+	}
+}

@@ -2487,26 +2487,13 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 	sshCommandDeadline := time.Now().Add(containerSSHCommandRetryTimeout)
 
 	// Send .env into the forked container.
-	var envContent []byte
+	roots := make([]string, len(forkRepos))
 	for i := range forkRepos {
-		data, err := os.ReadFile(filepath.Join(forkRepos[i].GitRoot, ".env"))
-		if err != nil {
-			continue
-		}
-		if len(envContent) > 0 && envContent[len(envContent)-1] != '\n' {
-			envContent = append(envContent, '\n')
-		}
-		envContent = append(envContent, data...)
+		roots[i] = forkRepos[i].GitRoot
 	}
-	if len(startOpts.ExtraEnv) > 0 {
-		extraEnv, err := renderExtraEnv(startOpts.ExtraEnv)
-		if err != nil {
-			return nil, err
-		}
-		if len(envContent) > 0 && envContent[len(envContent)-1] != '\n' {
-			envContent = append(envContent, '\n')
-		}
-		envContent = append(envContent, extraEnv...)
+	envContent, err := envFileContent(roots, startOpts.ExtraEnv)
+	if err != nil {
+		return nil, err
 	}
 	sshEnvArgs := fork.SSHCommand(nil, "cat > /home/user/.env")
 	fork.Logger.Log(ctx, slog.LevelDebug, "ssh", "cmd", sshEnvArgs)
@@ -4284,32 +4271,196 @@ func shellSingleQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
 }
 
-// sendEnv combines per-repo .env files and extra environment updates from
-// opts, then copies them into the container at /home/user/.env.
-func (c *Container) sendEnv(ctx context.Context, stdout io.Writer, opts *StartOpts) error {
-	var envContent []byte
-	for i := range c.Repos {
-		data, err := os.ReadFile(filepath.Join(c.Repos[i].GitRoot, ".env"))
-		if err != nil {
+// envFileContent assembles the content written to the container's ~/.env from
+// each repository's .env file followed by the extra environment entries.
+//
+// Repository files are parsed as dotenv and re-emitted as shell-safe lines,
+// because the container sources the result through BASH_ENV on every shell. A
+// value a dotenv reader accepts as `KEY = "value"` is not valid shell, so
+// copying the file verbatim makes every command in the container print a
+// "command not found" diagnostic. Lines that cannot be represented are skipped.
+func envFileContent(roots, extraEnv []string) (content []byte, err error) {
+	var buf bytes.Buffer
+	for _, root := range roots {
+		source := filepath.Join(root, ".env")
+		data, readErr := os.ReadFile(source) //nolint:gosec // source is a repository root the user asked md to mount.
+		if readErr != nil {
 			continue
 		}
-		if len(envContent) > 0 && envContent[len(envContent)-1] != '\n' {
-			envContent = append(envContent, '\n')
+		for _, line := range parseDotenv(data) {
+			buf.WriteString(line)
+			buf.WriteByte('\n')
 		}
-		envContent = append(envContent, data...)
 	}
-	if len(opts.ExtraEnv) > 0 {
-		extraEnv, err := renderExtraEnv(opts.ExtraEnv)
-		if err != nil {
-			return err
+	if len(extraEnv) > 0 {
+		rendered, renderErr := renderExtraEnv(extraEnv)
+		if renderErr != nil {
+			return nil, renderErr
 		}
-		if len(envContent) > 0 && envContent[len(envContent)-1] != '\n' {
-			envContent = append(envContent, '\n')
+		buf.Write(rendered)
+	}
+	if buf.Len() == 0 {
+		return nil, nil
+	}
+	return buf.Bytes(), nil
+}
+
+// parseDotenv parses one .env file into shell-safe assignment lines.
+//
+// It accepts blank lines, `#` comments, an optional `export` prefix, whitespace
+// around `=`, and single- or double-quoted values. A line that does not parse is
+// skipped, because writing it verbatim would make the container print a shell
+// diagnostic on every command.
+func parseDotenv(data []byte) []string {
+	data = bytes.TrimPrefix(data, []byte("\xef\xbb\xbf"))
+	var lines []string
+	for raw := range strings.SplitSeq(string(data), "\n") {
+		line := strings.TrimSpace(strings.TrimSuffix(raw, "\r"))
+		if line == "" {
+			continue
 		}
-		envContent = append(envContent, extraEnv...)
-		if !opts.Quiet {
-			_, _ = fmt.Fprintln(stdout, "- injecting extra env vars into container ...")
+		if strings.HasPrefix(line, "#") {
+			lines = append(lines, line)
+			continue
 		}
+		name, value, ok := cutEnvAssignment(line)
+		if !ok {
+			continue
+		}
+		text, quote, ok := parseEnvValue(value)
+		if !ok {
+			continue
+		}
+		if quote {
+			text = shellSingleQuote(text)
+		}
+		lines = append(lines, name+"="+text)
+	}
+	return lines
+}
+
+// cutEnvAssignment splits a dotenv line into its variable name and raw value.
+// It accepts an optional `export` prefix and whitespace around `=`.
+func cutEnvAssignment(line string) (name, value string, ok bool) {
+	rest, _ := strings.CutPrefix(line, "export")
+	if rest != line && (rest == "" || rest[0] == ' ' || rest[0] == '\t') {
+		line = strings.TrimLeft(rest, " \t")
+	}
+	idx := strings.IndexByte(line, '=')
+	if idx < 0 {
+		return "", "", false
+	}
+	name = strings.TrimSpace(line[:idx])
+	if !validExtraEnvName(name) {
+		return "", "", false
+	}
+	return name, strings.TrimLeft(line[idx+1:], " \t"), true
+}
+
+// parseEnvValue extracts the value of a dotenv assignment. It returns the text
+// to write and whether that text must be shell-quoted as a literal.
+//
+// A single-quoted value is always literal. A double-quoted or unquoted value
+// that references a variable or runs a command is passed through so the shell
+// expands it, matching how the file was sourced before parsing; everything else
+// is quoted so a value a dotenv reader accepts cannot reach the shell verbatim.
+// The ok result reports whether the value is well formed.
+func parseEnvValue(value string) (text string, quote, ok bool) {
+	if value == "" {
+		return "", true, true
+	}
+	switch value[0] {
+	case '\'':
+		end := strings.IndexByte(value[1:], '\'')
+		if end < 0 || !envTrailingComment(value[end+2:]) {
+			return "", false, false
+		}
+		return value[1 : end+1], true, true
+	case '"':
+		text, ok := parseDoubleQuotedEnv(value)
+		if !ok {
+			return "", false, false
+		}
+		if strings.ContainsAny(text, "$`") {
+			return value, false, true
+		}
+		return text, true, true
+	default:
+		text := strings.TrimRight(stripEnvComment(value), " \t")
+		if strings.ContainsAny(text, "$`") {
+			return text, false, true
+		}
+		return text, true, true
+	}
+}
+
+// parseDoubleQuotedEnv unescapes a double-quoted dotenv value.
+func parseDoubleQuotedEnv(value string) (string, bool) {
+	var b strings.Builder
+	for i := 1; i < len(value); i++ {
+		switch c := value[i]; c {
+		case '\\':
+			if i+1 >= len(value) {
+				return "", false
+			}
+			i++
+			switch value[i] {
+			case 'n':
+				b.WriteByte('\n')
+			case 'r':
+				b.WriteByte('\r')
+			case 't':
+				b.WriteByte('\t')
+			case '"', '\\', '$':
+				b.WriteByte(value[i])
+			default:
+				b.WriteByte('\\')
+				b.WriteByte(value[i])
+			}
+		case '"':
+			if !envTrailingComment(value[i+1:]) {
+				return "", false
+			}
+			return b.String(), true
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return "", false
+}
+
+// envTrailingComment reports whether the text after a closing quote is only
+// whitespace or a `#` comment.
+func envTrailingComment(s string) bool {
+	s = strings.TrimSpace(s)
+	return s == "" || strings.HasPrefix(s, "#")
+}
+
+// stripEnvComment removes an unquoted inline comment. A `#` starts a comment
+// only at the start of the value or after whitespace.
+func stripEnvComment(s string) string {
+	for i := range len(s) {
+		if s[i] == '#' && (i == 0 || s[i-1] == ' ' || s[i-1] == '\t') {
+			return s[:i]
+		}
+	}
+	return s
+}
+
+// sendEnv assembles the per-repo .env files and the extra environment updates
+// from opts, then copies them into the container at /home/user/.env.
+// Repository files are parsed as dotenv and written as shell-safe lines.
+func (c *Container) sendEnv(ctx context.Context, stdout io.Writer, opts *StartOpts) error {
+	roots := make([]string, len(c.Repos))
+	for i := range c.Repos {
+		roots[i] = c.Repos[i].GitRoot
+	}
+	envContent, err := envFileContent(roots, opts.ExtraEnv)
+	if err != nil {
+		return err
+	}
+	if len(opts.ExtraEnv) > 0 && !opts.Quiet {
+		_, _ = fmt.Fprintln(stdout, "- injecting extra env vars into container ...")
 	}
 	if len(envContent) == 0 {
 		// No repo .env and no extra env means there is nothing to copy into the
