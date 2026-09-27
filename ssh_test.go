@@ -62,7 +62,7 @@ func TestWriteSSHConfigControlMaster(t *testing.T) {
 	}
 	for _, line := range []string{
 		"  ControlMaster auto\n",
-		"  ControlPath /tmp/md-md-test.sock\n",
+		"  ControlPath " + filepath.ToSlash(filepath.Join(os.TempDir(), "md-md-test.sock")) + "\n",
 		"  ControlPersist 5s\n",
 	} {
 		if !strings.Contains(string(data), line) {
