@@ -413,14 +413,13 @@ start_sshd() {
   chmod 0400 "$MD_HOME/.ssh/authorized_keys"
   find /etc/ssh -maxdepth 1 -type f -name 'ssh_host_*_key' -exec chown root:root {} + -exec chmod 0600 {} +
   find /etc/ssh -maxdepth 1 -type f -name 'ssh_host_*_key.pub' -exec chown root:root {} + -exec chmod 0644 {} +
-  # Prefer the image's init script; fall back to running sshd itself, which is
-  # all the daemon needs.
-  if [ -x /etc/init.d/ssh ] && command -v service >/dev/null 2>&1 && service ssh start; then
-    return
-  fi
-  if ! "$SSHD_BIN"; then
+  # Command-line options override foreign base-image defaults consistently.
+  # MaxStartups covers non-multiplexed clients; MaxSessions covers channels on
+  # caic's shared ControlMaster connection.
+  local -a sshd_args=(-o 'MaxStartups=64:30:128' -o 'MaxSessions=64')
+  if ! "$SSHD_BIN" "${sshd_args[@]}"; then
     log "ERROR: sshd failed to start:"
-    "$SSHD_BIN" -t -e || true
+    "$SSHD_BIN" -t -e "${sshd_args[@]}" || true
     exit 1
   fi
 }

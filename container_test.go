@@ -24,6 +24,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -47,6 +48,77 @@ func runTestGit(t *testing.T, ctx context.Context, wd string, args ...string) st
 		t.Fatalf("git %s: %v: %s", strings.Join(args, " "), err, stderr.String())
 	}
 	return strings.TrimSpace(string(out))
+}
+
+func TestProvisionRepositoriesCapsConcurrency(t *testing.T) {
+	t.Parallel()
+	const repoCount = maxConcurrentRepoProvisioning + 8
+	var active atomic.Int32
+	var peak atomic.Int32
+	started := make(chan struct{}, maxConcurrentRepoProvisioning)
+	release := make(chan struct{})
+	done := make(chan error, 1)
+
+	go func() {
+		done <- provisionRepositories(t.Context(), repoCount, func(ctx context.Context, _ int) error {
+			current := active.Add(1)
+			for {
+				previous := peak.Load()
+				if current <= previous || peak.CompareAndSwap(previous, current) {
+					break
+				}
+			}
+			started <- struct{}{}
+			select {
+			case <-release:
+				active.Add(-1)
+				return nil
+			case <-ctx.Done():
+				active.Add(-1)
+				return ctx.Err()
+			}
+		})
+	}()
+
+	for range maxConcurrentRepoProvisioning {
+		<-started
+	}
+	if got := active.Load(); got != maxConcurrentRepoProvisioning {
+		t.Fatalf("active provisioning operations = %d, want %d", got, maxConcurrentRepoProvisioning)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if got := peak.Load(); got != maxConcurrentRepoProvisioning {
+		t.Fatalf("peak provisioning operations = %d, want %d", got, maxConcurrentRepoProvisioning)
+	}
+}
+
+func BenchmarkProvisionRepositories17(b *testing.B) {
+	b.Run("dispatch", func(b *testing.B) {
+		b.ReportAllocs()
+		ctx := b.Context()
+		for b.Loop() {
+			if err := provisionRepositories(ctx, 17, func(context.Context, int) error {
+				return nil
+			}); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	b.Run("simulated_io", func(b *testing.B) {
+		b.ReportAllocs()
+		ctx := b.Context()
+		for b.Loop() {
+			if err := provisionRepositories(ctx, 17, func(context.Context, int) error {
+				time.Sleep(time.Millisecond)
+				return nil
+			}); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
 }
 
 func sameTestPath(a, b string) bool {

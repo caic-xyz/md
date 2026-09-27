@@ -53,8 +53,9 @@ const (
 	// gitDiffCommand reserves this remote exit status so Container.Diff can
 	// distinguish differences from command failures, including failures that
 	// happen to exit with Git's ordinary difference status of 1.
-	diffFoundSSHExitCode = 79
-	maxPushRefspecBytes  = 16 * 1024
+	diffFoundSSHExitCode          = 79
+	maxPushRefspecBytes           = 16 * 1024
+	maxConcurrentRepoProvisioning = 32
 )
 
 // Values for the "md.image_type" label, which tags md-built images with their
@@ -4182,41 +4183,37 @@ func (c *Container) provisionContainer(ctx context.Context, stdout, stderr io.Wr
 		if !opts.Quiet {
 			_, _ = fmt.Fprintln(stdout, "- git clone into container ...")
 		}
-		eg, egCtx := errgroup.WithContext(ctx)
-		for repoIdx := range c.Repos {
-			eg.Go(func() error {
-				r := &c.Repos[repoIdx]
-				mp := shellQuote(r.ContainerPath)
+		if err := provisionRepositories(ctx, len(c.Repos), func(egCtx context.Context, repoIdx int) error {
+			r := &c.Repos[repoIdx]
+			mp := shellQuote(r.ContainerPath)
 
-				if err := c.runCmdOut(egCtx, "", c.SSHCommand(nil, "git init -q "+mp), stdout, stderr); err != nil {
-					return fmt.Errorf("init repo %s in container: %w", r.ContainerPath, err)
-				}
-				if err := r.resolveDefaults(egCtx, c.Logger); err != nil {
-					return fmt.Errorf("resolve defaults for %s: %w", r.ContainerPath, err)
-				}
-				bases, err := c.pushMappedBranchRefs(egCtx, stdout, stderr, r)
-				if err != nil {
-					return fmt.Errorf("push repo %s: %w", r.ContainerPath, err)
-				}
-				remoteURL, _ := c.runCmd(egCtx, r.GitRoot, []string{"git", "remote", "get-url", r.DefaultRemote})
-				httpsURL := convertGitURLToHTTPS(remoteURL)
-				if !opts.Quiet && httpsURL != "" {
-					_, _ = fmt.Fprintf(stdout, "- Set %s %s to %s\n", r.ContainerPath, r.DefaultRemote, httpsURL)
-				}
-				if err := c.configureContainerRemotes(egCtx, stdout, stderr, repoIdx, true, containerBranchSetupCommands(bases)...); err != nil {
-					return err
-				}
-				if err := c.recordHostBranchSyncPoints(egCtx, r); err != nil {
-					return err
-				}
+			if err := c.runCmdOut(egCtx, "", c.SSHCommand(nil, "git init -q "+mp), stdout, stderr); err != nil {
+				return fmt.Errorf("init repo %s in container: %w", r.ContainerPath, err)
+			}
+			if err := r.resolveDefaults(egCtx, c.Logger); err != nil {
+				return fmt.Errorf("resolve defaults for %s: %w", r.ContainerPath, err)
+			}
+			bases, err := c.pushMappedBranchRefs(egCtx, stdout, stderr, r)
+			if err != nil {
+				return fmt.Errorf("push repo %s: %w", r.ContainerPath, err)
+			}
+			remoteURL, _ := c.runCmd(egCtx, r.GitRoot, []string{"git", "remote", "get-url", r.DefaultRemote})
+			httpsURL := convertGitURLToHTTPS(remoteURL)
+			if !opts.Quiet && httpsURL != "" {
+				_, _ = fmt.Fprintf(stdout, "- Set %s %s to %s\n", r.ContainerPath, r.DefaultRemote, httpsURL)
+			}
+			if err := c.configureContainerRemotes(egCtx, stdout, stderr, repoIdx, true, containerBranchSetupCommands(bases)...); err != nil {
+				return err
+			}
+			if err := c.recordHostBranchSyncPoints(egCtx, r); err != nil {
+				return err
+			}
 
-				if err := c.pushSubmodules(egCtx, stdout, stderr, r.ContainerPath, r.GitRoot, r.TagRegexp, opts.Quiet); err != nil {
-					return fmt.Errorf("push submodules for %s: %w", r.ContainerPath, err)
-				}
-				return nil
-			})
-		}
-		if err := eg.Wait(); err != nil {
+			if err := c.pushSubmodules(egCtx, stdout, stderr, r.ContainerPath, r.GitRoot, r.TagRegexp, opts.Quiet); err != nil {
+				return fmt.Errorf("push submodules for %s: %w", r.ContainerPath, err)
+			}
+			return nil
+		}); err != nil {
 			return nil, err
 		}
 	}
@@ -4228,6 +4225,19 @@ func (c *Container) provisionContainer(ctx context.Context, stdout, stderr io.Wr
 	}
 
 	return result, nil
+}
+
+// provisionRepositories runs independent repository setup operations with a
+// bounded fan-out so large workspaces cannot exhaust SSH server capacity.
+func provisionRepositories(ctx context.Context, count int, provision func(context.Context, int) error) error {
+	eg, egCtx := errgroup.WithContext(ctx)
+	eg.SetLimit(maxConcurrentRepoProvisioning)
+	for repoIdx := range count {
+		eg.Go(func() error {
+			return provision(egCtx, repoIdx)
+		})
+	}
+	return eg.Wait()
 }
 
 func renderExtraEnv(entries []string) ([]byte, error) {

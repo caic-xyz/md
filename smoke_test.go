@@ -1231,6 +1231,17 @@ func TestSmoke(t *testing.T) {
 						}
 					}
 
+					sshdCommand, err := client.Runtime.Run(t.Context(), "", "exec", ct.Name, "bash", "-lc",
+						`pid=$(</run/sshd.pid); tr '\0' '\n' <"/proc/$pid/cmdline"`)
+					if err != nil {
+						t.Fatalf("reading sshd command line: %v", err)
+					}
+					for _, want := range []string{"MaxSessions=64", "MaxStartups=64:30:128"} {
+						if !strings.Contains(sshdCommand, want) {
+							t.Errorf("sshd command line does not contain %q:\n%s", want, sshdCommand)
+						}
+					}
+
 					// Docker passes the host UID/GID through, rootless Podman and a root
 					// host leave the account at the fixed contract identity.
 					wantUID, wantGID := smokeContainerUser(t, client)

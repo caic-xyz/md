@@ -8,6 +8,7 @@ package md
 
 import (
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -46,6 +47,58 @@ func TestWriteSSHConfig(t *testing.T) {
 		"  RekeyLimit 16G\n"
 	if string(data) != want {
 		t.Fatalf("config = %q, want %q", data, want)
+	}
+}
+
+func TestWriteSSHConfigControlMaster(t *testing.T) {
+	t.Parallel()
+	configDir := t.TempDir()
+	if err := writeSSHConfig(configDir, "md-test", 2222, "identity", "known-hosts", true); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(configDir, "md-test.conf")) //nolint:gosec // path is under t.TempDir.
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range []string{
+		"  ControlMaster auto\n",
+		"  ControlPath /tmp/md-md-test.sock\n",
+		"  ControlPersist 5s\n",
+	} {
+		if !strings.Contains(string(data), line) {
+			t.Errorf("config is missing %q", line)
+		}
+	}
+}
+
+func TestCleanupControlSocketRemovesStaleSocket(t *testing.T) {
+	t.Parallel()
+	f, err := os.CreateTemp(t.TempDir(), "md-cleanup-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	containerName := strings.TrimPrefix(filepath.Base(f.Name()), "md-")
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(f.Name()); err != nil {
+		t.Fatal(err)
+	}
+	sock := controlSocketPath(containerName)
+	if err := os.WriteFile(sock, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Remove(sock); err != nil && !os.IsNotExist(err) {
+			t.Error(err)
+		}
+	})
+	client := &Client{Logger: slog.New(slog.DiscardHandler)}
+	if err := cleanupControlSocket(t.Context(), client, containerName); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(sock); !os.IsNotExist(err) {
+		t.Fatalf("stale control socket still exists: %v", err)
 	}
 }
 
