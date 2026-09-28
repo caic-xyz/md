@@ -1,8 +1,12 @@
 #!/bin/bash
-# Rejects unexpected binary files and checks the file index.
+# Runs focused checks against the staged snapshot.
 
 set -euo pipefail
 
-python3 scripts/lint_binaries.py
+script_dir="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+readonly script_dir
+repo_root="$(CDPATH='' cd -- "$script_dir/../.." && pwd)"
+readonly repo_root
 
-python3 scripts/update_agents_file_index.py --check
+cd -- "$repo_root"
+./scripts/check-staged.sh
