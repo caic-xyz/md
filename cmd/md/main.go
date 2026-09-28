@@ -40,6 +40,8 @@ import (
 	"github.com/caic-xyz/md/git"
 )
 
+const defaultOOMScoreAdj = "200"
+
 func main() {
 	if err := mainImpl(); err != nil {
 		ec, ok := errors.AsType[*exitCodeError](err)
@@ -616,7 +618,7 @@ func (a *app) cmdStart(ctx context.Context, args []string) error {
 		Quiet:            *quiet,
 		ExtraEnv:         extraEnv,
 		MaxCPUs:          *cpus,
-		ExtraRunArgs:     dockerFlags.values,
+		ExtraRunArgs:     dockerFlags.withDefaultOOMScoreAdj(),
 	}
 	switch ct.Status(ctx) {
 	case "exited", "stopped":
@@ -784,7 +786,7 @@ func (a *app) cmdRun(ctx context.Context, args []string) error {
 		Quiet:        true,
 		ExtraEnv:     extraEnv,
 		MaxCPUs:      *cpus,
-		ExtraRunArgs: dockerFlags.values,
+		ExtraRunArgs: dockerFlags.withDefaultOOMScoreAdj(),
 	}
 	exitCode, err := runTemporaryContainer(ctx, ct, os.Stdout, os.Stderr, extra, &opts, *applyPatch)
 	if err != nil {
@@ -1498,7 +1500,7 @@ func (a *app) cmdFork(ctx context.Context, args []string) error {
 		ExtraEnv:     extraEnv,
 		Mounts:       mounts,
 		MaxCPUs:      *cpus,
-		ExtraRunArgs: dockerFlags.values,
+		ExtraRunArgs: dockerFlags.withDefaultOOMScoreAdj(),
 	}
 	fork, err := sourceCt.Fork(ctx, os.Stdout, os.Stderr, &opts)
 	if err != nil {
@@ -2014,6 +2016,15 @@ func (s *shellSplitSlice) Set(v string) error {
 	}
 	s.values = append(s.values, args...)
 	return nil
+}
+
+func (s *shellSplitSlice) withDefaultOOMScoreAdj() []string {
+	for _, arg := range s.values {
+		if arg == "--oom-score-adj" || strings.HasPrefix(arg, "--oom-score-adj=") {
+			return s.values
+		}
+	}
+	return append([]string{"--oom-score-adj", defaultOOMScoreAdj}, s.values...)
 }
 
 // shellSplit splits a string into words following shell quoting rules

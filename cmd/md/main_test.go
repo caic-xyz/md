@@ -1054,3 +1054,25 @@ func TestShellSplit(t *testing.T) {
 		}
 	})
 }
+
+func TestShellSplitSlice(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name   string
+		values []string
+		want   []string
+	}{
+		{name: "default", want: []string{"--oom-score-adj", "200"}},
+		{name: "unrelated", values: []string{"--pids-limit", "4096"}, want: []string{"--oom-score-adj", "200", "--pids-limit", "4096"}},
+		{name: "separate_override", values: []string{"--oom-score-adj", "300"}, want: []string{"--oom-score-adj", "300"}},
+		{name: "equals_override", values: []string{"--oom-score-adj=300"}, want: []string{"--oom-score-adj=300"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			flags := shellSplitSlice{values: test.values}
+			if got := flags.withDefaultOOMScoreAdj(); !slices.Equal(got, test.want) {
+				t.Errorf("withDefaultOOMScoreAdj() = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
