@@ -6,9 +6,9 @@ A file to [guide coding agents](https://agents.md/).
 
 - Run `make fix`, then `make verify` before handing off. `make fix` applies every autofix and refreshes the
   file index; `make verify` is the read-only gate (also run by CI and the pre-push hook) re-checking gofmt,
-  `ruff format`, `ruff check`, `pylint`, `shfmt`, `shellcheck`, and the binary and file-index checks;
+  `ruff format`, `ruff check`, `pylint`, `shfmt`, `shellcheck`, license headers, and the binary and file-index checks;
   `.editorconfig` is the source of truth for indentation and width.
-- Go's `shfmt` and `golangci-lint` executables are pinned in `go.mod` and run with `go tool`.
+- Go's `shfmt`, `golangci-lint`, and `addlicense` executables are pinned in `go.mod` and run with `go tool`.
 - `make verify` runs shellcheck over the container scripts, including the executable helpers under `rsc/`
   that carry no `.sh` suffix.
 - Update this file (AGENTS.md) everytime you make a change that affects this project's requirements.

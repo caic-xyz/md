@@ -100,13 +100,8 @@ jobs:
           python-version-file: '.python-version'
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         if: runner.os == 'Linux'
-      - name: "Check: verify; golangci-lint, gofmt, pylint, ruff, shfmt, shellcheck, binary, file index (ubuntu)"
+      - run: make verify
         if: always() && runner.os == 'Linux'
-        run: make verify
-      - name: "go install necessary tools (ubuntu)"
-        if: always() && matrix.os == 'ubuntu-latest'
-        run: |
-          go install github.com/google/addlicense@latest
       - name: "Check: no executable was committed (ubuntu)"
         if: always() && matrix.os == 'ubuntu-latest'
         # ./custom-gcl is the gitignored golangci-lint binary built by `make verify`.
@@ -115,9 +110,6 @@ jobs:
             echo 'Do not commit executables that are not scripts (missing #! shebang)'
             false
           fi
-      - name: "Check: addlicense; all sources have a license header (ubuntu)"
-        if: always() && matrix.os == 'ubuntu-latest'
-        run: addlicense -ignore "rsc/root/**" -ignore "rsc/user/**" -check .
       - name: "Check: go generate doesn't modify files"
         if: always()
         run: |

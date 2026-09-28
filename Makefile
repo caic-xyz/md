@@ -56,6 +56,7 @@ verify: tools custom-gcl
 	@ruff check --quiet .
 	@files=$$($(SHELL_SCRIPTS)); [ -z "$$files" ] || shellcheck -x $$files
 	@files=$$($(SHELL_SCRIPTS)); [ -z "$$files" ] || go tool shfmt -l $$files
+	@go tool addlicense -ignore 'rsc/root/**' -ignore 'rsc/user/**' -check .
 	@python3 scripts/lint_binaries.py
 	@python3 scripts/update_agents_file_index.py --check
 
@@ -83,7 +84,7 @@ help:
 	@echo ''
 	@echo 'Available targets:'
 	@printf '  %-14s - %s\n' 'make fix' 'Apply every autofix, then refresh the file index'
-	@printf '  %-14s - %s\n' 'make verify' 'Fast static gate: gofmt, ruff, pylint, shfmt, shellcheck, docs (pre-push gate)'
+	@printf '  %-14s - %s\n' 'make verify' 'Static gate: gofmt, ruff, pylint, shfmt, shellcheck, licenses, docs'
 	@printf '  %-14s - %s\n' 'make test' 'Run Go tests'
 	@printf '  %-14s - %s\n' 'make build' 'Build all Go packages'
 	@printf '  %-14s - %s\n' 'make git-hooks' 'Install git hooks'
