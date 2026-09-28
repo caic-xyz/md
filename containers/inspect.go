@@ -154,8 +154,8 @@ func fillPorts(ct *Container, ports string) {
 		}
 		containerPortStr, _, _ := strings.Cut(containerPart, "/")
 		hostPortStr := hostPart
-		if idx := strings.LastIndex(hostPart, ":"); idx >= 0 {
-			hostPortStr = hostPart[idx+1:]
+		if _, after, ok := strings.CutLast(hostPart, ":"); ok {
+			hostPortStr = after
 		}
 		hostPort, err := strconv.ParseInt(hostPortStr, 10, 32)
 		if err != nil {

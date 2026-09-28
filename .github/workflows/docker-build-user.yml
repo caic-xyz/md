@@ -43,7 +43,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Maximize Docker/Podman Space
         run: |
           sudo systemctl stop docker
@@ -129,7 +129,7 @@ jobs:
       REGISTRY: ghcr.io
       TRUSTED_BUILDER_NAME: "https://github.com/actions/runner/-/github.com/actions/runner"
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: docker/metadata-action@v6
         id: meta
         with:

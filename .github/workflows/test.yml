@@ -26,10 +26,10 @@ jobs:
       - name: Turn off git core.autocrlf
         if: matrix.os == 'windows-latest'
         run: git config --global core.autocrlf false
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 2
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
       - name: "go install necessary tools"
@@ -50,7 +50,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: go test -timeout=600s -covermode=count -coverprofile coverage.txt -bench=. -benchtime=1x ./...
         # Don't send code coverage if anything failed to reduce spam.
-      - uses: codecov/codecov-action@v6
+      - uses: codecov/codecov-action@v7
         with:
           token: ${{secrets.CODECOV_TOKEN}}
       - name: "Cleanup"
@@ -89,16 +89,16 @@ jobs:
       - name: Turn off git core.autocrlf
         if: matrix.os == 'windows-latest'
         run: git config --global core.autocrlf false
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         if: runner.os == 'Linux'
         with:
           python-version-file: '.python-version'
-      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         if: runner.os == 'Linux'
       - name: "Check: verify; golangci-lint, gofmt, pylint, ruff, shfmt, shellcheck, binary, file index (ubuntu)"
         if: always() && runner.os == 'Linux'
@@ -171,8 +171,8 @@ jobs:
           sudo chown "$USER:$USER" /mnt/go-test-tmp
           mkdir -p ~/.local/share
           ln -s /mnt/user-containers ~/.local/share/containers
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
       - name: "Check: go test -tags=smoke (short)"
@@ -180,7 +180,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TMPDIR: /mnt/go-test-tmp
         run: go test -tags=smoke -run 'TestSmoke/${{matrix.runtime}}$' -short -v -timeout 30m -covermode=count -coverprofile coverage_smoke.txt
-      - uses: codecov/codecov-action@v6
+      - uses: codecov/codecov-action@v7
         with:
           token: ${{secrets.CODECOV_TOKEN}}
           files: coverage_smoke.txt
@@ -197,8 +197,8 @@ jobs:
     permissions:
       security-events: write
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
       - uses: github/codeql-action/init@v4

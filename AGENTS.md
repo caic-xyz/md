@@ -8,6 +8,7 @@ A file to [guide coding agents](https://agents.md/).
   file index; `make verify` is the read-only gate (also run by CI and the pre-push hook) re-checking gofmt,
   `ruff format`, `ruff check`, `pylint`, `shfmt`, `shellcheck`, and the binary and file-index checks;
   `.editorconfig` is the source of truth for indentation and width.
+- Go's `shfmt` and `golangci-lint` executables are pinned in `go.mod` and run with `go tool`.
 - `make verify` runs shellcheck over the container scripts, including the executable helpers under `rsc/`
   that carry no `.sh` suffix.
 - Update this file (AGENTS.md) everytime you make a change that affects this project's requirements.
@@ -31,7 +32,7 @@ Pre-commit rejects binary executables and stale file indexes; commit-msg require
 a blank separator before any body, and message lines no longer than 120 characters, and rejects
 `Co-authored-by:` trailers; pre-push only allows the checked-out commit (deleting a remote ref
 is the exception), rejecting dirty worktrees, unexpected binary files, WIP commits, and
-multi-commit pushes to `main`, then runs `golangci-lint run ./...`.
+multi-commit pushes to `main`, then runs `make verify`.
 
 ## Smoke Tests
 

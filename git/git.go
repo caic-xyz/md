@@ -430,11 +430,10 @@ func (c *Checkout) ListSubmodules(ctx context.Context) ([]Submodule, error) {
 		if !fieldOK {
 			continue
 		}
-		dot := strings.LastIndex(after, ".")
-		if dot < 0 {
+		name, field, ok := strings.CutLast(after, ".")
+		if !ok {
 			continue
 		}
-		name, field := after[:dot], after[dot+1:]
 		if field != "path" {
 			continue
 		}
