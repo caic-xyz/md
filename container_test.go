@@ -50,12 +50,11 @@ func runTestGit(t *testing.T, ctx context.Context, wd string, args ...string) st
 	return strings.TrimSpace(string(out))
 }
 
-func TestProvisionRepositoriesCapsConcurrency(t *testing.T) {
-	t.Parallel()
+func TestProvisionRepositoriesCapsConcurrency(t *testing.T) { //nolint:paralleltest // Shares the package-global provisioning semaphore.
 	const repoCount = maxConcurrentRepoProvisioning + 8
 	var active atomic.Int32
 	var peak atomic.Int32
-	started := make(chan struct{}, maxConcurrentRepoProvisioning)
+	started := make(chan struct{}, repoCount)
 	release := make(chan struct{})
 	done := make(chan error, 1)
 
@@ -89,6 +88,53 @@ func TestProvisionRepositoriesCapsConcurrency(t *testing.T) {
 	close(release)
 	if err := <-done; err != nil {
 		t.Fatal(err)
+	}
+	if got := peak.Load(); got != maxConcurrentRepoProvisioning {
+		t.Fatalf("peak provisioning operations = %d, want %d", got, maxConcurrentRepoProvisioning)
+	}
+}
+
+func TestProvisionRepositoriesCapsConcurrencyAcrossContainers(t *testing.T) { //nolint:paralleltest // Shares the package-global provisioning semaphore.
+	var active atomic.Int32
+	var peak atomic.Int32
+	started := make(chan struct{}, 2*maxConcurrentRepoProvisioning)
+	release := make(chan struct{})
+	done := make(chan error, 2)
+	provision := func(ctx context.Context, _ int) error {
+		current := active.Add(1)
+		for {
+			previous := peak.Load()
+			if current <= previous || peak.CompareAndSwap(previous, current) {
+				break
+			}
+		}
+		started <- struct{}{}
+		select {
+		case <-release:
+			active.Add(-1)
+			return nil
+		case <-ctx.Done():
+			active.Add(-1)
+			return ctx.Err()
+		}
+	}
+	for range 2 {
+		go func() {
+			done <- provisionRepositories(t.Context(), maxConcurrentRepoProvisioning, provision)
+		}()
+	}
+
+	for range maxConcurrentRepoProvisioning {
+		<-started
+	}
+	if got := active.Load(); got != maxConcurrentRepoProvisioning {
+		t.Fatalf("active provisioning operations = %d, want %d", got, maxConcurrentRepoProvisioning)
+	}
+	close(release)
+	for range 2 {
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
 	}
 	if got := peak.Load(); got != maxConcurrentRepoProvisioning {
 		t.Fatalf("peak provisioning operations = %d, want %d", got, maxConcurrentRepoProvisioning)

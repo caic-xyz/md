@@ -55,8 +55,10 @@ const (
 	// happen to exit with Git's ordinary difference status of 1.
 	diffFoundSSHExitCode          = 79
 	maxPushRefspecBytes           = 16 * 1024
-	maxConcurrentRepoProvisioning = 32
+	maxConcurrentRepoProvisioning = 4
 )
+
+var repoProvisionSlots = make(chan struct{}, maxConcurrentRepoProvisioning)
 
 // Values for the "md.image_type" label, which tags md-built images with their
 // role so they can be found for pruning, including after they are untagged.
@@ -4234,6 +4236,12 @@ func provisionRepositories(ctx context.Context, count int, provision func(contex
 	eg.SetLimit(maxConcurrentRepoProvisioning)
 	for repoIdx := range count {
 		eg.Go(func() error {
+			select {
+			case repoProvisionSlots <- struct{}{}:
+				defer func() { <-repoProvisionSlots }()
+			case <-egCtx.Done():
+				return egCtx.Err()
+			}
 			return provision(egCtx, repoIdx)
 		})
 	}
