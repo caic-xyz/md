@@ -89,7 +89,9 @@ func (b *base) IsRootless() bool {
 
 // List returns all containers known to the runtime.
 func (b *base) List(ctx context.Context) ([]Container, error) {
-	out, err := b.Run(ctx, "", "ps", "--all", "--no-trunc", "--format", "{{json .}}")
+	// Docker's full JSON template implicitly requests Size. Discovery does not
+	// use it, so disable the expensive container filesystem size calculation.
+	out, err := b.Run(ctx, "", "ps", "--all", "--no-trunc", "--size=false", "--format", "{{json .}}")
 	if err != nil {
 		return nil, err
 	}
