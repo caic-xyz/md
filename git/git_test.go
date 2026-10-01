@@ -7,6 +7,7 @@
 package git
 
 import (
+	"crypto/rand"
 	"errors"
 	"log/slog"
 	"os"
@@ -756,7 +757,13 @@ func TestCheckout(t *testing.T) {
 		run("init", "-q")
 		run("config", "user.name", "Object Stats Test")
 		run("config", "user.email", "object-stats@example.test")
-		if err := os.WriteFile(filepath.Join(dir, "file.txt"), []byte("contents\n"), 0o600); err != nil {
+		// Git truncates object sizes to KiB; use incompressible content so
+		// the loose and packed sizes remain nonzero on every platform.
+		content := make([]byte, 8192)
+		if _, err := rand.Read(content); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "file.txt"), content, 0o600); err != nil {
 			t.Fatal(err)
 		}
 		run("add", "file.txt")
