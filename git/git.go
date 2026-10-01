@@ -12,10 +12,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -127,6 +129,13 @@ func RootDir(ctx context.Context, wd string, logger Logger) (*Checkout, error) {
 	}
 	g.Root = out
 	return g, nil
+}
+
+// ObjectStats describes the loose and packed objects in a Git checkout.
+type ObjectStats struct {
+	LooseCount int64
+	LooseBytes int64
+	PackBytes  int64
 }
 
 // Checkout provides git operations scoped to the repository at Root, logging via
@@ -469,6 +478,39 @@ func (c *Checkout) FindModuleDirs(ctx context.Context) ([]string, error) {
 	}
 	slices.Sort(paths)
 	return paths, nil
+}
+
+// ObjectStats reads loose-object count and object-store sizes from Git.
+// Git reports size and size-pack in KiB; the returned sizes are bytes.
+func (c *Checkout) ObjectStats(ctx context.Context) (ObjectStats, error) {
+	out, err := c.RunGit(ctx, "count-objects", "-v")
+	if err != nil {
+		return ObjectStats{}, err
+	}
+	var stats ObjectStats
+	for line := range strings.SplitSeq(out, "\n") {
+		key, value, ok := strings.Cut(line, ": ")
+		if !ok {
+			continue
+		}
+		n, err := strconv.ParseInt(value, 10, 64)
+		if err != nil || n < 0 {
+			continue
+		}
+		switch key {
+		case "count":
+			stats.LooseCount = n
+		case "size":
+			if n <= math.MaxInt64/1024 {
+				stats.LooseBytes = n * 1024
+			}
+		case "size-pack":
+			if n <= math.MaxInt64/1024 {
+				stats.PackBytes = n * 1024
+			}
+		}
+	}
+	return stats, nil
 }
 
 // cmd creates an exec.Cmd for git with LANG=C set so that output is always in

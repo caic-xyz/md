@@ -7,6 +7,7 @@
 package md
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -997,6 +998,10 @@ type StartOpts struct {
 	// Platform is the Linux container platform, e.g. "linux/amd64" or
 	// "linux/arm64". Empty means use the host's native platform.
 	Platform string
+	// GitObjectCopyMinBytes is the minimum object store size for copying Git
+	// objects into a new container before the initial push. Zero uses the
+	// default, -1 disables copying, and 1 includes every nonempty object store.
+	GitObjectCopyMinBytes int64
 	// Display enables X11/VNC virtual display (port 5901).
 	Display bool
 	// Tailscale enables Tailscale networking inside the container.
@@ -1480,6 +1485,9 @@ func checkRepoOverlap(name string, repos []Repo, existing []*Container) error {
 // container's repos have their branches set (e.g. after concurrent branch
 // allocation).
 func (c *Container) Launch(ctx context.Context, stdout, stderr io.Writer, opts *StartOpts) (retErr error) {
+	if opts.GitObjectCopyMinBytes < -1 {
+		return errors.New("GitObjectCopyMinBytes must be -1 or nonnegative")
+	}
 	// Resolve mount paths, disambiguating repos with the same basename
 	// using relative paths. After this, all MountedPaths are unique.
 	if err := resolveContainerPaths(c.Repos); err != nil {
@@ -4152,6 +4160,10 @@ done`
 // Mapped branches and default refs are pushed together to reduce latency.
 func (c *Container) provisionContainer(ctx context.Context, stdout, stderr io.Writer, opts *StartOpts) (*StartResult, error) {
 	result := &StartResult{}
+	minBytes := opts.GitObjectCopyMinBytes
+	if minBytes == 0 {
+		minBytes = 512 << 20
+	}
 
 	// Try to read the Tailscale auth URL via docker exec before SSH is up,
 	// so the user can authenticate even if SSHD is slow to start.
@@ -4192,6 +4204,10 @@ func (c *Container) provisionContainer(ctx context.Context, stdout, stderr io.Wr
 			if err := c.runCmdOut(egCtx, "", c.SSHCommand(nil, "git init -q "+mp), stdout, stderr); err != nil {
 				return fmt.Errorf("init repo %s in container: %w", r.ContainerPath, err)
 			}
+			seeded, err := seedContainerRepo(egCtx, c, r, minBytes, stdout, stderr)
+			if err != nil {
+				return err
+			}
 			if err := r.resolveDefaults(egCtx, c.Logger); err != nil {
 				return fmt.Errorf("resolve defaults for %s: %w", r.ContainerPath, err)
 			}
@@ -4210,6 +4226,11 @@ func (c *Container) provisionContainer(ctx context.Context, stdout, stderr io.Wr
 			if err := c.recordHostBranchSyncPoints(egCtx, r); err != nil {
 				return err
 			}
+			if seeded {
+				if err := clearSeedRefs(egCtx, c, r); err != nil {
+					return fmt.Errorf("clear seed refs for %s: %w", r.ContainerPath, err)
+				}
+			}
 
 			if err := c.pushSubmodules(egCtx, stdout, stderr, r.ContainerPath, r.GitRoot, r.TagRegexp, opts.Quiet); err != nil {
 				return fmt.Errorf("push submodules for %s: %w", r.ContainerPath, err)
@@ -4227,6 +4248,157 @@ func (c *Container) provisionContainer(ctx context.Context, stdout, stderr io.Wr
 	}
 
 	return result, nil
+}
+
+// seedRefPrefix namespaces temporary refs that advertise copied history to
+// the first push, so it sends only missing objects. Setup removes these refs
+// afterward; they are not container branches.
+const seedRefPrefix = "refs/md/seed/"
+
+type seedSnapshot struct {
+	objectsDir string
+	refs       string
+}
+
+// seedSource locates the common object store and snapshots refs that keep its
+// objects advertised during the initial push. An empty snapshot skips copying.
+func seedSource(ctx context.Context, gitRoot string) (seedSnapshot, error) {
+	g := &git.Checkout{Root: gitRoot}
+	objectPath, err := g.RunGit(ctx, "rev-parse", "--path-format=absolute", "--git-path", "objects")
+	if err != nil {
+		return seedSnapshot{}, err
+	}
+	objectsDir := filepath.FromSlash(objectPath)
+	if _, err := os.Stat(filepath.Join(objectsDir, "info", "alternates")); err == nil {
+		// The ordinary push resolves objects in alternates; a file copy cannot.
+		return seedSnapshot{}, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return seedSnapshot{}, err
+	}
+	out, err := g.RunGit(ctx, "for-each-ref", "--format=%(objectname) %(refname)")
+	if err != nil {
+		return seedSnapshot{}, err
+	}
+	if out == "" {
+		return seedSnapshot{}, nil
+	}
+	var refs strings.Builder
+	refs.WriteString("# pack-refs with: sorted\n")
+	for line := range strings.SplitSeq(out, "\n") {
+		oid, ref, ok := strings.Cut(line, " ")
+		if !ok || !strings.HasPrefix(ref, "refs/") {
+			return seedSnapshot{}, fmt.Errorf("invalid Git ref %q", line)
+		}
+		fmt.Fprintf(&refs, "%s %s%s\n", oid, seedRefPrefix, strings.TrimPrefix(ref, "refs/"))
+	}
+	return seedSnapshot{objectsDir: objectsDir, refs: refs.String()}, nil
+}
+
+// writeSeedTar streams the object store and temporary refs as an uncompressed
+// archive that can be extracted into a newly initialized Git repository.
+func writeSeedTar(w io.Writer, objectsDir, refs string) error {
+	tw := tar.NewWriter(w)
+	if err := filepath.WalkDir(objectsDir, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() && !info.IsDir() {
+			return fmt.Errorf("unsupported Git object entry %s", path)
+		}
+		rel, err := filepath.Rel(filepath.Dir(objectsDir), path)
+		if err != nil {
+			return err
+		}
+		header, err := tar.FileInfoHeader(info, "")
+		if err != nil {
+			return err
+		}
+		header.Name = filepath.ToSlash(rel)
+		if err := tw.WriteHeader(header); err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+		f, err := os.Open(path) //nolint:gosec // walked below the trusted Git object directory
+		if err != nil {
+			return err
+		}
+		_, copyErr := io.Copy(tw, f)
+		return errors.Join(copyErr, f.Close())
+	}); err != nil {
+		return err
+	}
+	if err := tw.WriteHeader(&tar.Header{Name: "packed-refs", Mode: 0o644, Size: int64(len(refs)), Typeflag: tar.TypeReg}); err != nil {
+		return err
+	}
+	if _, err := io.WriteString(tw, refs); err != nil {
+		return err
+	}
+	return tw.Close()
+}
+
+// seedContainerRepo copies large host object stores into the container before
+// the ordinary push. It reports whether a copy occurred so refs can be cleared.
+func seedContainerRepo(ctx context.Context, c *Container, r *Repo, minBytes int64, stdout, stderr io.Writer) (bool, error) {
+	if minBytes == -1 {
+		return false, nil
+	}
+	stats, err := (&git.Checkout{Root: r.GitRoot}).ObjectStats(ctx)
+	if err != nil || stats.LooseBytes+stats.PackBytes < minBytes {
+		return false, err
+	}
+	snapshot, err := seedSource(ctx, r.GitRoot)
+	if err != nil || snapshot.objectsDir == "" {
+		return false, err
+	}
+	available, err := c.runCmd(ctx, "", c.SSHCommand(nil, "if command -v tar >/dev/null; then printf yes; else printf no; fi"))
+	if err != nil {
+		return false, err
+	}
+	if available == "no" {
+		c.Logger.WarnContext(ctx, "container has no tar; skipping direct repository object copy", "repo", r.GitRoot)
+		return false, nil
+	}
+	if _, err := fmt.Fprintf(stdout, "- copy Git objects for %s ...\n", r.GitRoot); err != nil {
+		return false, err
+	}
+	reader, writer := io.Pipe()
+	produced := make(chan error, 1)
+	go func() {
+		err := writeSeedTar(writer, snapshot.objectsDir, snapshot.refs)
+		_ = writer.CloseWithError(err)
+		produced <- err
+	}()
+	args := c.SSHCommand(nil, "tar -xf - -C "+shellQuote(r.ContainerPath+"/.git"))
+	cmd := exec.CommandContext(ctx, args[0], args[1:]...) //nolint:gosec // md-owned SSH command
+	cmd.Env = c.commandEnv("LANG=C")
+	cmd.Stdin = reader
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	runErr := cmd.Run()
+	_ = reader.Close()
+	writeErr := <-produced
+	if err := errors.Join(runErr, writeErr); err != nil {
+		return false, fmt.Errorf("copy Git objects for %s: %w", r.GitRoot, err)
+	}
+	return true, nil
+}
+
+// clearSeedRefs removes temporary refs after the initial push has reused the
+// copied objects.
+func clearSeedRefs(ctx context.Context, c *Container, r *Repo) error {
+	// Seed refs must remain advertised until the first push finishes. Remove
+	// them afterward so they do not become part of the container's Git model.
+	command := "cd " + shellQuote(r.ContainerPath) +
+		" && git for-each-ref --format='delete %(refname)' " + shellQuote(seedRefPrefix) +
+		" | git update-ref --stdin"
+	_, err := c.runCmd(ctx, "", c.SSHCommand(nil, command))
+	return err
 }
 
 // provisionRepositories runs independent repository setup operations with a

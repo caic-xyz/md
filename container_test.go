@@ -7,6 +7,7 @@
 package md
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"encoding/base64"
@@ -48,6 +49,94 @@ func runTestGit(t *testing.T, ctx context.Context, wd string, args ...string) st
 		t.Fatalf("git %s: %v: %s", strings.Join(args, " "), err, stderr.String())
 	}
 	return strings.TrimSpace(string(out))
+}
+
+func TestRepositoryObjectCopy(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	if copied, err := seedContainerRepo(ctx, nil, &Repo{GitRoot: filepath.Join(t.TempDir(), "missing")}, -1, io.Discard, io.Discard); err != nil || copied {
+		t.Fatalf("disabled object copy = %t, %v", copied, err)
+	}
+	src := filepath.Join(t.TempDir(), "source")
+	if err := os.Mkdir(src, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runTestGit(t, ctx, "", "init", "-q", "-b", "main", src)
+	runTestGit(t, ctx, src, "config", "user.name", "Object Copy Test")
+	runTestGit(t, ctx, src, "config", "user.email", "object-copy@example.test")
+	if err := os.WriteFile(filepath.Join(src, "file.txt"), []byte("first\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runTestGit(t, ctx, src, "add", "file.txt")
+	runTestGit(t, ctx, src, "commit", "-qm", "first")
+	runTestGit(t, ctx, src, "repack", "-ad")
+	snapshot, err := seedSource(ctx, src)
+	if err != nil || snapshot.objectsDir == "" {
+		t.Fatalf("source objects = %q, %v", snapshot.objectsDir, err)
+	}
+	worktree := filepath.Join(t.TempDir(), "linked")
+	runTestGit(t, ctx, src, "worktree", "add", "-q", "-b", "linked", worktree)
+	linked, err := seedSource(ctx, worktree)
+	if err != nil || linked.objectsDir != snapshot.objectsDir {
+		t.Fatalf("linked worktree objects = %q, %v; want %q", linked.objectsDir, err, snapshot.objectsDir)
+	}
+
+	dst := filepath.Join(t.TempDir(), "destination")
+	runTestGit(t, ctx, "", "init", "-q", dst)
+	var archive bytes.Buffer
+	if err := writeSeedTar(&archive, snapshot.objectsDir, snapshot.refs); err != nil {
+		t.Fatal(err)
+	}
+	tr := tar.NewReader(&archive)
+	for {
+		h, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(dst, ".git", filepath.FromSlash(h.Name))
+		if h.FileInfo().IsDir() {
+			if err := os.MkdirAll(path, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
+		f, err := os.Create(path) //nolint:gosec // archive is generated from this test's seed
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, copyErr := io.Copy(f, tr) //nolint:gosec // trusted small test archive
+		if copyErr != nil {
+			t.Fatal(copyErr)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	destinationRefs := runTestGit(t, ctx, dst, "for-each-ref", "--format=%(refname)")
+	if !strings.Contains(destinationRefs, "refs/md/seed/heads/main") || strings.Contains(destinationRefs, "refs/heads/main") {
+		t.Fatalf("seed refs = %q", destinationRefs)
+	}
+	if err := os.WriteFile(filepath.Join(src, "file.txt"), []byte("second\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runTestGit(t, ctx, src, "commit", "-qam", "second")
+	push := exec.CommandContext(ctx, "git", "push", "-q", dst, "HEAD:refs/heads/main") //nolint:gosec // test-controlled args
+	push.Dir = src
+	push.Env = append(os.Environ(), "GIT_TRACE_PACKET=1")
+	packetTrace, err := push.CombinedOutput()
+	if err != nil {
+		t.Fatalf("push after object copy: %v: %s", err, packetTrace)
+	}
+	if !bytes.Contains(packetTrace, []byte("refs/md/seed/heads/main")) {
+		t.Fatalf("push did not see the seed ref: %s", packetTrace)
+	}
+	if got, want := runTestGit(t, ctx, dst, "rev-parse", "main"), runTestGit(t, ctx, src, "rev-parse", "HEAD"); got != want {
+		t.Fatalf("pushed main = %q, want %q", got, want)
+	}
+	runTestGit(t, ctx, dst, "fsck", "--connectivity-only", "--no-reflogs")
 }
 
 func TestProvisionRepositoriesCapsConcurrency(t *testing.T) { //nolint:paralleltest // Shares the package-global provisioning semaphore.
@@ -1128,6 +1217,14 @@ func TestPlanFork(t *testing.T) {
 }
 
 func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with t.Setenv.
+	t.Run("launch_rejects_invalid_object_copy_threshold", func(t *testing.T) {
+		t.Parallel()
+		c := &Container{}
+		err := c.Launch(t.Context(), io.Discard, io.Discard, &StartOpts{GitObjectCopyMinBytes: -2})
+		if err == nil || !strings.Contains(err.Error(), "GitObjectCopyMinBytes must be -1 or nonnegative") {
+			t.Fatalf("Launch with invalid Git object copy threshold = %v", err)
+		}
+	})
 	t.Run("purge_stopped_tailscale_container_before_authentication", func(t *testing.T) {
 		t.Parallel()
 		executable, err := os.Executable()

@@ -175,6 +175,7 @@ func addContainerFlags(fs *flag.FlagSet, image bool) *containerFlags {
 		cf.image = fs.String("image", "", "Full base Docker image; md build-image generates md-user-local (default: "+md.DefaultBaseImage+":latest)")
 		cf.tag = fs.String("tag", "", "Tag for the default base image ("+md.DefaultBaseImage+":<tag>)")
 		cf.platform = fs.String("platform", "", "Container platform: linux/amd64 or linux/arm64 (default: "+md.DefaultPlatform().String()+")")
+		fs.Int64Var(&cf.gitObjectCopyMinBytes, "git-copy-min-bytes", 0, "Minimum Git object size in bytes for direct copy before push (0=default; -1=off; 1=always)")
 	}
 	cf.branch = fs.String("branch", "", "Branch to use (default: current branch)")
 	fs.StringVar(cf.branch, "b", "", "Branch to use (default: current branch)")
@@ -184,12 +185,13 @@ func addContainerFlags(fs *flag.FlagSet, image bool) *containerFlags {
 }
 
 type containerFlags struct {
-	image    *string
-	tag      *string
-	platform *string
-	tags     *string
-	branch   *string
-	repo     *string
+	image                 *string
+	tag                   *string
+	platform              *string
+	gitObjectCopyMinBytes int64
+	tags                  *string
+	branch                *string
+	repo                  *string
 }
 
 func (cf *containerFlags) containerPlatform() (string, error) {
@@ -605,20 +607,21 @@ func (a *app) cmdStart(ctx context.Context, args []string) error {
 		extraEnv = append(extraEnv, "GITHUB_TOKEN="+githubToken)
 	}
 	opts := md.StartOpts{
-		BaseImage:        baseImage,
-		Platform:         platform,
-		Display:          *display,
-		Tailscale:        *tailscale,
-		USB:              *usb,
-		Sudo:             *sudoFlag,
-		TailscaleAuthKey: os.Getenv("TAILSCALE_AUTHKEY"),
-		Caches:           caches,
-		Mounts:           mounts,
-		Labels:           labels.values,
-		Quiet:            *quiet,
-		ExtraEnv:         extraEnv,
-		MaxCPUs:          *cpus,
-		ExtraRunArgs:     dockerFlags.withDefaultOOMScoreAdj(),
+		BaseImage:             baseImage,
+		Platform:              platform,
+		GitObjectCopyMinBytes: cf.gitObjectCopyMinBytes,
+		Display:               *display,
+		Tailscale:             *tailscale,
+		USB:                   *usb,
+		Sudo:                  *sudoFlag,
+		TailscaleAuthKey:      os.Getenv("TAILSCALE_AUTHKEY"),
+		Caches:                caches,
+		Mounts:                mounts,
+		Labels:                labels.values,
+		Quiet:                 *quiet,
+		ExtraEnv:              extraEnv,
+		MaxCPUs:               *cpus,
+		ExtraRunArgs:          dockerFlags.withDefaultOOMScoreAdj(),
 	}
 	switch ct.Status(ctx) {
 	case "exited", "stopped":
@@ -779,14 +782,15 @@ func (a *app) cmdRun(ctx context.Context, args []string) error {
 		extraEnv = append(extraEnv, "GITHUB_TOKEN="+githubToken)
 	}
 	opts := md.StartOpts{
-		BaseImage:    baseImage,
-		Platform:     platform,
-		Caches:       caches,
-		Mounts:       mounts,
-		Quiet:        true,
-		ExtraEnv:     extraEnv,
-		MaxCPUs:      *cpus,
-		ExtraRunArgs: dockerFlags.withDefaultOOMScoreAdj(),
+		BaseImage:             baseImage,
+		Platform:              platform,
+		GitObjectCopyMinBytes: cf.gitObjectCopyMinBytes,
+		Caches:                caches,
+		Mounts:                mounts,
+		Quiet:                 true,
+		ExtraEnv:              extraEnv,
+		MaxCPUs:               *cpus,
+		ExtraRunArgs:          dockerFlags.withDefaultOOMScoreAdj(),
 	}
 	exitCode, err := runTemporaryContainer(ctx, ct, os.Stdout, os.Stderr, extra, &opts, *applyPatch)
 	if err != nil {

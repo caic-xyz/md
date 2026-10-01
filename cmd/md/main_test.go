@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"log/slog"
@@ -227,6 +228,26 @@ func (w testLogWriter) Write(p []byte) (int, error) {
 
 func TestContainerFlags(t *testing.T) {
 	t.Parallel()
+	t.Run("git object copy threshold", func(t *testing.T) {
+		t.Parallel()
+		fs := flag.NewFlagSet("start", flag.ContinueOnError)
+		cf := addContainerFlags(fs, true)
+		if cf.gitObjectCopyMinBytes != 0 {
+			t.Fatalf("default Git object copy threshold = %v", cf.gitObjectCopyMinBytes)
+		}
+		if err := fs.Parse([]string{"-git-copy-min-bytes=-1"}); err != nil {
+			t.Fatal(err)
+		}
+		if got := cf.gitObjectCopyMinBytes; got != -1 {
+			t.Fatalf("Git object copy threshold = %d, want -1", got)
+		}
+		if err := fs.Parse([]string{"-git-copy-min-bytes=1"}); err != nil {
+			t.Fatal(err)
+		}
+		if got := cf.gitObjectCopyMinBytes; got != 1 {
+			t.Fatalf("Git object copy threshold = %d, want 1", got)
+		}
+	})
 	t.Run("valid", func(t *testing.T) {
 		t.Parallel()
 		platform := "linux/amd64"

@@ -11,7 +11,8 @@ A file to [guide coding agents](https://agents.md/).
 - Go's `shfmt`, `golangci-lint`, and `addlicense` executables are pinned in `go.mod` and run with `go tool`.
 - `make verify` runs shellcheck over the container scripts, including the executable helpers under `rsc/`
   that carry no `.sh` suffix.
-- Update this file (AGENTS.md) everytime you make a change that affects this project's requirements.
+- Update AGENTS.md when changing instructions for agents working in this repository. Document runtime behavior in
+  code or project docs; `make fix` maintains the File Index.
 - Update rsc/user/home/user/src/AGENTS.md everytime you make a change that affects the agent inside the container.
 - **Glob/find tools may skip dotfiles by default.** The `rsc/` tree contains important config under dot-directories (e.g. `rsc/user/home/user/.config/git/config`). Use Grep or explicit dot-inclusive patterns when searching for files under `rsc/`.
 - When adding a new setup script in `rsc/root/root/setup/`, add a corresponding `RUN` command to `rsc/root/Dockerfile`. When adding a new setup script in `rsc/user/home/user/setup/`, add a corresponding `RUN` command to `rsc/user/Dockerfile`.
