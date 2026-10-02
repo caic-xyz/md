@@ -112,13 +112,13 @@ preflight() {
   require_capability "md startup" "md start" \
     cmd:useradd cmd:groupadd cmd:usermod cmd:getent cmd:id \
     cmd:chown cmd:chmod cmd:install cmd:awk cmd:mktemp cmd:find \
-    cmd:git cmd:grep cmd:groupmod cmd:head cmd:hostname cmd:passwd cmd:sleep cmd:stat cmd:tr \
+    cmd:curl cmd:git cmd:grep cmd:groupmod cmd:head cmd:hostname cmd:passwd cmd:sleep cmd:stat cmd:su cmd:tr \
     file:/etc/ssh/sshd_config file:/etc/ssh/ssh_host_ed25519_key \
     "file:$MD_HOME/.ssh/authorized_keys"
 
   if [ -n "${MD_DISPLAY:-}" ]; then
     require_capability "the desktop capability" "md start -display (MD_DISPLAY)" \
-      cmd:Xvnc cmd:startxfce4 cmd:su cmd:pgrep cmd:seq cmd:tail cmd:tee \
+      cmd:Xvnc cmd:startxfce4 cmd:pgrep cmd:seq cmd:tail cmd:tee \
       file:/root/vnc-start.sh file:/root/xvnc-monitor.sh file:/root/xfce-monitor.sh
   fi
 

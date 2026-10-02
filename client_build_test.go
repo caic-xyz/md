@@ -764,6 +764,18 @@ func TestResolveCaches(t *testing.T) {
 
 func TestGenerateDockerfile(t *testing.T) {
 	t.Parallel()
+	t.Run("installs_harnesses_before_tagging", func(t *testing.T) {
+		t.Parallel()
+		got := generateDockerfile("mybase:latest", nil, nil, testUserOwner, "digest", "sha", "", "")
+		check := strings.Index(got, "RUN /root/start.sh --check")
+		install := strings.Index(got, "RUN /usr/local/bin/md-run-user-setup")
+		label := strings.Index(got, "LABEL md.image_type")
+		copyRunner := strings.Index(got, "COPY --chmod=755 root/run-user-setup.sh /usr/local/bin/md-run-user-setup")
+		copyScripts := strings.Index(got, "COPY root/user_setup/ /usr/local/share/md/user_setup/")
+		if check < 0 || copyRunner <= check || copyScripts <= copyRunner || install <= copyScripts || label <= install || strings.Contains(got, "USER user\n") {
+			t.Errorf("user setup runner must run after preflight and before labeling without changing the Dockerfile user:\n%s", got)
+		}
+	})
 	t.Run("no_caches_no_dirs", func(t *testing.T) {
 		t.Parallel()
 		got := generateDockerfile("mybase:latest", nil, nil, testUserOwner, "sha256:abc", "ctxsha", "", "")
@@ -914,83 +926,60 @@ func TestStageStartupScripts(t *testing.T) {
 	if err := stageStartupScripts(dir); err != nil {
 		t.Fatal(err)
 	}
-
-	for _, name := range []string{"start.sh", "vnc-start.sh", "xfce-monitor.sh", "xvnc-monitor.sh"} {
-		info, err := os.Stat(filepath.Join(dir, "root", name))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if runtime.GOOS == "windows" {
-			continue
-		}
-		if info.Mode().Perm() != 0o755 {
-			t.Errorf("%s mode = %v, want 0755", name, info.Mode().Perm())
-		}
-	}
-}
-
-func TestIsExecutable(t *testing.T) {
-	t.Parallel()
-	// Walk the embedded rsc filesystem and verify that the executable-bit
-	// heuristic (suffix .sh/xstartup, path contains /bin/, or shebang #!)
-	// covers the files we expect to be executable.
-	execFiles := []string{}
-	err := fs.WalkDir(rscFS, ".", func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
+	var scripts int
+	err := fs.WalkDir(rscFS, specializedBuildContextPrefix, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".sh") {
 			return err
 		}
-		data, err := rscFS.ReadFile(path)
+		scripts++
+		rel := strings.TrimPrefix(path, specializedBuildContextPrefix+"/")
+		info, err := os.Stat(filepath.Join(dir, filepath.FromSlash(rel)))
 		if err != nil {
-			return err
+			t.Errorf("staged %s: %v", rel, err)
+			return nil
 		}
-		if isExecutable(data) {
-			execFiles = append(execFiles, path)
+		if runtime.GOOS != "windows" && info.Mode().Perm() != 0o755 {
+			t.Errorf("staged %s mode = %v, want 0755", rel, info.Mode().Perm())
 		}
 		return nil
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	slices.Sort(execFiles)
-
-	// Verify expected executable files are present.
-	wantExec := []string{
-		"rsc/root/root/setup/1_packages.sh",
-		"rsc/root/root/setup/2_neovim.sh",
-		"rsc/root/root/setup/3_extrepo.sh",
-		"rsc/root/root/setup/4_create_user.sh",
-		"rsc/root/root/setup/5_kvm.sh",
-		"rsc/root/root/setup/6_radare2.sh",
-		"rsc/root/root/setup/7_podman.sh",
-		"rsc/specialized/root/start.sh",
-		"rsc/specialized/root/vnc-start.sh",
-		"rsc/specialized/root/xfce-monitor.sh",
-		"rsc/specialized/root/xvnc-monitor.sh",
-		"rsc/root/usr/local/bin/git-credential-github",
-		"rsc/root/usr/local/bin/google-chrome-stable",
-		"rsc/root/usr/local/bin/measure_exec.sh",
-		"rsc/user/home/user/setup/1_go.sh",
-		"rsc/user/home/user/setup/2_nodejs.sh",
-		"rsc/user/home/user/setup/3_bun.sh",
-		"rsc/user/home/user/setup/4_android.sh",
-		"rsc/user/home/user/setup/5_rust.sh",
-		"rsc/user/home/user/setup/6_python.sh",
-		"rsc/user/home/user/setup/7_llm_tools.sh",
-		"rsc/user/home/user/setup/bashrc_cleanup.sh",
-		"rsc/user/home/user/setup/generate_version_report.sh",
-		"rsc/user/home/user/.vnc/xstartup",
+	if scripts == 0 {
+		t.Fatal("no embedded specialized scripts")
 	}
-	slices.Sort(wantExec)
-	if slices.Compare(execFiles, wantExec) != 0 {
-		t.Errorf("executable files not as expected")
-		t.Logf("Executable files: %d", len(execFiles))
-		for _, f := range execFiles {
-			t.Logf("  %s", f)
+}
+
+func TestIsExecutable(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("source file executable bits are unavailable on Windows")
+	}
+	var scripts int
+	err := fs.WalkDir(rscFS, "rsc", func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || (!strings.HasSuffix(path, ".sh") && !strings.Contains(path, "/bin/") && !strings.HasSuffix(path, "/xstartup")) {
+			return err
 		}
-		t.Logf("Expected files: %d", len(wantExec))
-		for _, f := range wantExec {
-			t.Logf("  %s", f)
+		scripts++
+		data, err := rscFS.ReadFile(path)
+		if err != nil {
+			return err
 		}
+		info, err := os.Stat(filepath.FromSlash(path))
+		if err != nil {
+			return err
+		}
+		if got, want := isExecutable(data), info.Mode().Perm()&0o111 != 0; got != want {
+			t.Errorf("%s: staged executable = %t, source executable = %t", path, got, want)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scripts == 0 {
+		t.Fatal("no embedded commands")
 	}
 }
 

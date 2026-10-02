@@ -178,13 +178,14 @@ func launchSmokeContainer(t *testing.T, ctx context.Context, c *Client, baseImag
 
 // smokeForeignBaseDockerfile builds the reference Debian-family base image used
 // by the foreign_base subtests. It carries only what the md startup contract
-// needs beyond sshd itself: git, which md's post-SSH provisioning drives. It
+// needs beyond sshd itself: git for post-SSH provisioning, curl for coding
+// agent installation, and su for user setup. It
 // deliberately has none of the md-specific packages (no Xvnc, no tailscaled,
-// no DBus, no sudo) and no `user` account, so start.sh has to provision the
-// account and tolerate the subsystems md did not request.
+// no DBus, no sudo) and no `user` account, so the specialized build provisions
+// the account and startup tolerates the subsystems md did not request.
 const smokeForeignBaseDockerfile = `FROM debian:stable-slim
 RUN apt-get update \
- && apt-get install -y --no-install-recommends git openssh-server \
+ && apt-get install -y --no-install-recommends curl git openssh-server util-linux \
  && rm -rf /var/lib/apt/lists/*
 `
 
@@ -1215,13 +1216,13 @@ func TestSmoke(t *testing.T) {
 					prebuildSpecializedImage(t, t.Context(), client, reduced, nil)
 					ct := launchSmokeContainer(t, t.Context(), client, reduced, rt+"-debian-slim", false)
 
-					// start.sh provisions the account, since the base image has none.
+					// The specialized build provisions the account, since the base image has none.
 					logs, err := client.Runtime.Run(t.Context(), "", "logs", ct.Name)
 					if err != nil {
 						t.Fatalf("logs: %v", err)
 					}
 					for _, want := range []string{
-						"created the user account (UID/GID 1000)",
+						"using existing user account (UID/GID 1000:1000)",
 						// The reduced image has neither Xvnc nor DBus: unrequested
 						// subsystems must be skipped, not fail startup.
 						"MD_DISPLAY not set, skipping X/VNC startup",
@@ -1268,7 +1269,7 @@ func TestSmoke(t *testing.T) {
 
 				t.Run("repo_workflow", func(t *testing.T) {
 					// md pushes a repository over SSH into a tree it initializes as
-					// `user`, so this covers a home start.sh had to create for an account
+					// `user`, so this covers a home the specialized build created for an account
 					// the base image never had.
 					repo := createSmokeGitRepo(t, "main", "main", false)
 					cp := "/home/user/src/smoke-" + rt + "-debian-slim-repo"
@@ -1285,8 +1286,8 @@ func TestSmoke(t *testing.T) {
 					assertSmokeContainerNoDiff(t, ct, 0)
 
 					// Everything md created for the account must belong to `user`: the
-					// base image has no `user`, so the specialized image cannot pre-own
-					// the home it copied the SSH key into.
+					// base image has no `user`; the specialized build creates it before
+					// installing coding agents.
 					out, err := ct.runCmd(t.Context(), "", ct.SSHCommand(nil,
 						"stat -c %U:%G "+cp+" && find "+cp+" -not -user user -print"))
 					if err != nil {

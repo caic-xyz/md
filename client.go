@@ -459,10 +459,13 @@ type WarmupOpts struct {
 	Caches []CacheMount
 	// Quiet suppresses informational output.
 	Quiet bool
+	// Force rebuilds the specialized image even when its inputs are unchanged.
+	Force bool
 }
 
-// Warmup ensures the base image is pulled and the user image is built,
-// without starting a container. Returns true if a build was performed.
+// Warmup ensures the base image is pulled and a specialized image with current
+// coding agents is built, without starting a container. Force rebuilds the
+// image even when its inputs are unchanged. Returns true if a build ran.
 func (c *Client) Warmup(ctx context.Context, stdout, stderr io.Writer, opts *WarmupOpts) (bool, error) {
 	c.buildMu.Lock()
 	defer c.buildMu.Unlock()
@@ -479,7 +482,7 @@ func (c *Client) Warmup(ctx context.Context, stdout, stderr io.Writer, opts *War
 	}
 	platform := p.String()
 	imageName := userImageName(baseImage, activeCacheKey(opts.Caches, c.Home), platform)
-	if !c.imageBuildNeeded(ctx, imageName, baseImage, platform, opts.Caches) {
+	if !opts.Force && !c.imageBuildNeeded(ctx, imageName, baseImage, platform, opts.Caches) {
 		if !opts.Quiet {
 			_, _ = fmt.Fprintf(stdout, "- Docker image %s is up to date, skipping build.\n", imageName)
 		}
@@ -1239,18 +1242,11 @@ func (c *Client) imageBuildNeededSlow(ctx context.Context, imageName, baseImage,
 	return false
 }
 
-// untagSpecializedImageIfBasedOn removes imageName when it still points at a
-// specialized image built from staleBaseDigest.
-//
-// This is not needed for launch correctness: ensureImage returns the built image
-// ID, so container startup does not race with later tag changes. It is only a
-// cleanup/policy step for the moment a remote base pull changes the local base:
-// the old specialized tag stops advertising an image built from the previous
-// base, even if the rebuild is interrupted before the new tag is written.
+// untagSpecializedImageIfBasedOn removes a specialized tag only when it still
+// points at an image built from staleBaseDigest. A failed rebuild must not
+// leave a tag advertising an image from the old base.
 func (c *Client) untagSpecializedImageIfBasedOn(ctx context.Context, imageName, staleBaseDigest string) {
-	// Another md process may have rebuilt this tag after the base pull. Re-read
-	// the base digest label just before untagging so a fresh specialized image
-	// keeps its tag.
+	// Another md process may have rebuilt the tag after the base pull.
 	storedBaseDigest, err := c.Runtime.Run(ctx, "", "image", "inspect", imageName, "--format", `{{index .Config.Labels "md.base_digest"}}`)
 	if err != nil || storedBaseDigest == "" || storedBaseDigest == "<no value>" || storedBaseDigest != staleBaseDigest {
 		return
@@ -1387,6 +1383,12 @@ func generateDockerfile(baseImage string, active []activeCM, dirs []string, user
 	// a bash script.
 	df.WriteString("RUN command -v bash >/dev/null 2>&1 || { echo \"md: the base image is missing bash, which the md startup contract requires\" >&2; exit 1; }\n")
 	df.WriteString("RUN /root/start.sh --check\n")
+	// Provision the fixed account before installing agents in foreign images;
+	// start.sh still owns runtime identity mapping.
+	df.WriteString("RUN if ! id -u user >/dev/null 2>&1; then groupadd --gid 1000 user && useradd --uid 1000 --gid 1000 --home-dir /home/user --shell /bin/bash --create-home user; fi\n")
+	df.WriteString("COPY --chmod=755 root/run-user-setup.sh /usr/local/bin/md-run-user-setup\n")
+	df.WriteString("COPY root/user_setup/ /usr/local/share/md/user_setup/\n")
+	df.WriteString("RUN /usr/local/bin/md-run-user-setup\n")
 	fmt.Fprintf(&df, "LABEL md.image_type=%q\n", imageTypeSpecialized)
 	fmt.Fprintf(&df, "LABEL md.base_image=%q\n", baseImage)
 	fmt.Fprintf(&df, "LABEL md.base_digest=%q\n", baseDigest)

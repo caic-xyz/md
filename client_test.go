@@ -529,6 +529,30 @@ func TestClient(t *testing.T) {
 			}
 		})
 	})
+	t.Run("Warmup", func(t *testing.T) {
+		t.Parallel()
+		const baseImage = "local/warmup-test:v1"
+		imageName := userImageName(baseImage, activeCacheKey(nil, ""), PlatformLinuxAMD64.String())
+		c, rt := newImageDecisionTestClient(t, imageName, baseImage)
+		rt.localBase = true
+		rt.baseDigest = rt.baseID
+		for _, tc := range []struct {
+			name       string
+			opts       WarmupOpts
+			wantBuilds int
+		}{
+			{name: "current_image", opts: WarmupOpts{BaseImage: baseImage, Platform: PlatformLinuxAMD64.String()}, wantBuilds: 0},
+			{name: "forced", opts: WarmupOpts{BaseImage: baseImage, Platform: PlatformLinuxAMD64.String(), Force: true}, wantBuilds: 1},
+		} {
+			_, err := c.Warmup(t.Context(), io.Discard, io.Discard, &tc.opts)
+			if err != nil {
+				t.Fatalf("%s: %v", tc.name, err)
+			}
+			if rt.builds != tc.wantBuilds {
+				t.Errorf("%s: builds = %d, want %d", tc.name, rt.builds, tc.wantBuilds)
+			}
+		}
+	})
 }
 
 // TestContainerNotListening checks the failure md reports when a started
@@ -633,6 +657,26 @@ func TestBuildSpecializedImage(t *testing.T) { //nolint:tparallel // fakeRuntime
 		}
 		if rt.builds != 1 {
 			t.Fatalf("builds = %d, want 1", rt.builds)
+		}
+	})
+	t.Run("removes_stale_tag_if_harness_install_fails_after_base_pull", func(t *testing.T) {
+		t.Parallel()
+		const (
+			imageName = "md-specialized-test"
+			baseImage = "ghcr.io/caic-xyz/md-user:latest"
+		)
+		c, rt := newImageDecisionTestClient(t, imageName, baseImage)
+		rt.baseID = "sha256:old-base"
+		rt.baseDigest = "ghcr.io/caic-xyz/md-user@sha256:old-base"
+		rt.pulledBaseID = "sha256:new-base"
+		rt.pulledBaseDigest = "ghcr.io/caic-xyz/md-user@sha256:new-base"
+		rt.buildErr = errors.New("harness install failed")
+		_, err := c.buildSpecializedImage(t.Context(), io.Discard, io.Discard, imageName, baseImage, PlatformLinuxAMD64.String(), nil, nil, true)
+		if err == nil {
+			t.Fatal("build succeeded, want harness install failure")
+		}
+		if !slices.Equal(rt.untagged, []string{imageName}) {
+			t.Errorf("untagged = %v, want stale tag removed", rt.untagged)
 		}
 	})
 }
@@ -756,6 +800,7 @@ type imageDecisionRuntime struct {
 	pulledBaseID        string
 	pulledBaseDigest    string
 	builds              int
+	buildErr            error
 	remoteManifestCalls int
 	untagged            []string
 }
@@ -798,6 +843,9 @@ func (r *imageDecisionRuntime) Run(_ context.Context, _ string, args ...string) 
 func (r *imageDecisionRuntime) RunOut(_ context.Context, _ string, _, _ io.Writer, args ...string) error {
 	if len(args) > 0 && args[0] == "build" {
 		r.builds++
+		if r.buildErr != nil {
+			return r.buildErr
+		}
 		return writeFakeIIDFile(args, r.imageID)
 	}
 	return fmt.Errorf("unexpected runtime command: %s", strings.Join(args, " "))
