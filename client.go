@@ -1337,6 +1337,17 @@ func generateDockerfile(baseImage string, active []activeCM, dirs []string, user
 	df.WriteString("COPY --chown=root:root ssh_host_ed25519_key /etc/ssh/ssh_host_ed25519_key\n")
 	df.WriteString("COPY --chown=root:root ssh_host_ed25519_key.pub /etc/ssh/ssh_host_ed25519_key.pub\n")
 	fmt.Fprintf(&df, "COPY --chown=%s authorized_keys /home/user/.ssh/authorized_keys\n", userOwner)
+	// Refuse to build an image that cannot carry md, naming what the base image
+	// is missing. preflight in start.sh owns the startup requirements; check bash
+	// first because preflight itself is a bash script.
+	df.WriteString("RUN command -v bash >/dev/null 2>&1 || { echo \"md: the base image is missing bash, which the md startup contract requires\" >&2; exit 1; }\n")
+	df.WriteString("RUN /root/start.sh --check\n")
+	// The runner provisions the fixed build-time account and its writable home.
+	// Install before injecting host-owned caches and directories; start.sh owns
+	// runtime identity mapping.
+	df.WriteString("COPY --chmod=755 root/run-user-setup.sh /usr/local/bin/md-run-user-setup\n")
+	df.WriteString("COPY root/user_setup/ /usr/local/share/md/user_setup/\n")
+	df.WriteString("RUN /usr/local/bin/md-run-user-setup\n")
 	for _, a := range active {
 		owner := userOwner
 		if a.cm.ReadOnly {
@@ -1376,19 +1387,6 @@ func generateDockerfile(baseImage string, active []activeCM, dirs []string, user
 		fmt.Fprintf(&run, " && chown -R root:root %s && chmod -R a-w %s", joined, joined)
 	}
 	fmt.Fprintf(&df, "RUN %s\n", run.String())
-	// Refuse to build an image that cannot carry md, naming what the base image
-	// is missing: a container that starts and then dies is far harder to
-	// diagnose. The requirements are preflight's in start.sh, so the contract has
-	// one definition; bash itself is checked first because the contract check is
-	// a bash script.
-	df.WriteString("RUN command -v bash >/dev/null 2>&1 || { echo \"md: the base image is missing bash, which the md startup contract requires\" >&2; exit 1; }\n")
-	df.WriteString("RUN /root/start.sh --check\n")
-	// Provision the fixed account before installing agents in foreign images;
-	// start.sh still owns runtime identity mapping.
-	df.WriteString("RUN if ! id -u user >/dev/null 2>&1; then groupadd --gid 1000 user && useradd --uid 1000 --gid 1000 --home-dir /home/user --shell /bin/bash --create-home user; fi\n")
-	df.WriteString("COPY --chmod=755 root/run-user-setup.sh /usr/local/bin/md-run-user-setup\n")
-	df.WriteString("COPY root/user_setup/ /usr/local/share/md/user_setup/\n")
-	df.WriteString("RUN /usr/local/bin/md-run-user-setup\n")
 	fmt.Fprintf(&df, "LABEL md.image_type=%q\n", imageTypeSpecialized)
 	fmt.Fprintf(&df, "LABEL md.base_image=%q\n", baseImage)
 	fmt.Fprintf(&df, "LABEL md.base_digest=%q\n", baseDigest)

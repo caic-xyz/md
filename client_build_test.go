@@ -776,6 +776,17 @@ func TestGenerateDockerfile(t *testing.T) {
 			t.Errorf("user setup runner must run after preflight and before labeling without changing the Dockerfile user:\n%s", got)
 		}
 	})
+	t.Run("installs_before_host_owned_caches", func(t *testing.T) {
+		t.Parallel()
+		active := []activeCM{{cm: CacheMount{Name: "npm", ContainerPath: "/home/user/.npm"}}}
+		got := generateDockerfile("mybase:latest", active, []string{"/home/user/.local/share"}, "1001:1001", "", "", "", "")
+		install := strings.Index(got, "RUN /usr/local/bin/md-run-user-setup")
+		cache := strings.Index(got, "COPY --from=cache-npm")
+		dirs := strings.Index(got, "chown 1001:1001 /home/user/.local/share")
+		if install < 0 || cache <= install || dirs <= install {
+			t.Errorf("build-time setup must run before host-owned caches and directories:\n%s", got)
+		}
+	})
 	t.Run("no_caches_no_dirs", func(t *testing.T) {
 		t.Parallel()
 		got := generateDockerfile("mybase:latest", nil, nil, testUserOwner, "sha256:abc", "ctxsha", "", "")

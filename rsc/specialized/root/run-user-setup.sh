@@ -11,6 +11,13 @@ if [[ $# -ne 0 ]]; then
   exit 1
 fi
 
+# Provision the fixed build-time account before switching users. COPY can
+# create its home first; useradd does not repair that directory's ownership.
+if [[ $(id -u) -eq 0 ]] && ! id -u user >/dev/null 2>&1; then
+  groupadd --gid 1000 user
+  useradd --uid 1000 --gid 1000 --home-dir /home/user --shell /bin/bash --create-home user
+fi
+
 # The current image contract uses UID 1000. Resolve its name and home from
 # passwd so changing either does not require changing the Dockerfile.
 entry="$(getent passwd 1000)" || {
@@ -24,6 +31,7 @@ if [[ -z "$account" || -z "$account_home" ]]; then
 fi
 
 if [[ $(id -u) -eq 0 ]]; then
+  chown 1000:1000 "$account_home"
   exec su -s /bin/bash -c /usr/local/bin/md-run-user-setup "$account"
 fi
 if [[ $(id -u) -ne 1000 ]]; then

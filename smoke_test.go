@@ -178,14 +178,14 @@ func launchSmokeContainer(t *testing.T, ctx context.Context, c *Client, baseImag
 
 // smokeForeignBaseDockerfile builds the reference Debian-family base image used
 // by the foreign_base subtests. It carries only what the md startup contract
-// needs beyond sshd itself: git for post-SSH provisioning, curl for coding
-// agent installation, and su for user setup. It
+// needs beyond sshd itself: git for post-SSH provisioning, curl with CA
+// certificates for coding agent installation, and su for user setup. It
 // deliberately has none of the md-specific packages (no Xvnc, no tailscaled,
 // no DBus, no sudo) and no `user` account, so the specialized build provisions
 // the account and startup tolerates the subsystems md did not request.
 const smokeForeignBaseDockerfile = `FROM debian:stable-slim
 RUN apt-get update \
- && apt-get install -y --no-install-recommends curl git openssh-server util-linux \
+ && apt-get install -y --no-install-recommends ca-certificates curl git openssh-server util-linux \
  && rm -rf /var/lib/apt/lists/*
 `
 
@@ -1211,6 +1211,30 @@ func TestSmoke(t *testing.T) {
 				metadataUID, metadataGID := smokeContainerUser(t, client)
 				metadata := ensureSmokeFixture(t, t.Context(), client, "debian-slim-metadata",
 					smokeForeignMetadataDockerfile(metadataUID, metadataGID))
+
+				t.Run("host_owned_build_setup", func(t *testing.T) {
+					// Exercise Docker's foreign-host identity even on rootless Podman.
+					// The real setup runner must install agents before host-owned dirs
+					// make the home unwritable to the fixed build-time account.
+					dir := t.TempDir()
+					if err := extractEmbeddedTreeTo("rsc/specialized", dir); err != nil {
+						t.Fatal(err)
+					}
+					for _, name := range []string{"authorized_keys", "ssh_host_ed25519_key", "ssh_host_ed25519_key.pub"} {
+						// Build preflight checks existence; this image does not start sshd.
+						if err := os.WriteFile(filepath.Join(dir, name), []byte("build-only fixture\n"), 0o600); err != nil {
+							t.Fatal(err)
+						}
+					}
+					df := generateDockerfile(reduced, nil, []string{"/home/user/.claude", "/home/user/.local/share"},
+						"1001:1001", "", "", "", "")
+					if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(df), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					if out, err := client.Runtime.Run(t.Context(), dir, "build", "."); err != nil {
+						t.Fatalf("building with host owner 1001:1001: %v\n%s", err, out)
+					}
+				})
 
 				t.Run("reduced_image_reaches_ssh", func(t *testing.T) {
 					prebuildSpecializedImage(t, t.Context(), client, reduced, nil)

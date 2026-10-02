@@ -5,6 +5,12 @@ numbered host user to it. Other runtimes may rewrite the account to the host UID
 must not already belong to a different base-image account or group; md rejects collisions instead of creating an
 ambiguous shared identity.
 
+Specialized images install coding agents over HTTPS. Custom base images need `curl` and a CA trust store
+(`ca-certificates` on Debian), including when packages are installed with `--no-install-recommends`.
+The user setup runner provisions the build-time account and its writable home.
+Agent installation runs as UID/GID 1000 before host-owned caches are injected. Startup maps the installed files
+to the runtime identity.
+
 Subdirectories from the current working directory are the projects (as git repositories) the user wants to work on.
 
 ## Installing a missing tool

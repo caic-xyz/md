@@ -50,7 +50,8 @@ go test -tags=smoke -run TestSmoke -v -timeout 30m
 The test requires a container runtime (docker or podman) in PATH. Nested podman subtests are skipped under rootless podman due to user namespace stacking (`newuidmap` fails with `EPERM`).
 
 The `foreign_base` subtest covers the md startup capability contract on an image md does not control, using
-`debian:stable-slim` fixtures: a reduced fixture (`sshd` + `git` + `curl` + `su`, no `user` account, no Xvnc/tailscaled/DBus) must
+`debian:stable-slim` fixtures: a reduced fixture (`sshd` + `git` + `curl` + CA certificates + `su`, no `user` account,
+no Xvnc/tailscaled/DBus) must
 reach SSH with the account provisioned by the specialized build, md must be able to push a repository into
 it and clone, commit and diff it as `user`, and a fixture that adds an inherited `ENTRYPOINT` with a non-root `USER`
 must still start. A base image missing a mandatory capability (plain `debian:stable-slim` has no sshd) must fail its
@@ -189,12 +190,15 @@ startup steps: do not assume a bundled-image dependency exists, and add new requ
 
 ## Base Image Contract
 
-`preflight` is the single definition of what an image must provide. Beyond the md-owned files the specialized build
+`preflight` defines the startup capabilities an image must provide. Beyond the md-owned files the specialized build
 copies in, a conforming base image provides bash, the POSIX userland `start.sh` drives (including the `passwd`
-tooling that provisions the account), `curl` for coding-agent installation, `git` for md's post-SSH provisioning,
+tooling that provisions the account), `curl` with a CA trust store for HTTPS coding-agent installation,
+`git` for md's post-SSH provisioning,
 sshd with `/etc/ssh/sshd_config`, `su` to run the numbered `rsc/specialized/root/user_setup/` scripts as the
 development account, and the packages each requested capability needs. The reduced `debian:stable-slim` fixture
 in `smoke_test.go` is the reference image; `smoke_test.go`'s `foreign_base` group is its verification.
+`preflight` checks for `curl`, but not its CA trust store. HTTPS downloads during coding-agent installation
+verify that the trust store works.
 
 The generated specialized Dockerfile enforces that contract without restating it:
 
@@ -206,7 +210,11 @@ The generated specialized Dockerfile enforces that contract without restating it
 - md owns the content it copies in numerically: the host UID/GID, or the fixed 1000:1000 contract identity when md
   runs as root (it passes no `MD_HOST_UID` then) or under rootless Podman. The specialized build creates `user` when
   the base lacks it, then runs `/usr/local/bin/md-run-user-setup` to install coding agents under that account. The
-  runner resolves the account name and home from UID 1000 and executes the numbered user setup scripts in order.
+  runner provisions the fixed account when it is absent, resolves the account name and home from UID 1000,
+  gives UID/GID 1000 ownership of the home, and executes the numbered user setup scripts in order.
+  The build installs agents before injecting host-owned caches and
+  directories. This keeps setup writable when the host UID/GID differs from 1000; startup maps the installed files
+  to the runtime identity.
 
 ## For End Users: Remote GUI Access
 
