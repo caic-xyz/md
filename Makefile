@@ -25,7 +25,8 @@ tools:
 # Command listing the shell scripts that shellcheck and shfmt cover: every tracked *.sh,
 # plus every tracked executable whose first line is a shell shebang, because the container
 # entrypoints and the VNC helpers carry no .sh suffix.
-SHELL_SCRIPTS = git ls-files '*.sh'; git ls-files -s | awk '$$1 == "100755" { print $$4 }' | while IFS= read -r f; do case "$$(head -n 1 "$$f")" in *'/sh'* | *'/bash'* | *'env sh'* | *'env bash'*) printf '%s\n' "$$f";; esac; done
+# Parenthesize the case pattern so macOS Bash 3 parses the enclosing $() correctly.
+SHELL_SCRIPTS = git ls-files '*.sh'; git ls-files -s | awk '$$1 == "100755" { print $$4 }' | while IFS= read -r f; do case "$$(head -n 1 "$$f")" in (*'/sh'* | *'/bash'* | *'env sh'* | *'env bash'*) printf '%s\n' "$$f";; esac; done
 
 # The custom-gcl binary is not byte-reproducible (golangci-lint custom builds
 # in a random temp directory and stamps VCS metadata), so staleness is tracked

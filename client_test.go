@@ -510,6 +510,43 @@ func TestClient(t *testing.T) {
 			}
 		})
 
+		t.Run("remote_update_during_cached_digest", func(t *testing.T) {
+			t.Parallel()
+			const baseImage = "ghcr.io/caic-xyz/md-user:latest"
+			c, rt := newImageDecisionTestClient(t, "", baseImage)
+			c.DigestCacheTTL = 6 * time.Hour
+			c.digestCache = make(map[string]remoteDigestEntry)
+			rt.storedManifest = "sha256:old"
+			rt.remoteManifest = "sha256:old"
+			opts := WarmupOpts{BaseImage: baseImage, Platform: PlatformLinuxAMD64.String(), Quiet: true}
+			if built, err := c.Warmup(t.Context(), io.Discard, io.Discard, &opts); err != nil || built {
+				t.Fatalf("initial Warmup = %t, %v; want warm image", built, err)
+			}
+
+			// A forced rebuild observes a registry update before the cached
+			// digest expires, as does a build triggered by other changed inputs.
+			rt.remoteManifest = "sha256:new"
+			opts.Force = true
+			if built, err := c.Warmup(t.Context(), io.Discard, io.Discard, &opts); err != nil || !built {
+				t.Fatalf("forced Warmup = %t, %v; want rebuilt image", built, err)
+			}
+			if rt.storedManifest != "sha256:new" {
+				t.Fatalf("built manifest = %q, want updated registry digest", rt.storedManifest)
+			}
+			opts.Force = false
+			for range 2 {
+				if built, err := c.Warmup(t.Context(), io.Discard, io.Discard, &opts); err != nil || built {
+					t.Fatalf("subsequent Warmup = %t, %v; want warm image", built, err)
+				}
+			}
+			if rt.builds != 1 {
+				t.Fatalf("builds = %d, want only the forced rebuild", rt.builds)
+			}
+			if rt.remoteManifestCalls != 2 {
+				t.Fatalf("registry queries = %d, want initial check and rebuild only", rt.remoteManifestCalls)
+			}
+		})
+
 		const baseImage = "local/warmup-test:v1"
 		imageName := userImageName(baseImage, activeCacheKey(nil, ""), PlatformLinuxAMD64.String())
 		c, rt := newImageDecisionTestClient(t, imageName, baseImage)
@@ -832,6 +869,18 @@ func (r *imageDecisionRuntime) RunOut(_ context.Context, _ string, _, _ io.Write
 		r.builds++
 		if r.buildErr != nil {
 			return r.buildErr
+		}
+		df, err := os.ReadFile(filepath.Join(args[len(args)-1], "Dockerfile"))
+		if err != nil {
+			return err
+		}
+		for line := range strings.SplitSeq(string(df), "\n") {
+			if value, ok := strings.CutPrefix(line, "LABEL md.base_manifest_digest="); ok {
+				r.storedManifest, err = strconv.Unquote(value)
+				if err != nil {
+					return err
+				}
+			}
 		}
 		return writeFakeIIDFile(args, r.imageID)
 	}

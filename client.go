@@ -965,6 +965,10 @@ type imageBuildCacheEntry struct {
 	needed     bool
 }
 
+func (c *Client) remoteDigestCacheKey(image, arch string) string {
+	return c.Runtime.Name() + "\x00" + image + "\x00" + arch
+}
+
 // cachedRemoteManifestDigest returns the remote per-architecture manifest digest.
 // When Client.DigestCacheTTL is non-zero, results are cached for that duration
 // to skip repeated registry round-trips. When zero, the registry is always queried.
@@ -972,7 +976,7 @@ func (c *Client) cachedRemoteManifestDigest(ctx context.Context, image, arch str
 	if c.DigestCacheTTL == 0 {
 		return c.Runtime.RemoteManifestDigest(ctx, image, arch)
 	}
-	key := c.Runtime.Name() + "\x00" + image + "\x00" + arch
+	key := c.remoteDigestCacheKey(image, arch)
 	c.mu.Lock()
 	if e, ok := c.digestCache[key]; ok && time.Now().Before(e.expires) {
 		c.mu.Unlock()
@@ -1529,7 +1533,13 @@ func (c *Client) buildSpecializedImage(ctx context.Context, stdout, stderr io.Wr
 	}
 	var manifestDigest string
 	if remoteBasePulled {
-		manifestDigest, _ = c.Runtime.RemoteManifestDigest(ctx, baseImage, arch)
+		// Pull may have advanced the base beyond the cached registry digest.
+		// Discard that observation so the next warm check cannot reject this
+		// build against an older digest until DigestCacheTTL expires.
+		c.mu.Lock()
+		delete(c.digestCache, c.remoteDigestCacheKey(baseImage, arch))
+		c.mu.Unlock()
+		manifestDigest, _ = c.cachedRemoteManifestDigest(ctx, baseImage, arch)
 	}
 
 	contextSHA, err := keysSHA(c.keysDir, userOwner)
