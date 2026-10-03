@@ -974,6 +974,11 @@ func TestNewProvider(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		if err := p.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	})
 	if _, err := p.GenSync(t.Context(), genai.Messages{genai.NewTextMessage("Describe changes")}); err != nil {
 		t.Fatal(err)
 	}

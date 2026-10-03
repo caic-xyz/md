@@ -1211,7 +1211,7 @@ func (a *app) cmdPush(ctx context.Context, args []string) error {
 	return eg.Wait()
 }
 
-func (a *app) cmdPull(ctx context.Context, args []string) error {
+func (a *app) cmdPull(ctx context.Context, args []string) (retErr error) {
 	contextTokens, err := commitMessageTokensFromEnv()
 	if err != nil {
 		return err
@@ -1254,6 +1254,13 @@ func (a *app) cmdPull(ctx context.Context, args []string) error {
 		if err != nil {
 			slog.WarnContext(ctx, "md", "msg", "failed to initialize provider", "err", err)
 		}
+	}
+	if p != nil {
+		defer func() {
+			if err := p.Close(); err != nil {
+				retErr = errors.Join(retErr, fmt.Errorf("closing provider: %w", err))
+			}
+		}()
 	}
 	if !*all {
 		return ct.Pull(ctx, os.Stdout, os.Stderr, repoIdx, &md.PullOpts{Provider: p, ContextTokens: *tokens, NoVerify: *noVerify})
@@ -2091,6 +2098,19 @@ func shellSplit(s string) ([]string, error) {
 	return args, nil
 }
 
+// newClosedOnError calls cfg.Factory. A factory can return a client along with
+// an error; newClosedOnError closes that client and returns nil.
+func newClosedOnError(ctx context.Context, cfg providers.Config, opts ...genai.ProviderOption) (genai.Provider, error) {
+	p, err := cfg.Factory(ctx, opts...)
+	if err != nil {
+		if p != nil {
+			err = errors.Join(err, p.Close())
+		}
+		return nil, err
+	}
+	return p, nil
+}
+
 func newProvider(ctx context.Context, provider, model, remote, apiKey string) (genai.Provider, error) {
 	m := genai.ProviderOptionModel(model)
 	if m == "" {
@@ -2115,7 +2135,7 @@ func newProvider(ctx context.Context, provider, model, remote, apiKey string) (g
 				}))
 			}
 		}
-		return cfg.Factory(ctx, opts...)
+		return newClosedOnError(ctx, cfg, opts...)
 	}
 	// Auto-discover: prefer CLI-based providers, then alphabetically.
 	provs := providers.Available(ctx)
@@ -2128,7 +2148,7 @@ func newProvider(ctx context.Context, provider, model, remote, apiKey string) (g
 		if !ok {
 			continue
 		}
-		c, err := cfg.Factory(ctx, m)
+		c, err := newClosedOnError(ctx, cfg, m)
 		if err != nil {
 			slog.DebugContext(ctx, "md", "msg", "provider skipped", "provider", name, "error", err)
 			continue
