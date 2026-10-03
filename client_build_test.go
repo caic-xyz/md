@@ -939,10 +939,12 @@ func TestStageStartupScripts(t *testing.T) {
 	}
 	var scripts int
 	err := fs.WalkDir(rscFS, specializedBuildContextPrefix, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".sh") {
+		if err != nil || path == specializedBuildContextPrefix {
 			return err
 		}
-		scripts++
+		if !d.IsDir() {
+			scripts++
+		}
 		rel := strings.TrimPrefix(path, specializedBuildContextPrefix+"/")
 		info, err := os.Stat(filepath.Join(dir, filepath.FromSlash(rel)))
 		if err != nil {

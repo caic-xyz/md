@@ -846,7 +846,10 @@ func extractEmbeddedTreeTo(prefix, dir string) error {
 		}
 		target := filepath.Join(dir, rel)
 		if d.IsDir() {
-			return os.MkdirAll(target, 0o755) //nolint:gosec // matches embedded filesystem permissions
+			if err := os.MkdirAll(target, 0o755); err != nil { //nolint:gosec // build-context directories must be traversable by the image user
+				return err
+			}
+			return os.Chmod(target, 0o755) //nolint:gosec // restore permissions masked by the host umask
 		}
 		data, err := rscFS.ReadFile(path)
 		if err != nil {
@@ -857,7 +860,12 @@ func extractEmbeddedTreeTo(prefix, dir string) error {
 		if isExecutable(data) {
 			mode = 0o755
 		}
-		return os.WriteFile(target, data, mode)
+		if err := os.WriteFile(target, data, mode); err != nil {
+			return err
+		}
+		// The build context is copied into images whose setup runs as a
+		// different user. Host service umasks must not hide its files.
+		return os.Chmod(target, mode)
 	})
 	if err != nil {
 		return fmt.Errorf("extracting %s: %w", prefix, err)
