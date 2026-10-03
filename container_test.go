@@ -29,8 +29,62 @@ import (
 	"testing"
 	"time"
 
+	"github.com/caic-xyz/md/containers"
 	"github.com/caic-xyz/md/git"
 )
+
+type cpuLimitRuntime struct {
+	containers.Runtime
+
+	cpus   int
+	cpuErr error
+	args   []string
+}
+
+func (r *cpuLimitRuntime) Name() string { return "docker" }
+
+func (r *cpuLimitRuntime) CPUCount(context.Context) (int, error) { return r.cpus, r.cpuErr }
+
+func (r *cpuLimitRuntime) RunOut(_ context.Context, _ string, _, _ io.Writer, args ...string) error {
+	r.args = slices.Clone(args)
+	return errors.New("stop after recording launch")
+}
+
+func TestLaunchContainerCPULimit(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name      string
+		cpus      int
+		requested int
+		want      string
+	}{
+		{name: "docker_desktop", cpus: 14, requested: DefaultMaxCPUs, want: "12"},
+		{name: "single_cpu", cpus: 1, requested: DefaultMaxCPUs, want: "1"},
+		{name: "two_cpus", cpus: 2, requested: DefaultMaxCPUs, want: "2"},
+		{name: "three_cpus", cpus: 3, requested: DefaultMaxCPUs, want: "2"},
+		{name: "explicit", requested: 4, want: "4"},
+		{name: "unlimited", requested: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := &cpuLimitRuntime{cpus: tc.cpus}
+			if tc.requested != DefaultMaxCPUs {
+				r.cpuErr = errors.New("explicit limits must not query the runtime CPU count")
+			}
+			c := &Container{Client: &Client{Runtime: r}, Name: "md-test"}
+			if err := c.launchContainer(t.Context(), io.Discard, io.Discard, &StartOpts{MaxCPUs: tc.requested}, "test-image"); err == nil {
+				t.Fatal("expected recording runtime to stop launch")
+			}
+			i := slices.Index(r.args, "--cpus")
+			if tc.want == "" && len(r.args) > 0 && i < 0 {
+				return
+			}
+			if i < 0 || i+1 >= len(r.args) || r.args[i+1] != tc.want {
+				t.Fatalf("launch args = %v; want --cpus %s", r.args, tc.want)
+			}
+		})
+	}
+}
 
 func runTestGit(t *testing.T, ctx context.Context, wd string, args ...string) string {
 	cmd := exec.CommandContext(ctx, "git", args...) //nolint:gosec // args are from test code

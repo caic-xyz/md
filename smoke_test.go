@@ -549,7 +549,7 @@ func TestSmoke(t *testing.T) {
 								Repos:   forkRepos,
 								Quiet:   true,
 								Sudo:    false,
-								MaxCPUs: DefaultMaxCPUs(),
+								MaxCPUs: DefaultMaxCPUs,
 							})
 							if err != nil {
 								t.Fatalf("Fork without sudo: %v\nstdout:\n%s\nstderr:\n%s", err, forkStdout.String(), forkStderr.String())
@@ -955,7 +955,7 @@ func TestSmoke(t *testing.T) {
 						},
 						Quiet:   true,
 						Mounts:  mounts,
-						MaxCPUs: DefaultMaxCPUs(),
+						MaxCPUs: DefaultMaxCPUs,
 					})
 					if err != nil {
 						state, stateErr := client.Runtime.Run(t.Context(), "", "inspect", "--format", "{{json .State}}", staleForkName)

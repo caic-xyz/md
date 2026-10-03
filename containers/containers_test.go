@@ -20,6 +20,64 @@ import (
 
 const fakeBaseRunEnv = "MD_TEST_FAKE_BASE_RUN"
 
+func TestMain(m *testing.M) {
+	if output := os.Getenv("MD_TEST_CPU_COUNT"); output != "" {
+		if strings.Join(os.Args[1:], " ") != "info --format "+os.Getenv("MD_TEST_CPU_FORMAT") {
+			os.Exit(2)
+		}
+		if output == "error" {
+			_, _ = fmt.Fprintln(os.Stderr, "runtime unavailable")
+			os.Exit(1)
+		}
+		_, _ = fmt.Fprintln(os.Stdout, output)
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
+
+func TestCPUCount(t *testing.T) {
+	t.Parallel()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"docker", "podman"} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			format := "{{.NCPU}}"
+			if name == "podman" {
+				format = "{{.Host.CPUs}}"
+			}
+			for _, tc := range []struct {
+				output string
+				want   int
+				err    string
+			}{
+				{output: "14", want: 14},
+				{output: "1", want: 1},
+				{output: "0", err: "invalid runtime CPU count"},
+				{output: "-1", err: "invalid runtime CPU count"},
+				{output: "invalid", err: "parsing runtime CPU count"},
+				{output: "error", err: "runtime unavailable"},
+			} {
+				t.Run(tc.output, func(t *testing.T) {
+					t.Parallel()
+					b := newBase(exe, nil, []string{"MD_TEST_CPU_COUNT=" + tc.output, "MD_TEST_CPU_FORMAT=" + format}, parseDockerStats)
+					b.name = name
+					got, err := b.CPUCount(t.Context())
+					if tc.err != "" {
+						if err == nil || !strings.Contains(err.Error(), tc.err) {
+							t.Fatalf("CPUCount error = %v, want %s", err, tc.err)
+						}
+					} else if err != nil || got != tc.want {
+						t.Fatalf("CPUCount = %d, %v; want %d", got, err, tc.want)
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestBaseRun(t *testing.T) {
 	if mode := os.Getenv(fakeBaseRunEnv); mode != "" {
 		_, _ = fmt.Fprintln(os.Stdout, "  runtime output  ")

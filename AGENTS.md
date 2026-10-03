@@ -13,7 +13,9 @@ A file to [guide coding agents](https://agents.md/).
   that carry no `.sh` suffix.
 - Update AGENTS.md when changing instructions for agents working in this repository. Document runtime behavior in
   code or project docs; `make fix` maintains the File Index.
-- Update rsc/user/home/user/src/AGENTS.md everytime you make a change that affects the agent inside the container.
+- Update rsc/user/home/user/src/AGENTS.md only when a change materially affects the environment or workflow inside
+  the container and changes what the agent needs to know or do. The container agent cannot inspect the host;
+  keep host-side implementation details and runtime behavior in code or project docs.
 - **Glob/find tools may skip dotfiles by default.** The `rsc/` tree contains important config under dot-directories (e.g. `rsc/user/home/user/.config/git/config`). Use Grep or explicit dot-inclusive patterns when searching for files under `rsc/`.
 - When adding a new setup script in `rsc/root/root/setup/`, add a corresponding `RUN` command to `rsc/root/Dockerfile`. When adding a new setup script in `rsc/user/home/user/setup/`, add a corresponding `RUN` command to `rsc/user/Dockerfile`.
 - No tests should be written for Python or shell script changes.

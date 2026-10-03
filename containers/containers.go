@@ -308,6 +308,8 @@ type Runtime interface {
 	Run(ctx context.Context, dir string, args ...string) (string, error)
 	// RunOut executes a runtime command with stdout and stderr connected to writers.
 	RunOut(ctx context.Context, dir string, stdout, stderr io.Writer, args ...string) error
+	// CPUCount returns the number of CPUs available to the runtime server.
+	CPUCount(ctx context.Context) (int, error)
 
 	// List returns all containers known to the runtime.
 	List(ctx context.Context) ([]Container, error)

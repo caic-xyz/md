@@ -561,7 +561,7 @@ func (a *app) cmdStart(ctx context.Context, args []string) error {
 	fs.Var(noCacheSpecs, "no-cache", "Exclude a default well-known cache by name; may be repeated")
 	noCaches := fs.Bool("no-caches", false, "Disable all default caches")
 	github := fs.Bool("github", false, "Inject GitHub token into container")
-	cpus := fs.Int("cpus", md.DefaultMaxCPUs(), "Max CPU cores for the container (0=no limit)")
+	cpus := fs.Int("cpus", md.DefaultMaxCPUs, "Max CPU cores for the container (-1=runtime CPUs minus 2, 0=no limit)")
 	dockerFlags := &shellSplitSlice{}
 	fs.Var(dockerFlags, "docker-flag", "Extra flag passed verbatim to docker/podman run; may be repeated")
 	fs.Usage = func() { printSubcommandUsage(fs) }
@@ -733,7 +733,7 @@ func (a *app) cmdRun(ctx context.Context, args []string) error {
 	envSpecs := &stringSlice{}
 	fs.Var(envSpecs, "env", "Set environment in container: NAME copies host, NAME=value sets, NAME= unsets; may be repeated")
 	applyPatch := fs.Bool("apply-patch", false, "Pull changes from the temporary container back to the host after the command")
-	cpus := fs.Int("cpus", md.DefaultMaxCPUs(), "Max CPU cores for the container (0=no limit)")
+	cpus := fs.Int("cpus", md.DefaultMaxCPUs, "Max CPU cores for the container (-1=runtime CPUs minus 2, 0=no limit)")
 	dockerFlags := &shellSplitSlice{}
 	fs.Var(dockerFlags, "docker-flag", "Extra flag passed verbatim to docker/podman run; may be repeated")
 	fs.Usage = func() { printSubcommandUsage(fs) }
@@ -1412,7 +1412,7 @@ func (a *app) cmdFork(ctx context.Context, args []string) error {
 	quiet := fs.Bool("q", false, "Suppress informational messages")
 	noSSH := fs.Bool("no-ssh", false, "Don't SSH into the forked container after starting")
 	github := fs.Bool("github", false, "Inject GitHub token into container")
-	cpus := fs.Int("cpus", md.DefaultMaxCPUs(), "Max CPU cores for the container (0=no limit)")
+	cpus := fs.Int("cpus", md.DefaultMaxCPUs, "Max CPU cores for the container (-1=runtime CPUs minus 2, 0=no limit)")
 	dockerFlags := &shellSplitSlice{}
 	fs.Var(dockerFlags, "docker-flag", "Extra flag passed verbatim to docker/podman run; may be repeated")
 	extraRepos := &stringSlice{}

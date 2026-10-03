@@ -78,11 +78,11 @@ const (
 	RuntimePodman Runtime = "podman"
 )
 
-// DefaultMaxCPUs returns max(2, NumCPU-2), a sensible CPU limit that
-// leaves headroom for the host while guaranteeing at least 2 cores.
-func DefaultMaxCPUs() int {
-	return max(2, runtime.NumCPU()-2)
-}
+// DefaultMaxCPUs selects an automatic CPU limit at container launch: leave two
+// CPUs available to the runtime, allowing at least two CPUs when available.
+// The runtime's CPU count may differ from the host's with Docker Desktop or a
+// remote daemon. Zero still means no limit in StartOpts and ForkOpts.
+const DefaultMaxCPUs = -1
 
 const (
 	// PlatformDefault uses the host's native Linux container platform.

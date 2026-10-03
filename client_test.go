@@ -855,6 +855,10 @@ func (r *imageDecisionRuntime) List(context.Context) ([]containers.Container, er
 	return nil, nil
 }
 
+func (r *imageDecisionRuntime) CPUCount(context.Context) (int, error) {
+	return 14, nil
+}
+
 func (r *imageDecisionRuntime) InspectContainer(context.Context, string) (*containers.Container, error) {
 	return nil, errors.New("not implemented")
 }
@@ -1149,6 +1153,10 @@ func runFakeRuntime(args []string, logPath string, localBase bool, containerStat
 	if err := appendFakeCommandLog(logPath, args); err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "writing fake runtime log: %v\n", err)
 		return 1
+	}
+	if len(args) > 0 && args[0] == "info" {
+		_, _ = fmt.Fprintln(os.Stdout, "14")
+		return 0
 	}
 	if len(args) >= 2 && args[0] == "inspect" {
 		if runtimeError != "" {

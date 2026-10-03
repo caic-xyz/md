@@ -1040,7 +1040,7 @@ type StartOpts struct {
 	ExtraEnv []string
 	// MaxCPUs limits the number of CPU cores the container may use.
 	// Passed as --cpus to docker/podman. Zero means no limit.
-	// Use [DefaultMaxCPUs] for a sensible default.
+	// Use [DefaultMaxCPUs] to calculate a default from the runtime CPU count.
 	MaxCPUs int
 	// ExtraRunArgs are additional arguments passed verbatim to the
 	// container runtime's "run" command. Not portable across runtimes.
@@ -1118,7 +1118,7 @@ type ForkOpts struct {
 	Mounts []Mount
 	// MaxCPUs limits the number of CPU cores the forked container may use.
 	// Passed as --cpus to docker/podman. Zero means no limit.
-	// Use [DefaultMaxCPUs] for a sensible default.
+	// Use [DefaultMaxCPUs] to calculate a default from the runtime CPU count.
 	MaxCPUs int
 	// ExtraRunArgs are additional arguments passed verbatim to the
 	// container runtime's "run" command. Not portable across runtimes.
@@ -3822,8 +3822,16 @@ func (c *Container) launchContainer(ctx context.Context, stdout, stderr io.Write
 		// /usr/share/zoneinfo/Etc/UTC, breaking TZ=UTC inside the container.
 		"-v", "/etc/localtime:/etc/localtime:ro",
 	}
-	if opts.MaxCPUs > 0 {
-		runArgs = append(runArgs, "--cpus", strconv.Itoa(opts.MaxCPUs))
+	cpus := opts.MaxCPUs
+	if cpus == DefaultMaxCPUs {
+		n, err := c.Runtime.CPUCount(ctx)
+		if err != nil {
+			return err
+		}
+		cpus = min(n, max(2, n-2))
+	}
+	if cpus > 0 {
+		runArgs = append(runArgs, "--cpus", strconv.Itoa(cpus))
 	}
 
 	if opts.Display {
