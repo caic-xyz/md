@@ -440,8 +440,8 @@ github.com/maratori/testableexamples v1.0.1 h1:HfOQXs+XgfeRBJ+Wz0XfH+FHnoY9TVqL6
 github.com/maratori/testableexamples v1.0.1/go.mod h1:XE2F/nQs7B9N08JgyRmdGjYVGqxWwClLPCGSQhXQSrQ=
 github.com/maratori/testpackage v1.1.2 h1:ffDSh+AgqluCLMXhM19f/cpvQAKygKAJXFl9aUjmbqs=
 github.com/maratori/testpackage v1.1.2/go.mod h1:8F24GdVDFW5Ew43Et02jamrVMNXLUNaOynhDssITGfc=
-github.com/maruel/genai v0.8.2-0.20261003191951-ce29d0a57a60 h1:SbwA3PoCuaJ4riRau4xiUE7Hw0jR6m6am5rdQO/AOZE=
-github.com/maruel/genai v0.8.2-0.20261003191951-ce29d0a57a60/go.mod h1:a4t2KAGNrtK8Fdz3BUevGwR/A4fy1ANugF10396DRGY=
+github.com/maruel/genai v0.9.0 h1:0dd3uTwVsMsEanG20tKrNDnxpCG9paDnV0UQZOi7h64=
+github.com/maruel/genai v0.9.0/go.mod h1:a4t2KAGNrtK8Fdz3BUevGwR/A4fy1ANugF10396DRGY=
 github.com/maruel/httpjson v0.5.3 h1:GXxDoiaMJyax0nMR0RfefzDiKd86lbMeqPIgkoFqI2I=
 github.com/maruel/httpjson v0.5.3/go.mod h1:YJmWM63IM6ykT1NKm67b5Cuhshl1JUXuxFnmnqmr5Rg=
 github.com/maruel/roundtrippers v0.5.1 h1:ztW+4P91AV2e1ifzRnw7XG593IFn7po4Z3hdxMXzACQ=
