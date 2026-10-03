@@ -85,12 +85,14 @@ this case:
 - Map the rootless Podman host user to the image's fixed UID/GID 1000 with
   `--userns=keep-id:uid=1000,gid=1000`. Specialized image content is also owned
   by 1000:1000, so startup does not rewrite the account or repair the base home.
-  Docker still passes the host UID/GID and repairs ownership when they differ.
+  Native Linux runtimes pass the host UID/GID and repair ownership when they
+  differ. Docker Desktop on macOS/Windows keeps 1000:1000 because its file
+  sharing translates host ownership.
 - In `Fork`, after the fork's SSH is up and before pushing branches, restore
   every collapsed file in the home back to `user`
-  (`find /home/user -xdev -uid 0 -exec chown user:user {} +`), gated on
-  `IsRootless()`. Whole-home rather than just `~/src`, because the collapse is
-  not limited to the repos. This is safe: a fresh home has no legitimately
+  (`find /home/user -xdev -uid 0 -exec chown user:user {} +`), gated on the
+  resolved identity's Podman keep-id mode. Whole-home rather than just `~/src`,
+  because the collapse is not limited to the repos. This is safe: a fresh home has no legitimately
   root-owned files (verified), so `-uid 0` only ever matches collapse
   artifacts. `-xdev` keeps the walk on the container's own filesystem, so it
   never descends into a bind-mounted host directory (which keep-id presents as

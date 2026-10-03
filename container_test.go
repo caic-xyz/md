@@ -43,7 +43,9 @@ type cpuLimitRuntime struct {
 
 func (r *cpuLimitRuntime) Name() string { return "docker" }
 
-func (r *cpuLimitRuntime) CPUCount(context.Context) (int, error) { return r.cpus, r.cpuErr }
+func (r *cpuLimitRuntime) Info(context.Context) (containers.Info, error) {
+	return containers.Info{CPUs: r.cpus}, r.cpuErr
+}
 
 func (r *cpuLimitRuntime) RunOut(_ context.Context, _ string, _, _ io.Writer, args ...string) error {
 	r.args = slices.Clone(args)
@@ -68,9 +70,6 @@ func TestLaunchContainerCPULimit(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			r := &cpuLimitRuntime{cpus: tc.cpus}
-			if tc.requested != DefaultMaxCPUs {
-				r.cpuErr = errors.New("explicit limits must not query the runtime CPU count")
-			}
 			c := &Container{Client: &Client{Runtime: r}, Name: "md-test"}
 			if err := c.launchContainer(t.Context(), io.Discard, io.Discard, &StartOpts{MaxCPUs: tc.requested}, "test-image"); err == nil {
 				t.Fatal("expected recording runtime to stop launch")
@@ -2143,35 +2142,6 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			}
 		}
 	})
-	t.Run("host_user_environment", func(t *testing.T) {
-		t.Parallel()
-		if got, want := rootlessPodmanUserNSArg(), "--userns=keep-id:uid=1000,gid=1000"; got != want {
-			t.Errorf("rootlessPodmanUserNSArg() = %q, want %q", got, want)
-		}
-		for _, tc := range []struct {
-			name           string
-			uid, gid       int
-			rootlessPodman bool
-			want           []string
-		}{
-			{name: "host_identity", uid: 1001, gid: 1002, want: []string{"-e", "MD_HOST_UID=1001", "-e", "MD_HOST_GID=1002"}},
-			{name: "rootless_podman", uid: 1001, gid: 1002, rootlessPodman: true, want: []string{"-e", "MD_HOST_UID=1000", "-e", "MD_HOST_GID=1000"}},
-			// md running as root passes no MD_HOST_UID/MD_HOST_GID. start.sh then
-			// leaves the account at the fixed contract identity, which is why the
-			// specialized image owns its content 1000:1000 in that case.
-			{name: "root", uid: 0, gid: 0},
-			{name: "root_uid", uid: 0, gid: 1002},
-			{name: "root_gid", uid: 1001, gid: 0},
-		} {
-			t.Run(tc.name, func(t *testing.T) {
-				t.Parallel()
-				got := hostUserEnvFor(tc.uid, tc.gid, tc.rootlessPodman)
-				if !slices.Equal(got, tc.want) {
-					t.Errorf("hostUserEnvFor(%d, %d, %v) = %q, want %q", tc.uid, tc.gid, tc.rootlessPodman, got, tc.want)
-				}
-			})
-		}
-	})
 	t.Run("runGitDir_overrides_client_environment", func(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
@@ -3731,7 +3701,7 @@ func TestFork(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, want := range []string{"inspect " + forkName, "rm -f -v " + forkName, "rmi md-fork-md-source"} {
+		for _, want := range []string{"inspect " + forkName, "rm -f -v " + forkName, "rmi -f --no-prune md-fork-md-source"} {
 			if !strings.Contains(string(logData), want) {
 				t.Errorf("runtime log missing %q:\n%s", want, logData)
 			}

@@ -76,37 +76,6 @@ func (b *base) RunOut(ctx context.Context, dir string, stdout, stderr io.Writer,
 	return cmd.Run()
 }
 
-// CPUCount returns the number of CPUs available to the runtime server.
-func (b *base) CPUCount(ctx context.Context) (int, error) {
-	format := "{{.NCPU}}"
-	if b.name == "podman" {
-		format = "{{.Host.CPUs}}"
-	}
-	out, err := b.Run(ctx, "", "info", "--format", format)
-	if err != nil {
-		return 0, fmt.Errorf("querying runtime CPU count: %w", err)
-	}
-	n, err := strconv.Atoi(out)
-	if err != nil {
-		return 0, fmt.Errorf("parsing runtime CPU count %q: %w", out, err)
-	}
-	if n < 1 {
-		return 0, fmt.Errorf("invalid runtime CPU count: %d", n)
-	}
-	return n, nil
-}
-
-// UntagImage removes an image tag.
-func (b *base) UntagImage(ctx context.Context, image string) error {
-	_, err := b.Run(ctx, "", "rmi", image)
-	return err
-}
-
-// IsRootless reports whether the runtime is running rootless.
-func (b *base) IsRootless() bool {
-	return false
-}
-
 // List returns all containers known to the runtime.
 func (b *base) List(ctx context.Context) ([]Container, error) {
 	// Docker's full JSON template implicitly requests Size. Discovery does not

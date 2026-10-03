@@ -139,7 +139,11 @@ func prebuildSpecializedImage(t *testing.T, ctx context.Context, c *Client, base
 // calls Launch+Connect. Returns the live container (caller must Purge via
 // t.Cleanup).
 func launchSmokeContainer(t *testing.T, ctx context.Context, c *Client, baseImage, nameSuffix string, sudo bool, caches ...CacheMount) *Container {
-	if sudo && c.Runtime.IsRootless() {
+	user, err := c.userIdentity(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sudo && user.keepID {
 		t.Skip("skipping: sudo is not supported with rootless podman")
 	}
 	ct, err := c.Container()
@@ -258,11 +262,11 @@ func newSmokeContainer(t *testing.T, ctx context.Context, c *Client, name string
 // does when it runs as root, and rootless Podman maps the host user onto that
 // same identity.
 func smokeContainerUser(t *testing.T, c *Client) (int, int) {
-	t.Helper()
-	if os.Getuid() <= 0 || os.Getgid() <= 0 || c.Runtime.IsRootless() {
-		return containerUserUID, containerUserGID
+	user, err := c.userIdentity(t.Context())
+	if err != nil {
+		t.Fatal(err)
 	}
-	return os.Getuid(), os.Getgid()
+	return user.uid, user.gid
 }
 
 // waitForSmokeContainerExit waits for a container to stop and returns its exit
@@ -479,7 +483,11 @@ func TestSmoke(t *testing.T) {
 
 			client := newSmokeClient(t, rt)
 
-			rootlessRuntime := client.Runtime.IsRootless()
+			info, err := client.Runtime.Info(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			rootlessRuntime := info.Rootless
 
 			// Rootless Podman adds --userns=keep-id, which puts the inner
 			// container in a user namespace. Nested newuidmap then fails

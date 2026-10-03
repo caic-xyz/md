@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strconv"
 )
 
@@ -27,10 +28,35 @@ type docker struct {
 	base
 }
 
+// Info queries the Docker server's CPU capacity and isolation environment.
+func (d *docker) Info(ctx context.Context) (Info, error) {
+	out, err := d.Run(ctx, "", "info", "--format", "{{json .}}")
+	if err != nil {
+		return Info{}, fmt.Errorf("querying runtime server info: %w", err)
+	}
+	var raw dockerInfoJSON
+	if err := json.Unmarshal([]byte(out), &raw); err != nil {
+		return Info{}, fmt.Errorf("parsing runtime server info: %w", err)
+	}
+	if raw.NCPU < 1 {
+		return Info{}, fmt.Errorf("invalid runtime CPU count: %d", raw.NCPU)
+	}
+	return Info{
+		CPUs: raw.NCPU, DockerDesktop: raw.OperatingSystem == "Docker Desktop",
+		Rootless: slices.Contains(raw.SecurityOptions, "name=rootless"),
+	}, nil
+}
+
 // UntagImage removes an image tag without deleting containers that use it.
 func (d *docker) UntagImage(ctx context.Context, image string) error {
 	_, err := d.Run(ctx, "", "rmi", "-f", "--no-prune", image)
 	return err
+}
+
+type dockerInfoJSON struct {
+	NCPU            int      `json:"NCPU"`
+	OperatingSystem string   `json:"OperatingSystem"`
+	SecurityOptions []string `json:"SecurityOptions"`
 }
 
 type dockerStats struct {

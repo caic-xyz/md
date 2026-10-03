@@ -107,7 +107,8 @@ func redactCommandOutput(args []string, output string) string {
 	return output
 }
 
-// New returns a runtime wrapper for executable.
+// New returns a runtime wrapper for a Docker or Podman executable.
+// It rejects unsupported executable names, including an empty name.
 func New(executable string, logger *slog.Logger, env []string) (Runtime, error) {
 	switch runtimeName(executable) {
 	case "docker":
@@ -115,7 +116,7 @@ func New(executable string, logger *slog.Logger, env []string) (Runtime, error) 
 	case "podman":
 		return newPodman(executable, logger, env), nil
 	default:
-		return &commandRuntime{base: newBase(executable, logger, env, parseDockerStats)}, nil
+		return nil, fmt.Errorf("unsupported container runtime %q: expected docker or podman", executable)
 	}
 }
 
@@ -308,8 +309,8 @@ type Runtime interface {
 	Run(ctx context.Context, dir string, args ...string) (string, error)
 	// RunOut executes a runtime command with stdout and stderr connected to writers.
 	RunOut(ctx context.Context, dir string, stdout, stderr io.Writer, args ...string) error
-	// CPUCount returns the number of CPUs available to the runtime server.
-	CPUCount(ctx context.Context) (int, error)
+	// Info queries the runtime server CPU capacity and isolation environment.
+	Info(ctx context.Context) (Info, error)
 
 	// List returns all containers known to the runtime.
 	List(ctx context.Context) ([]Container, error)
@@ -339,8 +340,13 @@ type Runtime interface {
 	WatchStats(ctx context.Context, names []string) (iter.Seq2[StatsSample, error], error)
 	// WatchDieEvents streams container die events for containers carrying labelKey.
 	WatchDieEvents(ctx context.Context, labelKey string) (iter.Seq2[Event, error], error)
-	// IsRootless reports whether the runtime is running rootless.
-	IsRootless() bool
+}
+
+// Info describes the runtime server independently of the client machine.
+type Info struct {
+	CPUs          int
+	DockerDesktop bool
+	Rootless      bool
 }
 
 // Event describes a Docker/Podman lifecycle event.
@@ -367,10 +373,6 @@ type Stats struct {
 type StatsSample struct {
 	Name  string
 	Stats *Stats
-}
-
-type commandRuntime struct {
-	base
 }
 
 type eventJSON struct {

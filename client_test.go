@@ -48,6 +48,19 @@ const (
 )
 
 func testRuntime(t testing.TB, name string, logger *slog.Logger, env []string) containers.Runtime {
+	if base := strings.TrimSuffix(filepath.Base(name), ".exe"); base != "docker" && base != "podman" {
+		src, err := exec.LookPath(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		name = filepath.Join(t.TempDir(), "docker")
+		if runtime.GOOS == "windows" {
+			name += ".exe"
+		}
+		if err := linkOrCopyExecutable(src, name); err != nil {
+			t.Fatal(err)
+		}
+	}
 	r, err := containers.New(name, logger, env)
 	if err != nil {
 		t.Fatal(err)
@@ -313,50 +326,6 @@ func TestClient(t *testing.T) {
 			}
 		}
 	})
-	t.Run("specialized_user_owner", func(t *testing.T) {
-		t.Parallel()
-		for _, tc := range []struct {
-			name        string
-			runtimeName string
-			rootless    bool
-			want        string
-		}{
-			{name: "docker_rootful", runtimeName: "docker", want: "123:456"},
-			{name: "docker_rootless", runtimeName: "docker", rootless: true, want: "123:456"},
-			{name: "podman_rootful", runtimeName: "podman", want: "123:456"},
-			{name: "podman_rootless", runtimeName: "podman", rootless: true, want: "1000:1000"},
-		} {
-			t.Run(tc.name, func(t *testing.T) {
-				t.Parallel()
-				if got := specializedUserOwner(tc.runtimeName, tc.rootless, "123:456"); got != tc.want {
-					t.Errorf("specializedUserOwner() = %q, want %q", got, tc.want)
-				}
-			})
-		}
-	})
-	t.Run("host_user_owner", func(t *testing.T) {
-		t.Parallel()
-		// A root host passes no MD_HOST_UID, so start.sh leaves the image account
-		// at the fixed contract identity instead of chowning by name, which a base
-		// image without that account cannot resolve.
-		for _, tc := range []struct {
-			name     string
-			uid, gid int
-			want     string
-		}{
-			{name: "host_identity", uid: 123, gid: 456, want: "123:456"},
-			{name: "root", uid: 0, gid: 0, want: "1000:1000"},
-			{name: "root_uid", uid: 0, gid: 456, want: "1000:1000"},
-			{name: "root_gid", uid: 123, gid: 0, want: "1000:1000"},
-		} {
-			t.Run(tc.name, func(t *testing.T) {
-				t.Parallel()
-				if got := hostUserOwnerFor(tc.uid, tc.gid); got != tc.want {
-					t.Errorf("hostUserOwnerFor(%d, %d) = %q, want %q", tc.uid, tc.gid, got, tc.want)
-				}
-			})
-		}
-	})
 	t.Run("AgentMounts", func(t *testing.T) {
 		t.Parallel()
 		home := t.TempDir()
@@ -531,6 +500,16 @@ func TestClient(t *testing.T) {
 	})
 	t.Run("Warmup", func(t *testing.T) {
 		t.Parallel()
+		t.Run("server_info_error", func(t *testing.T) {
+			t.Parallel()
+			c, rt := newImageDecisionTestClient(t, "md-specialized-test", "base")
+			rt.infoErr = errors.New("server offline")
+			built, err := c.Warmup(t.Context(), io.Discard, io.Discard, &WarmupOpts{BaseImage: "base"})
+			if err == nil || !strings.Contains(err.Error(), "server offline") || built || rt.builds != 0 {
+				t.Fatalf("Warmup = %t, %v; builds = %d; want server error without a build", built, err, rt.builds)
+			}
+		})
+
 		const baseImage = "local/warmup-test:v1"
 		imageName := userImageName(baseImage, activeCacheKey(nil, ""), PlatformLinuxAMD64.String())
 		c, rt := newImageDecisionTestClient(t, imageName, baseImage)
@@ -719,7 +698,10 @@ func TestImageBuildNeeded(t *testing.T) {
 			rt.storedManifest = tt.storedManifest
 			rt.remoteManifest = tt.remoteManifest
 
-			got := c.imageBuildNeeded(t.Context(), imageName, baseImage, PlatformLinuxAMD64.String(), nil)
+			got, err := c.imageBuildNeeded(t.Context(), imageName, baseImage, PlatformLinuxAMD64.String(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
 			if got != tt.wantNeeded {
 				t.Fatalf("imageBuildNeeded() = %t, want %t", got, tt.wantNeeded)
 			}
@@ -777,7 +759,11 @@ func newImageDecisionTestClient(t *testing.T, imageName, baseImage string) (*Cli
 	if err := c.setupSSH(io.Discard); err != nil {
 		t.Fatal(err)
 	}
-	contextSHA, err := keysSHA(c.keysDir, hostUserOwner())
+	user, err := c.userIdentity(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	contextSHA, err := keysSHA(c.keysDir, user.owner())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -786,6 +772,7 @@ func newImageDecisionTestClient(t *testing.T, imageName, baseImage string) (*Cli
 }
 
 type imageDecisionRuntime struct {
+	infoErr             error
 	imageName           string
 	baseImage           string
 	imageID             string
@@ -855,8 +842,8 @@ func (r *imageDecisionRuntime) List(context.Context) ([]containers.Container, er
 	return nil, nil
 }
 
-func (r *imageDecisionRuntime) CPUCount(context.Context) (int, error) {
-	return 14, nil
+func (r *imageDecisionRuntime) Info(context.Context) (containers.Info, error) {
+	return containers.Info{CPUs: 14}, r.infoErr
 }
 
 func (r *imageDecisionRuntime) InspectContainer(context.Context, string) (*containers.Container, error) {
@@ -907,10 +894,6 @@ func (r *imageDecisionRuntime) WatchStats(context.Context, []string) (iter.Seq2[
 
 func (r *imageDecisionRuntime) WatchDieEvents(context.Context, string) (iter.Seq2[containers.Event, error], error) {
 	return nil, errors.New("not implemented")
-}
-
-func (r *imageDecisionRuntime) IsRootless() bool {
-	return false
 }
 
 func (r *imageDecisionRuntime) inspectSpecializedImage(format string) (string, error) {
@@ -1155,7 +1138,7 @@ func runFakeRuntime(args []string, logPath string, localBase bool, containerStat
 		return 1
 	}
 	if len(args) > 0 && args[0] == "info" {
-		_, _ = fmt.Fprintln(os.Stdout, "14")
+		_, _ = fmt.Fprintln(os.Stdout, `{"NCPU":14}`)
 		return 0
 	}
 	if len(args) >= 2 && args[0] == "inspect" {

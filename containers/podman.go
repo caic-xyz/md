@@ -11,8 +11,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"os"
-	"runtime"
 	"strconv"
 )
 
@@ -29,30 +27,39 @@ type podman struct {
 	base
 }
 
+// Info queries the Podman server's CPU capacity and isolation environment.
+func (p *podman) Info(ctx context.Context) (Info, error) {
+	out, err := p.Run(ctx, "", "info", "--format", "{{json .}}")
+	if err != nil {
+		return Info{}, fmt.Errorf("querying runtime server info: %w", err)
+	}
+	var raw podmanInfoJSON
+	if err := json.Unmarshal([]byte(out), &raw); err != nil {
+		return Info{}, fmt.Errorf("parsing runtime server info: %w", err)
+	}
+	if raw.Host.CPUs < 1 {
+		return Info{}, fmt.Errorf("invalid runtime CPU count: %d", raw.Host.CPUs)
+	}
+	return Info{CPUs: raw.Host.CPUs, Rootless: raw.Host.Security.Rootless}, nil
+}
+
 // UntagImage removes an image tag without deleting containers that use it.
 func (p *podman) UntagImage(ctx context.Context, image string) error {
 	_, err := p.Run(ctx, "", "image", "untag", image)
 	return err
 }
 
-// IsRootless reports whether Podman is running rootless.
-//
-// In rootless Podman on Linux, the default user namespace maps the host user to
-// container UID 0, so bind-mounted host directories appear root-owned inside
-// the container. Callers use this to map the host user to the image's fixed UID
-// and GID 1000 with --userns=keep-id:uid=1000,gid=1000.
-//
-// Caveat: keep-id ownership does not survive `podman commit`, so callers that
-// snapshot containers (fork) must repair ownership. See docs/ROOTLESS.md.
-func (p *podman) IsRootless() bool {
-	return isRootlessPodman()
+type podmanInfoJSON struct {
+	Host podmanHostInfoJSON `json:"host"`
 }
 
-func isRootlessPodman() bool {
-	if runtime.GOOS != "linux" {
-		return false
-	}
-	return os.Getuid() != 0
+type podmanHostInfoJSON struct {
+	CPUs     int                    `json:"cpus"`
+	Security podmanSecurityInfoJSON `json:"security"`
+}
+
+type podmanSecurityInfoJSON struct {
+	Rootless bool `json:"rootless"`
 }
 
 type podmanStats struct {

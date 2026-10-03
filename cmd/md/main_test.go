@@ -637,7 +637,15 @@ func setupCmdDiffContainer(t *testing.T, repoCount int) (ct *md.Container, logPa
 	}
 
 	logger := testLogger(t)
-	rt, err := containers.New(exe, logger, []string{fakeDiffRuntimeEnv + "=1"})
+	dockerName := "docker"
+	if runtime.GOOS == "windows" {
+		dockerName += ".exe"
+	}
+	runtimePath := filepath.Join(binDir, dockerName)
+	if err := copyTestExecutable(exe, runtimePath); err != nil {
+		t.Fatal(err)
+	}
+	rt, err := containers.New(runtimePath, logger, []string{fakeDiffRuntimeEnv + "=1"})
 	if err != nil {
 		t.Fatal(err)
 	}

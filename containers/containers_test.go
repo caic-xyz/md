@@ -21,8 +21,8 @@ import (
 const fakeBaseRunEnv = "MD_TEST_FAKE_BASE_RUN"
 
 func TestMain(m *testing.M) {
-	if output := os.Getenv("MD_TEST_CPU_COUNT"); output != "" {
-		if strings.Join(os.Args[1:], " ") != "info --format "+os.Getenv("MD_TEST_CPU_FORMAT") {
+	if output := os.Getenv("MD_TEST_INFO_JSON"); output != "" {
+		if strings.Join(os.Args[1:], " ") != "info --format {{json .}}" {
 			os.Exit(2)
 		}
 		if output == "error" {
@@ -35,44 +35,48 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-func TestCPUCount(t *testing.T) {
+func TestInfo(t *testing.T) {
 	t.Parallel()
 	exe, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"docker", "podman"} {
-		t.Run(name, func(t *testing.T) {
+	for _, tc := range []struct {
+		name, runtime, output string
+		want                  Info
+		err                   string
+	}{
+		{name: "docker_native", runtime: "docker", output: `{"NCPU":14,"OperatingSystem":"Debian GNU/Linux"}`, want: Info{CPUs: 14}},
+		{name: "docker_desktop", runtime: "docker", output: `{"NCPU":14,"OperatingSystem":"Docker Desktop","SecurityOptions":["name=seccomp,profile=builtin"]}`, want: Info{CPUs: 14, DockerDesktop: true}},
+		{name: "docker_rootless", runtime: "docker", output: `{"NCPU":1,"SecurityOptions":["name=rootless","name=seccomp"]}`, want: Info{CPUs: 1, Rootless: true}},
+		{name: "podman_rootless", runtime: "podman", output: `{"host":{"cpus":8,"security":{"rootless":true}}}`, want: Info{CPUs: 8, Rootless: true}},
+		{name: "podman_rootful", runtime: "podman", output: `{"host":{"cpus":4,"security":{"rootless":false}}}`, want: Info{CPUs: 4}},
+		{name: "missing_cpus", runtime: "docker", output: `{}`, err: "invalid runtime CPU count"},
+		{name: "negative_cpus", runtime: "podman", output: `{"host":{"cpus":-1}}`, err: "invalid runtime CPU count"},
+		{name: "invalid_json", runtime: "docker", output: `invalid`, err: "parsing runtime server info"},
+		{name: "podman_invalid_json", runtime: "podman", output: `invalid`, err: "parsing runtime server info"},
+		{name: "unavailable", runtime: "docker", output: `error`, err: "runtime unavailable"},
+		{name: "podman_unavailable", runtime: "podman", output: `error`, err: "runtime unavailable"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			format := "{{.NCPU}}"
-			if name == "podman" {
-				format = "{{.Host.CPUs}}"
+			env := []string{"MD_TEST_INFO_JSON=" + tc.output}
+			var r Runtime
+			switch tc.runtime {
+			case "docker":
+				r = newDocker(exe, nil, env)
+			case "podman":
+				r = newPodman(exe, nil, env)
 			}
-			for _, tc := range []struct {
-				output string
-				want   int
-				err    string
-			}{
-				{output: "14", want: 14},
-				{output: "1", want: 1},
-				{output: "0", err: "invalid runtime CPU count"},
-				{output: "-1", err: "invalid runtime CPU count"},
-				{output: "invalid", err: "parsing runtime CPU count"},
-				{output: "error", err: "runtime unavailable"},
-			} {
-				t.Run(tc.output, func(t *testing.T) {
-					t.Parallel()
-					b := newBase(exe, nil, []string{"MD_TEST_CPU_COUNT=" + tc.output, "MD_TEST_CPU_FORMAT=" + format}, parseDockerStats)
-					b.name = name
-					got, err := b.CPUCount(t.Context())
-					if tc.err != "" {
-						if err == nil || !strings.Contains(err.Error(), tc.err) {
-							t.Fatalf("CPUCount error = %v, want %s", err, tc.err)
-						}
-					} else if err != nil || got != tc.want {
-						t.Fatalf("CPUCount = %d, %v; want %d", got, err, tc.want)
-					}
-				})
+			got, err := r.Info(t.Context())
+			if tc.err != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.err) {
+					t.Fatalf("Info error = %v, want %s", err, tc.err)
+				}
+				return
+			}
+			if err != nil || got != tc.want {
+				t.Fatalf("Info = %+v, %v; want %+v", got, err, tc.want)
 			}
 		})
 	}
@@ -98,10 +102,7 @@ func TestBaseRun(t *testing.T) {
 	}
 	var log bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&log, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	runtime, err := New(executable, logger, []string{fakeBaseRunEnv + "=success"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	runtime := newDocker(executable, logger, []string{fakeBaseRunEnv + "=success"})
 	out, err := runtime.Run(t.Context(), "", "-test.run=^TestBaseRun$", "--", "--password", "runtime-secret")
 	if err != nil {
 		t.Fatal(err)
@@ -113,10 +114,7 @@ func TestBaseRun(t *testing.T) {
 		t.Fatalf("Run log did not redact sensitive arguments: %s", log.String())
 	}
 
-	runtime, err = New(executable, nil, []string{fakeBaseRunEnv + "=error"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	runtime = newDocker(executable, nil, []string{fakeBaseRunEnv + "=error"})
 	_, err = runtime.Run(t.Context(), "", "-test.run=^TestBaseRun$")
 	if err == nil || !strings.Contains(err.Error(), "exit status 23") || !strings.Contains(err.Error(), "runtime unavailable") {
 		t.Fatalf("Run error = %v, want exit status and trimmed stderr", err)
@@ -125,10 +123,7 @@ func TestBaseRun(t *testing.T) {
 		t.Fatalf("Run error = %v, want wrapped exit status 23", err)
 	}
 
-	runtime, err = New(executable, nil, []string{fakeBaseRunEnv + "=echo-error"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	runtime = newDocker(executable, nil, []string{fakeBaseRunEnv + "=echo-error"})
 	_, err = runtime.Run(t.Context(), "", "-test.run=^TestBaseRun$", "--", "--password", "runtime-secret", "--env", "API_TOKEN=assignment-secret")
 	if err == nil || strings.Contains(err.Error(), "runtime-secret") || strings.Contains(err.Error(), "assignment-secret") || !strings.Contains(err.Error(), "<redacted>") {
 		t.Fatalf("Run error leaked sensitive arguments: %v", err)
@@ -137,6 +132,15 @@ func TestBaseRun(t *testing.T) {
 
 func TestNew(t *testing.T) {
 	t.Parallel()
+	t.Run("error", func(t *testing.T) {
+		t.Parallel()
+		for _, executable := range []string{"", "nerdctl", filepath.Join(t.TempDir(), "custom.exe")} {
+			r, err := New(executable, nil, nil)
+			if r != nil || err == nil || !strings.Contains(err.Error(), "unsupported container runtime") {
+				t.Fatalf("New(%q) = %v, %v; want nil and unsupported runtime error", executable, r, err)
+			}
+		}
+	})
 	t.Run("valid", func(t *testing.T) {
 		t.Parallel()
 		tests := []struct {
@@ -146,7 +150,6 @@ func TestNew(t *testing.T) {
 		}{
 			{name: "docker_path", file: "docker", wantName: "docker"},
 			{name: "podman_exe_path", file: "podman.exe", wantName: "podman"},
-			{name: "unknown_runtime_path", file: "nerdctl", wantName: "nerdctl"},
 		}
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {

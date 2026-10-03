@@ -71,7 +71,7 @@ builds that `-short` skips; `-short` therefore still needs registry and Debian p
 - **`md-user-local`** — user image built locally from `rsc/user/Dockerfile` on top of `md-root-local` via `md build-image` (second step). Used as base when `-image md-user-local` is passed. `md build-image --platform` can build it for `linux/amd64` or `linux/arm64`; the local tag is overwritten by the requested platform build.
 - **`ghcr.io/caic-xyz/md-root:latest`** — remote root image with system packages. Rebuilt infrequently (when root setup scripts change). Built by `docker-build-root.yml`.
 - **`ghcr.io/caic-xyz/md-user:latest`** (default) or any `-image`/`-tag` variant — remote user image with Go, Node, Rust, etc. Rebuilt weekly. Built by `docker-build-user.yml` on top of `md-root`.
-- **`md-specialized-<hash>`** — specialized per-user image built on top of the chosen base via a generated Dockerfile + `docker build`. A Dockerfile is created at runtime with `COPY --chown` for SSH keys, a recursive copy of the embedded `rsc/specialized/` seed, and `COPY --from=<named-context> --chown` for cache directories. Docker-owned content uses the numeric host UID/GID so it matches `user` after startup rewrites the account. Rootless Podman instead keeps the image's UID/GID 1000 and maps the host user there with `--userns=keep-id:uid=1000,gid=1000`, avoiding a recursive copy-up of the large home directory. Images are built with `--no-cache --pull=never --build-context cache-<name>=<hostpath>`. This approach was chosen over `docker create`/`cp`/`commit` (slower: `docker cp` uses API round-trips vs COPY's storage-driver-level tar streaming, and requires starting the container for permission fixes) and over a static Dockerfile (cannot adapt to dynamic cache sets). Built automatically by `md start` and `md run` when needed. The image name includes a 32-hex-char hash of (base image, active cache key, platform) so that different base images, cache sets, or CPU architectures get distinct images without clobbering each other. Computed by `userImageName()` in `client.go`.
+- **`md-specialized-<hash>`** — specialized per-user image built on top of the chosen base via a generated Dockerfile + `docker build`. A Dockerfile is created at runtime with `COPY --chown` for SSH keys, a recursive copy of the embedded `rsc/specialized/` seed, and `COPY --from=<named-context> --chown` for cache directories. Docker-owned content uses the numeric host UID/GID so it matches `user` after startup rewrites the account. Docker Desktop on macOS/Windows keeps UID/GID 1000 because file sharing translates ownership. Rootless Podman also keeps the image's UID/GID 1000 and maps the host user there with `--userns=keep-id:uid=1000,gid=1000`, avoiding a recursive copy-up of the large home directory. Images are built with `--no-cache --pull=never --build-context cache-<name>=<hostpath>`. This approach was chosen over `docker create`/`cp`/`commit` (slower: `docker cp` uses API round-trips vs COPY's storage-driver-level tar streaming, and requires starting the container for permission fixes) and over a static Dockerfile (cannot adapt to dynamic cache sets). Built automatically by `md start` and `md run` when needed. The image name includes a 32-hex-char hash of (base image, active cache key, platform) so that different base images, cache sets, or CPU architectures get distinct images without clobbering each other. Computed by `userImageName()` in `client.go`.
 
 ### When the user image is rebuilt
 
@@ -179,8 +179,7 @@ bundled image's packages exist. A capability is either:
 
 - **always required**: sshd, the md SSH key, and the fixed UID/GID 1000 `user` account. `ensure_account`
   provisions the account when UID/GID 1000 are free and fails clearly when they are taken; `ensure_directories`
-  creates the directories md relies on. Runtimes other than rootless Podman additionally map `user` to the host
-  UID/GID; that identity must not already belong to a different base-image account or group, which startup rejects
+  creates the directories md relies on. Other runtimes additionally map `user` to the host UID/GID; that identity must not already belong to a different base-image account or group, which startup rejects
   rather than creating an ambiguous shared identity. Both setup steps are idempotent.
 - **requested by an md option**: `-display` (`MD_DISPLAY`), `-tailscale` (`MD_TAILSCALE`), `-sudo`
   (`MD_SUDO_PASSWORD`), `-usb` (`/dev/bus/usb`, serial adapters), and `/dev/kvm`.
@@ -210,8 +209,9 @@ The generated specialized Dockerfile enforces that contract without restating it
 - `USER root` keeps an inherited non-root `USER` from running md's own build layers, and `ENTRYPOINT []` keeps an
   inherited entrypoint from running instead of `/root/start.sh`.
 - md owns the content it copies in numerically: the host UID/GID, or the fixed 1000:1000 contract identity when md
-  runs as root (it passes no `MD_HOST_UID` then) or under rootless Podman. The specialized build creates `user` when
-  the base lacks it, then runs `/usr/local/bin/md-run-user-setup` to install coding agents under that account. The
+  runs as root, uses Docker Desktop on macOS/Windows, or uses rootless Podman.
+  `user.go` resolves one identity policy for image ownership, startup, and namespace arguments.
+  The specialized build creates `user` when the base lacks it, then runs `/usr/local/bin/md-run-user-setup` to install coding agents under that account. The
   runner provisions the fixed account when it is absent, resolves the account name and home from UID 1000,
   gives UID/GID 1000 ownership of the home, and executes the numbered user setup scripts in order.
   The build installs agents before injecting host-owned caches and
@@ -278,10 +278,8 @@ Autogenerated from first-line comments. Run scripts/update_agents_file_index.py 
 - `containers/containers.go`: Package containers wraps Docker and Podman command-line runtimes.
 - `containers/containers_test.go`: Tests for container runtime creation and shared helpers.
 - `containers/docker.go`: Docker CLI runtime implementation.
-- `containers/docker_test.go`: Tests for Docker runtime behavior.
 - `containers/inspect.go`: Container runtime inspection types and parsers.
 - `containers/podman.go`: Podman CLI runtime implementation.
-- `containers/podman_test.go`: Tests for Podman runtime behavior.
 - `docs/GIT_MODEL.md`: Git model: host branches, container branches, and what each command does
 - `docs/NETWORKING.md`: Container Outbound Network Restrictions
 - `docs/PLAN_BRING_YOUR_OWN_IMAGE.md`: Run md on Conforming Base Images
@@ -337,4 +335,6 @@ Autogenerated from first-line comments. Run scripts/update_agents_file_index.py 
 - `ssh_test.go`: Tests for ssh.go
 - `tailscale.go`: Tailscale authentication and networking.
 - `tailscale_test.go`: Tests for tailscale.go
+- `user.go`: Container user identity for image ownership and runtime namespace mapping.
+- `user_test.go`: Tests for runtime-specific container identity and ownership.
 <!-- END FILE INDEX -->

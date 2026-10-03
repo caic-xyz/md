@@ -2462,7 +2462,11 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 	// descends into a bind-mounted host directory (which keep-id presents as
 	// user-owned anyway) — host ownership is never rewritten, the reason `:U`
 	// was rejected. `-uid 0` restores only the collapsed files.
-	if c.Runtime.IsRootless() {
+	user, err := c.userIdentity(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if user.keepID {
 		if _, err := c.Runtime.Run(ctx, "", "exec", "--user", "0:0", fork.Name, "find", containerHomeDir, "-xdev", "-uid", "0", "-exec", "chown", "user:user", "{}", "+"); err != nil {
 			return nil, fmt.Errorf("restoring ownership on forked container: %w", err)
 		}
@@ -3560,7 +3564,11 @@ func (c *Container) ensureImage(ctx context.Context, stdout, stderr io.Writer, b
 	}
 	platform = p.String()
 	imageName := userImageName(baseImage, activeCacheKey(caches, c.Home), platform)
-	if !c.imageBuildNeeded(ctx, imageName, baseImage, platform, caches) {
+	needed, err := c.imageBuildNeeded(ctx, imageName, baseImage, platform, caches)
+	if err != nil {
+		return "", err
+	}
+	if !needed {
 		if !quiet {
 			_, _ = fmt.Fprintf(stdout, "- Docker image %s is up to date, skipping build.\n", imageName)
 		}
@@ -3802,7 +3810,12 @@ func (c *Container) launchContainer(ctx context.Context, stdout, stderr io.Write
 	if len(c.Repos) > 1000 {
 		return fmt.Errorf("too many repositories: %d (max 1000)", len(c.Repos))
 	}
-	if opts.Sudo && c.Runtime.IsRootless() {
+	info, err := c.Runtime.Info(ctx)
+	if err != nil {
+		return err
+	}
+	user := resolveUserIdentity(c.Runtime.Name(), runtime.GOOS, info, os.Getuid(), os.Getgid())
+	if opts.Sudo && user.keepID {
 		return errors.New("sudo is not supported with rootless podman; use docker instead")
 	}
 	p := Platform(opts.Platform).Resolve()
@@ -3824,10 +3837,7 @@ func (c *Container) launchContainer(ctx context.Context, stdout, stderr io.Write
 	}
 	cpus := opts.MaxCPUs
 	if cpus == DefaultMaxCPUs {
-		n, err := c.Runtime.CPUCount(ctx)
-		if err != nil {
-			return err
-		}
+		n := info.CPUs
 		cpus = min(n, max(2, n-2))
 	}
 	if cpus > 0 {
@@ -3858,21 +3868,7 @@ func (c *Container) launchContainer(ctx context.Context, stdout, stderr io.Write
 		runArgs = append(runArgs, "--security-opt", "apparmor=unconfined")
 	}
 
-	rootlessPodman := c.Runtime.Name() == "podman" && c.Runtime.IsRootless()
-	hostIDs := hostUserEnv(rootlessPodman)
-	runArgs = append(runArgs, hostIDs...)
-
-	// Rootless Podman maps the host user to the image's UID/GID 1000. This makes
-	// bind-mounted configs writable without rewriting and recursively chowning
-	// the large image home. --user 0:0 keeps start.sh running as root for
-	// privileged setup. Rootless Docker is handled inside start.sh via
-	// /proc/self/uid_map detection since Docker lacks --userns=keep-id.
-	//
-	// Trade-off: keep-id ownership does not round-trip through `podman
-	// commit`, so Fork must re-chown snapshotted repos. See docs/ROOTLESS.md.
-	if rootlessPodman {
-		runArgs = append(runArgs, rootlessPodmanUserNSArg(), "--user", "0:0")
-	}
+	runArgs = append(runArgs, user.runArgs()...)
 
 	// NET_ADMIN and NET_RAW are always granted:
 	// - tcpdump uses AF_PACKET sockets which require NET_RAW.
@@ -4093,25 +4089,6 @@ func usbRunArgs(serialDevices []string) []string {
 		args = append(args, "--device="+path)
 	}
 	return args
-}
-
-func rootlessPodmanUserNSArg() string {
-	return fmt.Sprintf("--userns=keep-id:uid=%d,gid=%d", containerUserUID, containerUserGID)
-}
-
-func hostUserEnv(rootlessPodman bool) []string {
-	return hostUserEnvFor(os.Getuid(), os.Getgid(), rootlessPodman)
-}
-
-func hostUserEnvFor(uid, gid int, rootlessPodman bool) []string {
-	if uid <= 0 || gid <= 0 {
-		return nil
-	}
-	if rootlessPodman {
-		uid = containerUserUID
-		gid = containerUserGID
-	}
-	return []string{"-e", "MD_HOST_UID=" + strconv.Itoa(uid), "-e", "MD_HOST_GID=" + strconv.Itoa(gid)}
 }
 
 // waitForTCP polls until a TCP connection to addr succeeds or the deadline is

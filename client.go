@@ -482,7 +482,15 @@ func (c *Client) Warmup(ctx context.Context, stdout, stderr io.Writer, opts *War
 	}
 	platform := p.String()
 	imageName := userImageName(baseImage, activeCacheKey(opts.Caches, c.Home), platform)
-	if !opts.Force && !c.imageBuildNeeded(ctx, imageName, baseImage, platform, opts.Caches) {
+	needed := true
+	if !opts.Force {
+		var err error
+		needed, err = c.imageBuildNeeded(ctx, imageName, baseImage, platform, opts.Caches)
+		if err != nil {
+			return false, err
+		}
+	}
+	if !needed {
 		if !opts.Quiet {
 			_, _ = fmt.Fprintf(stdout, "- Docker image %s is up to date, skipping build.\n", imageName)
 		}
@@ -926,29 +934,6 @@ func hashEmbeddedTree(w io.Writer, prefix string) error {
 	})
 }
 
-// hostUserOwner returns the numeric owner md gives the content it copies into a
-// specialized image. Running as root is the one case that cannot name that
-// owner: hostUserEnv passes no MD_HOST_UID then, so start.sh leaves the account
-// at the fixed contract identity instead of chowning by name, which a base image
-// without the account cannot resolve.
-func hostUserOwner() string {
-	return hostUserOwnerFor(os.Getuid(), os.Getgid())
-}
-
-func hostUserOwnerFor(uid, gid int) string {
-	if uid <= 0 || gid <= 0 {
-		return fmt.Sprintf("%d:%d", containerUserUID, containerUserGID)
-	}
-	return fmt.Sprintf("%d:%d", uid, gid)
-}
-
-func specializedUserOwner(runtimeName string, rootless bool, hostOwner string) string {
-	if runtimeName == "podman" && rootless {
-		return fmt.Sprintf("%d:%d", containerUserUID, containerUserGID)
-	}
-	return hostOwner
-}
-
 func (c *Client) getImageVersionLabel(ctx context.Context, imageName string) string {
 	out, err := c.Runtime.Run(ctx, "", "image", "inspect", imageName, "--format", `{{index .Config.Labels "org.opencontainers.image.version"}}`)
 	if err != nil || out == "" || out == "<no value>" {
@@ -1091,17 +1076,21 @@ func activeCacheSpecLabel(active []activeCM) string {
 // verifies the local copy matches the registry.
 // home is used to resolve "~/" in cache HostPaths so only caches that
 // resolveCaches would inject are compared.
-func (c *Client) imageBuildNeeded(ctx context.Context, imageName, baseImage, platform string, caches []CacheMount) bool {
+func (c *Client) imageBuildNeeded(ctx context.Context, imageName, baseImage, platform string, caches []CacheMount) (bool, error) {
 	p := Platform(platform).Resolve()
 	if err := p.Validate(); err != nil {
-		return true
+		return false, err
 	}
 	platform = p.String()
 	// Compute cheap inputs first so we can check the cache.
-	userOwner := specializedUserOwner(c.Runtime.Name(), c.Runtime.IsRootless(), hostUserOwner())
+	user, err := c.userIdentity(ctx)
+	if err != nil {
+		return false, err
+	}
+	userOwner := user.owner()
 	contextSHA, err := keysSHA(c.keysDir, userOwner)
 	if err != nil {
-		return true
+		return false, err
 	}
 	activeKey := activeCacheKey(caches, c.Home)
 
@@ -1110,7 +1099,7 @@ func (c *Client) imageBuildNeeded(ctx context.Context, imageName, baseImage, pla
 	if e := c.imageBuildCache; e != nil && e.baseImage == baseImage && e.platform == platform && e.contextSHA == contextSHA && e.cacheKey == activeKey {
 		needed := e.needed
 		c.mu.Unlock()
-		return needed
+		return needed, nil
 	}
 	c.mu.Unlock()
 
@@ -1125,7 +1114,7 @@ func (c *Client) imageBuildNeeded(ctx context.Context, imageName, baseImage, pla
 		needed:     needed,
 	}
 	c.mu.Unlock()
-	return needed
+	return needed, nil
 }
 
 // invalidateImageBuildCache clears the cached imageBuildNeeded result.
@@ -1474,6 +1463,11 @@ func (c *Client) buildSpecializedImage(ctx context.Context, stdout, stderr io.Wr
 	if err != nil {
 		return "", err
 	}
+	user, err := c.userIdentity(ctx)
+	if err != nil {
+		return "", err
+	}
+	userOwner := user.owner()
 	// References without an explicit registry are ambiguous: they may name a
 	// local image tag or a Docker Hub repository. Prefer an existing local
 	// image; otherwise pull from the default registry.
@@ -1538,7 +1532,6 @@ func (c *Client) buildSpecializedImage(ctx context.Context, stdout, stderr io.Wr
 		manifestDigest, _ = c.Runtime.RemoteManifestDigest(ctx, baseImage, arch)
 	}
 
-	userOwner := specializedUserOwner(c.Runtime.Name(), c.Runtime.IsRootless(), hostUserOwner())
 	contextSHA, err := keysSHA(c.keysDir, userOwner)
 	if err != nil {
 		return "", fmt.Errorf("computing keys SHA: %w", err)
@@ -1702,6 +1695,14 @@ func (c *Client) setupSSH(stdout io.Writer) error {
 		return nil
 	}
 	return os.WriteFile(authKeysPath, pubKey, 0o600) //nolint:gosec // path is constructed from trusted config dir
+}
+
+func (c *Client) userIdentity(ctx context.Context) (userIdentity, error) {
+	info, err := c.Runtime.Info(ctx)
+	if err != nil {
+		return userIdentity{}, err
+	}
+	return resolveUserIdentity(c.Runtime.Name(), runtime.GOOS, info, os.Getuid(), os.Getgid()), nil
 }
 
 // isStaleBuilderCacheErr reports whether err looks like a BuildKit cache
