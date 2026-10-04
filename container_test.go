@@ -1971,6 +1971,49 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			t.Fatalf("container feature merge ref after Diff = %q, want unchanged refs/heads/feature", got)
 		}
 	})
+	t.Run("revive_recovers_missing_local_upstream", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
+		ctx := t.Context()
+		ct, hostDir, containerDir := setupPullTest(t)
+		runTestGit(t, ctx, hostDir, "branch", "agy", "origin/main")
+		runTestGit(t, ctx, hostDir, "config", "branch.main.remote", ".")
+		runTestGit(t, ctx, hostDir, "config", "branch.main.merge", "refs/heads/agy")
+		ct.Repos[0].DefaultBranch = "agy"
+		if err := ct.SyncDefaultBranch(ctx, 0); err != nil {
+			t.Fatal(err)
+		}
+		want := runTestGit(t, ctx, containerDir, "rev-parse", "agy")
+		runTestGit(t, ctx, hostDir, "branch", "-D", "agy")
+		if err := ct.restoreLocalUpstreams(ctx, 0); err != nil {
+			t.Fatal(err)
+		}
+		if got := runTestGit(t, ctx, hostDir, "rev-parse", "agy"); got != want {
+			t.Fatalf("restored agy = %q, want %q", got, want)
+		}
+		if err := ct.SyncDefaultBranch(ctx, 0); err != nil {
+			t.Fatalf("sync after recovery: %v", err)
+		}
+		// A retry must not overwrite a branch that now exists on the host.
+		runTestGit(t, ctx, hostDir, "update-ref", "refs/heads/agy", "main")
+		want = runTestGit(t, ctx, hostDir, "rev-parse", "agy")
+		if err := ct.restoreLocalUpstreams(ctx, 0); err != nil {
+			t.Fatal(err)
+		}
+		if got := runTestGit(t, ctx, hostDir, "rev-parse", "agy"); got != want {
+			t.Fatalf("recovery moved existing agy to %q, want %q", got, want)
+		}
+	})
+	t.Run("revive_missing_local_upstream_absent_in_container", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
+		ct, hostDir, _ := setupPullTest(t)
+		runTestGit(t, t.Context(), hostDir, "config", "branch.main.remote", ".")
+		runTestGit(t, t.Context(), hostDir, "config", "branch.main.merge", "refs/heads/agy")
+		if err := ct.restoreLocalUpstreams(t.Context(), 0); err == nil || !strings.Contains(err.Error(), "agy") {
+			t.Fatalf("recovery error = %v, want missing agy error", err)
+		}
+		g := &git.Checkout{Root: hostDir, Logger: ct.Logger}
+		if exists, err := g.RefExists(t.Context(), "refs/heads/agy"); err != nil || exists {
+			t.Fatalf("agy exists = %v, err = %v, want absent", exists, err)
+		}
+	})
 	t.Run("diff_syncs_local_branch_upstream", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
 		ctx := t.Context()
 		ct, hostDir, containerDir := setupPullTest(t)

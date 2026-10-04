@@ -1569,10 +1569,11 @@ func (c *Container) Connect(ctx context.Context, stdout, stderr io.Writer, opts 
 	return result, nil
 }
 
-// Revive restarts a stopped (exited) container. It validates git remotes,
+// Revive restarts a stopped (exited) container. It restores missing local
+// upstream branches from the preserved container, validates git remotes,
 // runs `docker start`, re-queries the SSH port (which changes on restart),
 // rewrites the SSH config, and waits for SSH to become ready. It does NOT
-// push repos or send .env — the container's filesystem is preserved across
+// reset working branches or send .env — the container's filesystem is preserved across
 // stop/start.
 func (c *Container) Revive(ctx context.Context, stdout, stderr io.Writer) error {
 	for i := range c.Repos {
@@ -1650,6 +1651,9 @@ func (c *Container) Revive(ctx context.Context, stdout, stderr io.Writer) error 
 	// Refresh cached remote refs and remote configuration without resetting the
 	// preserved working branches.
 	for i := range c.Repos {
+		if err := c.restoreLocalUpstreams(ctx, i); err != nil {
+			return fmt.Errorf("restoring local upstreams after revive: %w", err)
+		}
 		if err := c.SyncDefaultBranch(ctx, i); err != nil {
 			return fmt.Errorf("syncing remote branches after revive: %w", err)
 		}
@@ -2703,6 +2707,44 @@ func (c *Container) SyncDefaultBranch(ctx context.Context, repoIdx int) error {
 		return errors.New("container has no repos")
 	}
 	return c.syncRepoRefs(ctx, &c.Repos[repoIdx])
+}
+
+// restoreLocalUpstreams recovers deleted local upstreams from the container's
+// preserved refs. It never guesses a start point or moves an existing branch.
+func (c *Container) restoreLocalUpstreams(ctx context.Context, repoIdx int) error {
+	r := &c.Repos[repoIdx]
+	g := &git.Checkout{Root: r.GitRoot, Logger: c.Logger}
+	for _, branch := range r.Branches {
+		remote, upstream, err := r.requiredMappedBranchUpstream(ctx, c.Logger, branch)
+		if err != nil {
+			return err
+		}
+		if remote != "." || slices.Contains(r.Branches, upstream) {
+			continue
+		}
+		ref := "refs/heads/" + upstream
+		exists, err := g.RefExists(ctx, ref)
+		if err != nil {
+			return err
+		}
+		if exists {
+			continue
+		}
+		cached := remoteTrackingRef(c.Name, upstream)
+		if _, err := c.runCmd(ctx, r.GitRoot, []string{"git", "fetch", "--no-tags", "--no-write-fetch-head", c.Name, "+" + ref + ":" + cached}); err != nil {
+			return fmt.Errorf("recover local upstream %q from container %q: %w", upstream, c.Name, err)
+		}
+		commit, err := g.RevParse(ctx, cached)
+		if err != nil {
+			return err
+		}
+		// An empty old value requires the ref to remain absent. A concurrent
+		// branch creation fails instead of overwriting the new host branch.
+		if _, err := g.RunGit(ctx, "update-ref", ref, commit, ""); err != nil {
+			return fmt.Errorf("recreate local upstream %q: %w", upstream, err)
+		}
+	}
+	return nil
 }
 
 func (c *Container) syncRepoRefs(ctx context.Context, r *Repo) error {

@@ -27,9 +27,10 @@ Per container, `md` adds two things to your checkout on the host:
   container had at the last transfer. `md pull` integrates from these refs, so
   they are the record of what the host has seen.
 
-`md` moves your branches in only two cases: `md pull` integrates container work
-into them, and `md fork` creates new ones. Branches you did not map are never
-read or written.
+`md pull` integrates container work into mapped branches, and `md fork` creates
+new ones. Revive also recreates a deleted local upstream from the preserved
+same-named container branch. It never moves an existing upstream or guesses a
+start point when the container no longer has it.
 
 ## Branches in the container
 
