@@ -33,6 +33,7 @@ func TestWriteSSHConfig(t *testing.T) {
 		"  User user\n" +
 		"  IdentityFile " + filepath.ToSlash(identityFile) + "\n" +
 		"  IdentitiesOnly yes\n" +
+		"  BatchMode yes\n" +
 		"  UserKnownHostsFile " + filepath.ToSlash(knownHostsFile) + "\n" +
 		"  StrictHostKeyChecking yes\n" +
 		"  AddressFamily inet\n" +
@@ -61,6 +62,7 @@ func TestWriteSSHConfigControlMaster(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, line := range []string{
+		"  BatchMode yes\n",
 		"  ControlMaster auto\n",
 		"  ControlPath " + filepath.ToSlash(filepath.Join(os.TempDir(), "md-md-test.sock")) + "\n",
 		"  ControlPersist 5s\n",

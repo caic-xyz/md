@@ -79,6 +79,7 @@ func controlSocketPath(containerName string) string {
 }
 
 // writeSSHConfig writes the SSH config file for a container.
+// BatchMode disables authentication prompts; md provisions keys and known hosts.
 // When controlMaster is true, ControlMaster/ControlPath/ControlPersist
 // directives are included for connection multiplexing.
 func writeSSHConfig(configDir, containerName string, port int32, identityFile, knownHostsFile string, controlMaster bool) error {
@@ -92,6 +93,7 @@ func writeSSHConfig(configDir, containerName string, port int32, identityFile, k
 			"  User user\n"+
 			"  IdentityFile %s\n"+
 			"  IdentitiesOnly yes\n"+
+			"  BatchMode yes\n"+
 			"  UserKnownHostsFile %s\n"+
 			"  StrictHostKeyChecking yes\n"+
 			"  AddressFamily inet\n"+
