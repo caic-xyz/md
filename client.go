@@ -1887,16 +1887,17 @@ type Harness string
 
 // Known agent harnesses.
 const (
-	HarnessAmp      Harness = "amp"
-	HarnessAndroid  Harness = "android"
-	HarnessClaude   Harness = "claude"
-	HarnessCodex    Harness = "codex"
-	HarnessGoose    Harness = "goose"
-	HarnessKilo     Harness = "kilo"
-	HarnessKimi     Harness = "kimi"
-	HarnessOpencode Harness = "opencode"
-	HarnessPi       Harness = "pi"
-	HarnessQwen     Harness = "qwen"
+	HarnessAmp         Harness = "amp"
+	HarnessAndroid     Harness = "android"
+	HarnessAntigravity Harness = "antigravity"
+	HarnessClaude      Harness = "claude"
+	HarnessCodex       Harness = "codex"
+	HarnessGoose       Harness = "goose"
+	HarnessKilo        Harness = "kilo"
+	HarnessKimi        Harness = "kimi"
+	HarnessOpencode    Harness = "opencode"
+	HarnessPi          Harness = "pi"
+	HarnessQwen        Harness = "qwen"
 )
 
 // AgentPaths groups the relative host directory paths for one or more agent
@@ -1924,16 +1925,17 @@ type agentMountRoot struct {
 
 // HarnessMounts maps each known harness to its path configuration.
 var HarnessMounts = map[Harness]AgentPaths{
-	HarnessAmp:      {Description: "Amp", HomePaths: []string{".amp"}, XDGConfigPaths: []string{"amp"}, LocalSharePaths: []string{"amp"}},
-	HarnessAndroid:  {Description: "Android Studio", HomePaths: []string{".android"}},
-	HarnessClaude:   {Description: "Claude Code", HomePaths: []string{".claude"}},
-	HarnessCodex:    {Description: "Codex", HomePaths: []string{".codex"}},
-	HarnessGoose:    {Description: "Goose", XDGConfigPaths: []string{"goose"}, LocalSharePaths: []string{"goose"}},
-	HarnessKilo:     {Description: "Kilo Code", HomePaths: []string{".kilocode"}},
-	HarnessKimi:     {Description: "Kimi", HomePaths: []string{".kimi"}},
-	HarnessOpencode: {Description: "OpenCode", XDGConfigPaths: []string{"opencode"}, LocalSharePaths: []string{"opencode"}, LocalStatePaths: []string{"opencode"}},
-	HarnessPi:       {Description: "Pi", HomePaths: []string{".pi"}},
-	HarnessQwen:     {Description: "Qwen Code", HomePaths: []string{".qwen"}},
+	HarnessAmp:         {Description: "Amp", HomePaths: []string{".amp"}, XDGConfigPaths: []string{"amp"}, LocalSharePaths: []string{"amp"}},
+	HarnessAndroid:     {Description: "Android Studio", HomePaths: []string{".android"}},
+	HarnessAntigravity: {Description: "Antigravity", HomePaths: []string{".gemini"}},
+	HarnessClaude:      {Description: "Claude Code", HomePaths: []string{".claude"}},
+	HarnessCodex:       {Description: "Codex", HomePaths: []string{".codex"}},
+	HarnessGoose:       {Description: "Goose", XDGConfigPaths: []string{"goose"}, LocalSharePaths: []string{"goose"}},
+	HarnessKilo:        {Description: "Kilo Code", HomePaths: []string{".kilocode"}},
+	HarnessKimi:        {Description: "Kimi", HomePaths: []string{".kimi"}},
+	HarnessOpencode:    {Description: "OpenCode", XDGConfigPaths: []string{"opencode"}, LocalSharePaths: []string{"opencode"}, LocalStatePaths: []string{"opencode"}},
+	HarnessPi:          {Description: "Pi", HomePaths: []string{".pi"}},
+	HarnessQwen:        {Description: "Qwen Code", HomePaths: []string{".qwen"}},
 }
 
 // Mount defines a host directory to bind-mount into the running container.

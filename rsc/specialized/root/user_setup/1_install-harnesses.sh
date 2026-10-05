@@ -30,6 +30,10 @@ mkdir -p "$PNPM_HOME/bin"
 corepack enable pnpm
 pnpm add -g @openai/codex@latest @earendil-works/pi-coding-agent@latest
 
+# A custom install directory avoids the installer's shell-profile edits.
+# The endpoint can serve a gzip Content-Encoding even without Accept-Encoding.
+curl -fsSL --compressed https://antigravity.google/cli/install.sh | bash -s -- --dir "$HOME/.local/bin"
+
 curl -fsSL https://opencode.ai/install | bash
 
 mkdir -p "$HOME/.claude"
@@ -40,7 +44,7 @@ ln -sf "$HOME/.claude/claude.json" "$HOME/.claude.json"
 curl -fsSL https://claude.ai/install.sh | bash
 ln -sf "$HOME/.claude/claude.json" "$HOME/.claude.json"
 
-for agent in claude codex opencode pi; do
+for agent in agy claude codex opencode pi; do
   if ! command -v "$agent" >/dev/null 2>&1; then
     echo "md: $agent installation did not provide an executable" >&2
     exit 1
@@ -50,7 +54,7 @@ done
 if [[ -f "$HOME/src/tool_versions.md" ]]; then
   {
     printf '\n## Specialized Image Coding Agents\n\n| Tool | Version |\n| :--- | :--- |\n'
-    for agent in claude codex opencode pi; do
+    for agent in agy claude codex opencode pi; do
       version="$($agent --version 2>&1)"
       version="${version%%$'\n'*}"
       printf '| %s | %s |\n' "$agent" "${version//|/\\|}"
