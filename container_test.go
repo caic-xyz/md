@@ -2299,6 +2299,54 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			t.Errorf("pushed main = %q, want %q", got, runTestGit(t, ctx, hostDir, "rev-parse", "main"))
 		}
 	})
+	t.Run("pushMappedBranchRefs_shallow", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		src := t.TempDir()
+		hostDir := filepath.Join(t.TempDir(), "shallow")
+		containerDir := filepath.Join(t.TempDir(), "container.git")
+		runTestGit(t, ctx, src, "init", "-q", "--initial-branch=main")
+		runTestGit(t, ctx, src, "commit", "-q", "--allow-empty", "-m", "base")
+		runTestGit(t, ctx, src, "commit", "-q", "--allow-empty", "-m", "main")
+		runTestGit(t, ctx, src, "tag", "v1")
+		runTestGit(t, ctx, src, "checkout", "-q", "-b", "feature")
+		runTestGit(t, ctx, src, "commit", "-q", "--allow-empty", "-m", "feature")
+		runTestGit(t, ctx, src, "checkout", "-q", "main")
+		// Disable local object copying so Git honors --depth on every platform.
+		runTestGit(t, ctx, "", "clone", "-q", "--no-local", "--depth=1", "--no-single-branch", src, hostDir)
+		runTestGit(t, ctx, "", "init", "-q", "--bare", containerDir)
+		runTestGit(t, ctx, hostDir, "checkout", "-q", "-b", "task", "--track", "origin/main")
+		runTestGit(t, ctx, hostDir, "remote", "add", "md-test", containerDir)
+		ct := &Container{Client: testClient(t), Logger: testLogger(t), Name: "md-test"}
+		r := &Repo{GitRoot: hostDir, Branches: []string{"task"}, Remotes: []string{"origin"}, TagRegexp: ".*", DefaultRemote: "origin", DefaultBranch: "main"}
+		for _, step := range []string{"initial", "new_shallow_root"} {
+			if step == "new_shallow_root" {
+				runTestGit(t, ctx, src, "commit", "-q", "--allow-empty", "-m", "next")
+				runTestGit(t, ctx, hostDir, "fetch", "-q", "--depth=1", "origin")
+				runTestGit(t, ctx, hostDir, "commit", "-q", "--allow-empty", "-m", "task work")
+			}
+			var stderr bytes.Buffer
+			if _, err := ct.pushMappedBranchRefs(ctx, io.Discard, &stderr, r); err != nil {
+				t.Fatalf("%s push: %v: %s", step, err, stderr.String())
+			}
+			for _, ref := range []string{"refs/remotes/origin/main", "refs/remotes/origin/feature", "refs/tags/v1"} {
+				if got, want := runTestGit(t, ctx, containerDir, "rev-parse", ref), runTestGit(t, ctx, hostDir, "rev-parse", ref); got != want {
+					t.Fatalf("%s %s = %s, want %s", step, ref, got, want)
+				}
+			}
+			if got := runTestGit(t, ctx, containerDir, "rev-parse", "--is-shallow-repository"); got != "true" {
+				t.Fatalf("container is shallow = %s", got)
+			}
+			runTestGit(t, ctx, containerDir, "fsck", "--connectivity-only", "--no-reflogs")
+		}
+		// A task tip ahead of its upstream must arrive through an incoming seed.
+		if got, want := runTestGit(t, ctx, containerDir, "rev-parse", "refs/md/incoming/task"), runTestGit(t, ctx, hostDir, "rev-parse", "task"); got != want {
+			t.Fatalf("incoming task = %s, want %s", got, want)
+		}
+		if snapshot, err := seedSource(ctx, hostDir); err != nil || snapshot.objectsDir != "" {
+			t.Fatalf("shallow object copy must use Git transfer: %+v, %v", snapshot, err)
+		}
+	})
 	t.Run("SyncDefaultBranch", func(t *testing.T) {
 		t.Parallel()
 		t.Run("local_only_default_branch", func(t *testing.T) {

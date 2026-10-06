@@ -89,8 +89,8 @@ For large repositories, `md` first
 streams the host checkout's object store and temporary snapshot refs into the
 newly initialized container repository without archive compression. The
 ordinary push then transfers any missing objects and sets the current refs. `md`
-removes the temporary refs after setup. Smaller repositories, repositories
-using Git alternates, and containers without `tar` use the ordinary push
+removes the temporary refs after setup. Smaller repositories, shallow clones,
+repositories using Git alternates, and containers without `tar` use the ordinary push
 directly. `md start` and `md run` accept `-git-copy-min-bytes` to change this
 threshold: `0` uses the default, `-1` disables copying, and `1`
 includes every nonempty object store.

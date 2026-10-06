@@ -3043,16 +3043,31 @@ func (c *Container) pushContainerRefs(ctx context.Context, r *Repo, refspecs []s
 
 // pushRefspecs pushes refspecs in command-line-size-bounded batches. It
 // disables repository hooks and implicit follow-tags behavior, and optionally
-// forces updates. A failure can leave earlier batches applied; an empty
+// forces updates. The receiver accepts shallow roots from the host without
+// fetching full history. A failure can leave earlier batches applied; an empty
 // refspec list is a no-op.
 func (c *Container) pushRefspecs(ctx context.Context, gitRoot, remote string, refspecs []string, force bool, stdout, stderr io.Writer) error {
+	if len(refspecs) == 0 {
+		return nil
+	}
+	shallow, err := (&git.Checkout{Root: gitRoot}).RunGit(ctx, "rev-parse", "--is-shallow-repository")
+	if err != nil {
+		return err
+	}
 	for start := 0; start < len(refspecs); {
-		end := refspecBatchEnd(refspecs, start)
-		args := make([]string, 0, 8+end-start)
+		// Git's receive-pack shallow connectivity check can truncate its
+		// command list after the first new shallow root. Send one ref at a
+		// time so every update receives a status and is actually applied.
+		end := start + 1
+		if shallow != "true" {
+			end = refspecBatchEnd(refspecs, start)
+		}
+		args := make([]string, 0, 9+end-start)
 		// These pushes replicate refs into a task container. They must not run
 		// user-configured pre-push hooks, which are intended for developer
 		// publishes and can require unavailable host-specific dependencies.
-		args = append(args, "git", "push", "-q", "--no-verify", "--no-follow-tags")
+		args = append(args, "git", "push", "-q", "--no-verify", "--no-follow-tags",
+			"--receive-pack=git -c receive.shallowUpdate=true receive-pack")
 		if force {
 			args = append(args, "-f")
 		}
@@ -4291,6 +4306,15 @@ type seedSnapshot struct {
 // objects advertised during the initial push. An empty snapshot skips copying.
 func seedSource(ctx context.Context, gitRoot string) (seedSnapshot, error) {
 	g := &git.Checkout{Root: gitRoot}
+	shallow, err := g.RunGit(ctx, "rev-parse", "--is-shallow-repository")
+	if err != nil {
+		return seedSnapshot{}, err
+	}
+	if shallow == "true" {
+		// Copying objects and refs without shallow roots advertises incomplete
+		// history. Let the ordinary push transfer the boundaries with the objects.
+		return seedSnapshot{}, nil
+	}
 	objectPath, err := g.RunGit(ctx, "rev-parse", "--path-format=absolute", "--git-path", "objects")
 	if err != nil {
 		return seedSnapshot{}, err
