@@ -1321,6 +1321,17 @@ func fakeRuntimeInspect(args []string, localBase bool) int {
 
 func TestBaseImageIsLocal(t *testing.T) {
 	t.Parallel()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger := testLogger(t)
+	env := []string{
+		fakeRuntimeEnv + "=1",
+		fakeRuntimeLogEnv + "=" + filepath.Join(t.TempDir(), "runtime.log"),
+	}
+	present := testRuntime(t, exe, logger, append(slices.Clone(env), fakeRuntimeLocalBaseEnv+"=1"))
+	missing := testRuntime(t, exe, logger, append(slices.Clone(env), fakeRuntimeLocalBaseEnv+"=0"))
 	t.Run("valid", func(t *testing.T) {
 		t.Parallel()
 		for _, image := range []string{
@@ -1330,25 +1341,20 @@ func TestBaseImageIsLocal(t *testing.T) {
 			"ubuntu:latest",
 			"myteam/image:latest",
 		} {
-			logger := testLogger(t)
-			c := &Client{Logger: logger, Runtime: testRuntime(t, "true", logger, nil)}
-			if !c.Runtime.BaseImageIsLocal(t.Context(), image) {
+			if !present.BaseImageIsLocal(t.Context(), image) {
 				t.Errorf("BaseImageIsLocal(%q) = false, want true", image)
 			}
 		}
 	})
 	t.Run("error", func(t *testing.T) {
 		t.Parallel()
-		logger := testLogger(t)
-		c := &Client{Logger: logger, Runtime: testRuntime(t, "false", logger, nil)}
 		for _, image := range []string{"ubuntu:latest", "md-user-local:latest", "myteam/image:latest"} {
-			if c.Runtime.BaseImageIsLocal(t.Context(), image) {
+			if missing.BaseImageIsLocal(t.Context(), image) {
 				t.Errorf("BaseImageIsLocal(%q) = true, want false", image)
 			}
 		}
-		c = &Client{Logger: logger, Runtime: testRuntime(t, "true", logger, nil)}
 		for _, image := range []string{"docker.io/library/ubuntu:latest", "ghcr.io/caic-xyz/md-user:latest", "localhost:5000/md-user:latest"} {
-			if c.Runtime.BaseImageIsLocal(t.Context(), image) {
+			if present.BaseImageIsLocal(t.Context(), image) {
 				t.Errorf("BaseImageIsLocal(%q) = true, want false", image)
 			}
 		}
