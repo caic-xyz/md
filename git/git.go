@@ -293,21 +293,23 @@ func (c *Checkout) RemoteOriginURL(ctx context.Context) string {
 	return out
 }
 
-// PushRef pushes a local ref to the origin remote as the given branch.
-// ref can be a remote-tracking ref (e.g. "container/branch"), a branch
-// name, or any valid git ref. When force is true, --force is passed.
-func (c *Checkout) PushRef(ctx context.Context, ref, branch string, force bool) error {
-	c.Logger.Log(ctx, slog.LevelInfo, "git", "msg", "git push", "ref", ref, "branch", branch, "force", force)
+// PushRef pushes sourceRef to destinationBranch on the named remote.
+//
+// sourceRef can be HEAD, a commit ID, or a local or remote-tracking ref.
+// destinationBranch is a branch name, without the refs/heads/ prefix.
+// When force is true, --force is passed.
+func (c *Checkout) PushRef(ctx context.Context, remote, sourceRef, destinationBranch string, force bool) error {
+	c.Logger.Log(ctx, slog.LevelInfo, "git", "msg", "git push", "remote", remote, "sourceRef", sourceRef, "destinationBranch", destinationBranch, "force", force)
 	args := []string{"push"}
 	if force {
 		args = append(args, "--force")
 	}
-	args = append(args, "origin", ref+":refs/heads/"+branch)
+	args = append(args, "--", remote, sourceRef+":refs/heads/"+destinationBranch)
 	cmd := c.cmd(ctx, args)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("git push origin %s:%s: %w: %s", ref, branch, err, stderr.String())
+		return fmt.Errorf("git push %s %s:%s: %w: %s", remote, sourceRef, destinationBranch, err, stderr.String())
 	}
 	return nil
 }
@@ -338,7 +340,7 @@ func (c *Checkout) SquashOnto(ctx context.Context, sourceRef, targetBranch, mess
 	newCommit := strings.TrimSpace(string(out))
 
 	// 3. Push the new commit to origin/<targetBranch> (non-force).
-	return c.PushRef(ctx, newCommit, targetBranch, false)
+	return c.PushRef(ctx, "origin", newCommit, targetBranch, false)
 }
 
 // RevParse resolves a git ref to its full SHA-1 hash.

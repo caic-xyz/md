@@ -424,20 +424,30 @@ func TestCheckout(t *testing.T) {
 			t.Fatalf("git commit: %v\n%s", err, out)
 		}
 
-		// Push the local branch ref to origin as caic-0.
-		if err := (&Checkout{Root: clone, Logger: testLogger(t)}).PushRef(ctx, "caic-0", "caic-0", false); err != nil {
+		// Select a named remote even when origin points elsewhere.
+		g := &Checkout{Root: clone, Logger: testLogger(t)}
+		if _, err := g.RunGit(ctx, "remote", "rename", "origin", "destination"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := g.RunGit(ctx, "remote", "add", "origin", filepath.Join(dir, "missing.git")); err != nil {
+			t.Fatal(err)
+		}
+		// Push the local branch ref to destination as caic-0.
+		if err := g.PushRef(ctx, "destination", "caic-0", "caic-0", false); err != nil {
 			t.Fatal(err)
 		}
 
-		// Verify the branch exists on the remote.
-		cmd = exec.CommandContext(ctx, "git", "branch", "--list", "caic-0")
-		cmd.Dir = bare
-		out, err := cmd.Output()
+		// Verify the exact commit arrived at the selected remote.
+		want, err := g.RevParse(ctx, "caic-0")
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !strings.Contains(string(out), "caic-0") {
-			t.Errorf("branch caic-0 not found on remote, got: %q", string(out))
+		got, err := (&Checkout{Root: bare, Logger: testLogger(t)}).RevParse(ctx, "refs/heads/caic-0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != want {
+			t.Fatalf("remote commit = %q, want %q", got, want)
 		}
 	})
 
