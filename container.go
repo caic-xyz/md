@@ -138,6 +138,11 @@ fi`
 	// host branch tips used to seed container branches.
 	containerSyncRefPrefix     = "refs/md/sync/"
 	containerIncomingRefPrefix = "refs/md/incoming/"
+
+	// containerSubmoduleHeadRef retains the transferred host module HEAD for
+	// later offline checkouts, even after the container switches branches.
+	// Setup updates it; it intentionally survives submodule checkout.
+	containerSubmoduleHeadRef = "refs/md/submodule-head"
 )
 
 func gitBaseRefCommand() string {
@@ -2566,7 +2571,7 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 		}
 		bases := preflight.extraBases[i]
 		refspecs := appendUniqueRefspecs(preflight.extraRefspecs[i], branchSyncRefspecs(src.Branches, dst.Branches)...)
-		if err := c.pushRefspecs(ctx, src.GitRoot, fork.Name, refspecs, true, stdout, stderr); err != nil {
+		if err := c.pushRefspecs(ctx, src.GitRoot, "", fork.Name, refspecs, true, stdout, stderr); err != nil {
 			return nil, fmt.Errorf("push extra repo %s: %w", src.ContainerPath, err)
 		}
 		primaryBase := bases[0]
@@ -3035,7 +3040,7 @@ func (c *Container) pushContainerRefs(ctx context.Context, r *Repo, refspecs []s
 		return nil
 	}
 	var stderr bytes.Buffer
-	if err := c.pushRefspecs(ctx, r.GitRoot, c.Name, refspecs, true, io.Discard, &stderr); err != nil {
+	if err := c.pushRefspecs(ctx, r.GitRoot, "", c.Name, refspecs, true, io.Discard, &stderr); err != nil {
 		return commandErrorWithStderr("pushing refs", err, stderr.String())
 	}
 	return nil
@@ -3046,11 +3051,18 @@ func (c *Container) pushContainerRefs(ctx context.Context, r *Repo, refspecs []s
 // forces updates. The receiver accepts shallow roots from the host without
 // fetching full history. A failure can leave earlier batches applied; an empty
 // refspec list is a no-op.
-func (c *Container) pushRefspecs(ctx context.Context, gitRoot, remote string, refspecs []string, force bool, stdout, stderr io.Writer) error {
+//
+// A nonempty gitDir selects a submodule's object store without requiring its
+// configured worktree to exist.
+func (c *Container) pushRefspecs(ctx context.Context, gitRoot, gitDir, remote string, refspecs []string, force bool, stdout, stderr io.Writer) error {
 	if len(refspecs) == 0 {
 		return nil
 	}
-	shallow, err := (&git.Checkout{Root: gitRoot}).RunGit(ctx, "rev-parse", "--is-shallow-repository")
+	gitArgs := []string{"git"}
+	if gitDir != "" {
+		gitArgs = append(gitArgs, "--git-dir="+filepath.ToSlash(gitDir), "--work-tree="+filepath.ToSlash(gitRoot))
+	}
+	shallow, err := c.runCmd(ctx, gitRoot, append(slices.Clone(gitArgs), "rev-parse", "--is-shallow-repository"))
 	if err != nil {
 		return err
 	}
@@ -3062,11 +3074,12 @@ func (c *Container) pushRefspecs(ctx context.Context, gitRoot, remote string, re
 		if shallow != "true" {
 			end = refspecBatchEnd(refspecs, start)
 		}
-		args := make([]string, 0, 9+end-start)
+		args := make([]string, 0, len(gitArgs)+8+end-start)
 		// These pushes replicate refs into a task container. They must not run
 		// user-configured pre-push hooks, which are intended for developer
 		// publishes and can require unavailable host-specific dependencies.
-		args = append(args, "git", "push", "-q", "--no-verify", "--no-follow-tags",
+		args = append(args, gitArgs...)
+		args = append(args, "push", "-q", "--no-verify", "--no-follow-tags",
 			"--receive-pack=git -c receive.shallowUpdate=true receive-pack")
 		if force {
 			args = append(args, "-f")
@@ -3141,7 +3154,7 @@ func (c *Container) pushMappedBranchRefs(ctx context.Context, stdout, stderr io.
 	}
 	refspecs = appendUniqueRefspecs(refspecs, syncRefspecs...)
 
-	if err := c.pushRefspecs(ctx, r.GitRoot, c.Name, refspecs, true, stdout, stderr); err != nil {
+	if err := c.pushRefspecs(ctx, r.GitRoot, "", c.Name, refspecs, true, stdout, stderr); err != nil {
 		return nil, fmt.Errorf("push mapped branches: %w", err)
 	}
 	return bases, nil
@@ -3755,36 +3768,36 @@ func (c *Container) pushSubmodules(ctx context.Context, stdout, stderr io.Writer
 		if err := c.runCmdOut(ctx, "", c.SSHCommand(nil, initCmd), stdout, stderr); err != nil {
 			return fmt.Errorf("init submodule %s: %w", relPath, err)
 		}
-		// Push all local branch refs from the host bare module repo. Selected
-		// tags are pushed separately below.
-		// Use GIT_DIR env var instead of --git-dir because --git-dir
-		// still reads core.worktree from the repo config and tries
-		// to chdir there, which fails when the submodule worktree
-		// was never checked out (init but not update, or deinited).
-		// GIT_DIR fully decouples git from any worktree.
-		containerURL := "user@" + c.Name + ":" + containerModuleDir
-		if _, err := c.runGitDir(ctx, hostGitRoot, hostModuleDir, "push", "-q", "--no-verify", "--no-follow-tags", "--all", containerURL); err != nil {
-			return fmt.Errorf("push submodule refs %s: %w", relPath, err)
+		// Use the same shallow-aware sender as ordinary repositories. Select
+		// local branches explicitly so batching also applies to submodules.
+		branches, err := c.runGitDir(ctx, hostGitRoot, hostModuleDir, "for-each-ref", "--format=%(refname)", "refs/heads/")
+		if err != nil {
+			return fmt.Errorf("list submodule branches %s: %w", relPath, err)
+		}
+		// A shallow module's detached HEAD may be the gitlink commit without
+		// being reachable from a branch or selected tag. Keep it advertised so
+		// the offline submodule checkout can resolve that commit. Only this
+		// md-owned seed is force-updated; user branches remain protected.
+		refspecs := []string{"+HEAD:" + containerSubmoduleHeadRef}
+		for ref := range strings.SplitSeq(branches, "\n") {
+			if ref != "" {
+				refspecs = append(refspecs, ref+":"+ref)
+			}
 		}
 		if tagRegexp != "" {
 			tags, err := c.runGitDir(ctx, hostGitRoot, hostModuleDir, "tag", "--list")
 			if err != nil {
 				return fmt.Errorf("list submodule tags %s: %w", relPath, err)
 			}
-			refspecs, err := tagRefspecs(tagRegexp, tags)
+			tagRefs, err := tagRefspecs(tagRegexp, tags)
 			if err != nil {
 				return fmt.Errorf("select submodule tags %s: %w", relPath, err)
 			}
-			for start := 0; start < len(refspecs); {
-				end := refspecBatchEnd(refspecs, start)
-				args := make([]string, 0, 5+end-start)
-				args = append(args, "push", "-q", "--no-verify", "--no-follow-tags", containerURL)
-				args = append(args, refspecs[start:end]...)
-				if _, err := c.runGitDir(ctx, hostGitRoot, hostModuleDir, args...); err != nil {
-					return fmt.Errorf("push submodule tags %s: %w", relPath, err)
-				}
-				start = end
-			}
+			refspecs = append(refspecs, tagRefs...)
+		}
+		containerURL := "user@" + c.Name + ":" + containerModuleDir
+		if err := c.pushRefspecs(ctx, hostGitRoot, hostModuleDir, containerURL, refspecs, false, stdout, stderr); err != nil {
+			return fmt.Errorf("push submodule refs %s: %w", relPath, err)
 		}
 	}
 

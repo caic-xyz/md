@@ -2266,6 +2266,132 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			t.Fatalf("SyncDefaultBranch error = %v, want source repository/container context", err)
 		}
 	})
+	t.Run("pushSubmodules", func(t *testing.T) {
+		for _, tc := range []struct {
+			name      string
+			shallow   bool
+			tagRegexp string
+		}{{"full", false, "^v-"}, {"shallow", true, "^v-"}, {"shallow_no_tags", true, ""}} {
+			t.Run(tc.name, func(t *testing.T) {
+				shallow := tc.shallow
+				ctx := t.Context()
+				fakeSSH(t)
+				t.Setenv("GIT_ALLOW_PROTOCOL", "file:ssh")
+				newRepo := func(name string) string {
+					dir := filepath.Join(t.TempDir(), name)
+					runTestGit(t, ctx, "", "init", "-q", "--initial-branch=main", dir)
+					runTestGit(t, ctx, dir, "commit", "-q", "--allow-empty", "-m", "root")
+					writeTestFile(t, filepath.Join(dir, "tracked.txt"), name+" base\n")
+					runTestGit(t, ctx, dir, "add", ".")
+					runTestGit(t, ctx, dir, "commit", "-q", "-m", "base")
+					runTestGit(t, ctx, dir, "tag", "v-base")
+					writeTestFile(t, filepath.Join(dir, "tracked.txt"), name+" main\n")
+					runTestGit(t, ctx, dir, "commit", "-q", "-am", "main")
+					runTestGit(t, ctx, dir, "tag", "v-main")
+					runTestGit(t, ctx, dir, "tag", "ignored")
+					runTestGit(t, ctx, dir, "checkout", "-q", "-b", "feature")
+					runTestGit(t, ctx, dir, "commit", "-q", "--allow-empty", "-m", "feature")
+					runTestGit(t, ctx, dir, "checkout", "-q", "main")
+					return dir
+				}
+				nested := newRepo("nested")
+				module := newRepo("module")
+				writeTestFile(t, filepath.Join(module, ".gitmodules"), "[submodule \"nested\"]\n\tpath = nested\n\turl = https://example.invalid/nested\n")
+				nestedTip := runTestGit(t, ctx, nested, "rev-parse", "main")
+				runTestGit(t, ctx, module, "update-index", "--add", "--cacheinfo", "160000,"+nestedTip+",nested")
+				runTestGit(t, ctx, module, "add", ".gitmodules")
+				runTestGit(t, ctx, module, "commit", "-q", "-m", "nested submodule")
+				host := newRepo("host")
+				writeTestFile(t, filepath.Join(host, ".gitmodules"), "[submodule \"dep\"]\n\tpath = dep\n\turl = https://example.invalid/module\n")
+				moduleTip := runTestGit(t, ctx, module, "rev-parse", "main")
+				runTestGit(t, ctx, host, "update-index", "--add", "--cacheinfo", "160000,"+moduleTip+",dep")
+				runTestGit(t, ctx, host, "add", ".gitmodules")
+				runTestGit(t, ctx, host, "commit", "-q", "-m", "submodule")
+				for _, repo := range []struct{ src, path, tip string }{{module, "dep", moduleTip}, {nested, "dep/modules/nested", nestedTip}} {
+					// The gitlink pins an older commit than the module's main branch.
+					runTestGit(t, ctx, repo.src, "commit", "-q", "--allow-empty", "-m", "next")
+					dir := filepath.Join(host, ".git", "modules", filepath.FromSlash(repo.path))
+					args := []string{"clone", "-q", "--bare", "--no-local"}
+					if shallow {
+						args = append(args, "--depth=1", "--no-single-branch")
+					}
+					runTestGit(t, ctx, "", append(args, repo.src, dir)...)
+					// Give the tag a distinct shallow root, independent of branch tips.
+					args = []string{"--git-dir=" + dir, "fetch", "-q"}
+					if shallow {
+						args = append(args, "--depth=1")
+					}
+					runTestGit(t, ctx, host, append(args, "origin", "refs/tags/v-base:refs/tags/v-base")...)
+					// Keep the gitlink commit only in detached HEAD, as submodule update does.
+					args = []string{"--git-dir=" + dir, "fetch", "-q"}
+					if shallow {
+						args = append(args, "--depth=1")
+					}
+					runTestGit(t, ctx, host, append(args, "origin", repo.tip)...)
+					runTestGit(t, ctx, host, "--git-dir="+dir, "update-ref", "--no-deref", "HEAD", repo.tip)
+					runTestGit(t, ctx, host, "--git-dir="+dir, "config", "core.bare", "false")
+					runTestGit(t, ctx, host, "--git-dir="+dir, "config", "core.worktree", filepath.Join(t.TempDir(), "missing"))
+				}
+				dst := filepath.Join(t.TempDir(), "container")
+				runTestGit(t, ctx, "", "clone", "-q", "--no-local", host, dst)
+				ct := &Container{Client: testClient(t), Logger: testLogger(t), Name: "md-test"}
+				var stderr bytes.Buffer
+				//nolint:paralleltest // These subtests share a repository and must run in sequence.
+				if !t.Run("valid", func(t *testing.T) {
+					ctx := t.Context()
+					if err := ct.pushSubmodules(ctx, io.Discard, &stderr, filepath.ToSlash(dst), host, tc.tagRegexp, true); err != nil {
+						t.Fatalf("pushSubmodules: %v: %s", err, stderr.String())
+					}
+					for _, repo := range []struct{ src, path, tip string }{{module, "dep", moduleTip}, {nested, "dep/nested", nestedTip}} {
+						dir := filepath.Join(dst, filepath.FromSlash(repo.path))
+						if got, want := runTestGit(t, ctx, dir, "rev-parse", "HEAD"), repo.tip; got != want {
+							t.Fatalf("%s HEAD = %s, want %s: %s", repo.path, got, want, stderr.String())
+						}
+						refs := []string{"refs/heads/feature", "refs/heads/main"}
+						if tc.tagRegexp != "" {
+							refs = append(refs, "refs/tags/v-base", "refs/tags/v-main")
+						} else if got := runTestGit(t, ctx, dir, "tag", "--list"); got != "" {
+							t.Fatalf("tags were pushed with no selection: %s", got)
+						}
+						for _, ref := range refs {
+							if got, want := runTestGit(t, ctx, dir, "rev-parse", ref), runTestGit(t, ctx, repo.src, "rev-parse", ref); got != want {
+								t.Fatalf("%s %s = %s, want %s", repo.path, ref, got, want)
+							}
+						}
+						if got := runTestGit(t, ctx, dir, "tag", "--list", "ignored"); got != "" {
+							t.Fatalf("excluded tag was pushed: %s", got)
+						}
+						runTestGit(t, ctx, dir, "fsck", "--connectivity-only", "--no-reflogs")
+						if got := runTestGit(t, ctx, dir, "rev-parse", "--is-shallow-repository"); got != strconv.FormatBool(shallow) {
+							t.Fatalf("%s shallow = %s, want %t", repo.path, got, shallow)
+						}
+					}
+					// Repeated synchronization must work after Git sets module worktrees.
+					if err := ct.pushSubmodules(ctx, io.Discard, &stderr, filepath.ToSlash(dst), host, tc.tagRegexp, true); err != nil {
+						t.Fatalf("repeat pushSubmodules: %v: %s", err, stderr.String())
+					}
+				}) {
+					return
+				}
+				//nolint:paralleltest // Rejection requires the repository populated by the valid subtest.
+				t.Run("error", func(t *testing.T) {
+					ctx := t.Context()
+					// Submodule pushes must not overwrite commits made in the container.
+					dep := filepath.Join(dst, "dep")
+					runTestGit(t, ctx, dep, "checkout", "-q", "feature")
+					runTestGit(t, ctx, dep, "commit", "-q", "--allow-empty", "-m", "container work")
+					tip := runTestGit(t, ctx, dep, "rev-parse", "HEAD")
+					stderr.Reset()
+					if err := ct.pushSubmodules(ctx, io.Discard, &stderr, filepath.ToSlash(dst), host, tc.tagRegexp, true); err == nil || !strings.Contains(err.Error(), "push submodule refs dep") || !strings.Contains(stderr.String(), "rejected") {
+						t.Fatalf("pushSubmodules must report rejection: %v: %s", err, stderr.String())
+					}
+					if got := runTestGit(t, ctx, dep, "rev-parse", "feature"); got != tip {
+						t.Fatalf("container feature was overwritten: %s, want %s", got, tip)
+					}
+				})
+			})
+		}
+	})
 	t.Run("pushRefspecs_skips_host_hooks", func(t *testing.T) {
 		t.Parallel()
 		if runtime.GOOS == "windows" {
@@ -2292,7 +2418,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 		runTestGit(t, ctx, hostDir, "config", "core.hooksPath", hooksDir)
 
 		ct := &Container{Client: testClient(t), Logger: testLogger(t)}
-		if err := ct.pushRefspecs(ctx, hostDir, remoteDir, []string{"main:main"}, false, io.Discard, io.Discard); err != nil {
+		if err := ct.pushRefspecs(ctx, hostDir, "", remoteDir, []string{"main:main"}, false, io.Discard, io.Discard); err != nil {
 			t.Fatal(err)
 		}
 		if got := runTestGit(t, ctx, remoteDir, "rev-parse", "refs/heads/main"); got != runTestGit(t, ctx, hostDir, "rev-parse", "main") {
