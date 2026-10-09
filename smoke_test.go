@@ -124,13 +124,8 @@ func ensureImages(t *testing.T, ctx context.Context, c *Client) string {
 // prebuildSpecializedImage builds the specialized image so that subsequent
 // subtests can reuse it without racing on the build.
 func prebuildSpecializedImage(t *testing.T, ctx context.Context, c *Client, baseImage string, caches []CacheMount) {
-	ct, err := c.Container()
-	if err != nil {
-		t.Fatalf("Container: %v", err)
-	}
-	ct.Name = "md-smoke-prebuild"
-	opts := &StartOpts{BaseImage: baseImage, Quiet: true, Caches: caches}
-	if _, err := ct.ensureImage(ctx, io.Discard, io.Discard, baseImage, opts.Platform, opts.Caches, true); err != nil {
+	opts := &WarmupOpts{BaseImage: baseImage, Quiet: true, Caches: caches}
+	if _, err := c.Warmup(ctx, io.Discard, io.Discard, opts); err != nil {
 		t.Fatalf("prebuild specialized image: %v", err)
 	}
 }
@@ -1395,10 +1390,9 @@ func TestSmoke(t *testing.T) {
 					// Plain debian:stable-slim has no sshd at all, so the specialized image
 					// must not build: failing here names what is missing before any
 					// container exists.
-					ct := newSmokeContainer(t, t.Context(), client, "md-smoke-debian-slim-nosshd")
 					platform := Platform("").Resolve()
-					removeSmokeImageIfPresent(t, t.Context(), client, userImageName(slim, activeCacheKey(nil, ct.Home), platform.String()))
-					_, err := ct.ensureImage(t.Context(), io.Discard, io.Discard, slim, "", nil, true)
+					removeSmokeImageIfPresent(t, t.Context(), client, userImageName(slim, activeCacheKey(nil, client.Home), platform.String()))
+					_, err := client.Warmup(t.Context(), io.Discard, io.Discard, &WarmupOpts{BaseImage: slim, Quiet: true})
 					if err == nil {
 						t.Fatal("expected the specialized image build to fail for a base image without sshd")
 					}

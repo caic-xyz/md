@@ -15,6 +15,7 @@ import (
 	"io"
 	"iter"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -498,6 +499,79 @@ func TestClient(t *testing.T) {
 			}
 		})
 	})
+	t.Run("PruneImages", func(t *testing.T) {
+		t.Parallel()
+		for _, operation := range []string{"Fork", "Launch"} {
+			t.Run(operation, func(t *testing.T) {
+				t.Parallel()
+				const baseImage = "local/launch-test:v1"
+				name := userImageName(baseImage, activeCacheKey(nil, ""), PlatformLinuxAMD64.String())
+				c, original := newImageDecisionTestClient(t, name, baseImage)
+				original.localBase = true
+				original.baseDigest = original.baseID
+				rt := &launchPruneRuntime{
+					imageDecisionRuntime: original,
+					entered:              make(chan struct{}),
+					release:              make(chan struct{}),
+					pruning:              make(chan struct{}),
+					launchErr:            errors.New("container creation failed"),
+				}
+				c.Runtime = rt
+				ct, err := c.Container()
+				if err != nil {
+					t.Fatal(err)
+				}
+				launchDone := make(chan error, 1)
+				if operation == "Fork" {
+					ct.Name = "md-source"
+					rt.source = &containers.Container{Name: ct.Name, State: "running"}
+					configDir := filepath.Join(c.Home, ".ssh", "config.d")
+					if err := os.MkdirAll(configDir, 0o700); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(filepath.Join(configDir, ct.Name+".conf"), nil, 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				go func() {
+					if operation == "Fork" {
+						_, err := ct.Fork(t.Context(), io.Discard, io.Discard, &ForkOpts{})
+						launchDone <- err
+					} else {
+						launchDone <- ct.Launch(t.Context(), io.Discard, io.Discard, &StartOpts{BaseImage: baseImage, Platform: PlatformLinuxAMD64.String()})
+					}
+				}()
+				select {
+				case <-rt.entered:
+				case err := <-launchDone:
+					t.Fatalf("launch did not reach container creation: %v", err)
+				}
+				pruneStarted := make(chan struct{})
+				pruneDone := make(chan error, 1)
+				go func() {
+					close(pruneStarted)
+					_, err := c.PruneImages(t.Context(), io.Discard, io.Discard)
+					pruneDone <- err
+				}()
+				<-pruneStarted
+				select {
+				case <-rt.pruning:
+					t.Error("pruning reached the runtime while container creation was in progress")
+				case <-time.After(50 * time.Millisecond):
+				}
+				close(rt.release)
+				if err := <-launchDone; !errors.Is(err, rt.launchErr) {
+					t.Fatalf("Launch = %v, want container creation failure", err)
+				}
+				if err := <-pruneDone; err != nil {
+					t.Fatal(err)
+				}
+				if !original.missing {
+					t.Fatal("pruning did not resume after failed container creation")
+				}
+			})
+		}
+	})
 	t.Run("Warmup", func(t *testing.T) {
 		t.Parallel()
 		t.Run("server_info_error", func(t *testing.T) {
@@ -546,6 +620,42 @@ func TestClient(t *testing.T) {
 				t.Fatalf("registry queries = %d, want initial check and rebuild only", rt.remoteManifestCalls)
 			}
 		})
+
+		for _, change := range []string{"deleted", "pruned", "retagged"} {
+			t.Run("rebuild_after_"+change, func(t *testing.T) {
+				t.Parallel()
+				const baseImage = "local/warmup-test:v1"
+				name := userImageName(baseImage, activeCacheKey(nil, ""), PlatformLinuxAMD64.String())
+				c, rt := newImageDecisionTestClient(t, name, baseImage)
+				rt.localBase = true
+				rt.baseDigest = rt.baseID
+				opts := &WarmupOpts{BaseImage: baseImage, Platform: PlatformLinuxAMD64.String(), Quiet: true}
+				if built, err := c.Warmup(t.Context(), io.Discard, io.Discard, opts); err != nil || built {
+					t.Fatalf("initial Warmup = %t, %v; want current image", built, err)
+				}
+				switch change {
+				case "deleted":
+					rt.missing = true
+				case "pruned":
+					removed, err := c.PruneImages(t.Context(), io.Discard, io.Discard)
+					if err != nil || !slices.Equal(removed, []string{name}) {
+						t.Fatalf("PruneImages = %v, %v; want image removed", removed, err)
+					}
+				case "retagged":
+					rt.imageID = "sha256:replacement"
+					rt.contextSHA = "stale-context"
+				}
+				if built, err := c.Warmup(t.Context(), io.Discard, io.Discard, opts); err != nil || !built {
+					t.Fatalf("Warmup after %s = %t, %v; want rebuild", change, built, err)
+				}
+				if rt.builds != 1 {
+					t.Fatalf("builds = %d, want 1", rt.builds)
+				}
+				if built, err := c.Warmup(t.Context(), io.Discard, io.Discard, opts); err != nil || built {
+					t.Fatalf("Warmup after rebuild = %t, %v; want current image", built, err)
+				}
+			})
+		}
 
 		const baseImage = "local/warmup-test:v1"
 		imageName := userImageName(baseImage, activeCacheKey(nil, ""), PlatformLinuxAMD64.String())
@@ -697,7 +807,7 @@ func TestBuildSpecializedImage(t *testing.T) { //nolint:tparallel // fakeRuntime
 	})
 }
 
-func TestImageBuildNeeded(t *testing.T) {
+func TestCurrentImageID(t *testing.T) {
 	t.Parallel()
 	const (
 		imageName = "md-specialized-test"
@@ -735,12 +845,12 @@ func TestImageBuildNeeded(t *testing.T) {
 			rt.storedManifest = tt.storedManifest
 			rt.remoteManifest = tt.remoteManifest
 
-			got, err := c.imageBuildNeeded(t.Context(), imageName, baseImage, PlatformLinuxAMD64.String(), nil)
+			got, err := c.currentImageID(t.Context(), imageName, baseImage, PlatformLinuxAMD64.String(), nil)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got != tt.wantNeeded {
-				t.Fatalf("imageBuildNeeded() = %t, want %t", got, tt.wantNeeded)
+			if (got == "") != tt.wantNeeded {
+				t.Fatalf("currentImageID() = %q, want rebuild needed %t", got, tt.wantNeeded)
 			}
 			if got := len(rt.untagged) > 0; got != tt.wantUntagged {
 				t.Fatalf("untagged = %v, want untagged %t", rt.untagged, tt.wantUntagged)
@@ -752,23 +862,227 @@ func TestImageBuildNeeded(t *testing.T) {
 	}
 }
 
-func TestEnsureImage(t *testing.T) {
+func TestEnsureImageLocked(t *testing.T) {
 	t.Parallel()
-	const baseImage = "ghcr.io/caic-xyz/md-user:latest"
-	c, rt := newImageDecisionTestClient(t, "", baseImage)
-	rt.storedManifest = "sha256:remote"
-	rt.remoteManifest = "sha256:remote"
-	ct := &Container{Client: c}
+	t.Run("tag_replaced_during_inspection", func(t *testing.T) {
+		t.Parallel()
+		const baseImage = "local/launch-test:v1"
+		name := userImageName(baseImage, activeCacheKey(nil, ""), PlatformLinuxAMD64.String())
+		c, original := newImageDecisionTestClient(t, name, baseImage)
+		original.localBase = true
+		original.baseDigest = original.baseID
+		rt := &retagRuntime{imageDecisionRuntime: original}
+		c.Runtime = rt
+		ct := &Container{Client: c}
+		c.buildMu.Lock()
+		defer c.buildMu.Unlock()
+		id, err := ct.ensureImageLocked(t.Context(), io.Discard, io.Discard, baseImage, PlatformLinuxAMD64.String(), nil, true)
+		if err != nil || id != "sha256:specialized" || original.builds != 0 {
+			t.Fatalf("ensureImageLocked = %q, %v; builds = %d; want verified original image", id, err, original.builds)
+		}
+		if rt.tagInspections != 1 {
+			t.Fatalf("tag inspections = %d, want image resolved once", rt.tagInspections)
+		}
+	})
+	for _, change := range []string{"current", "deleted", "failed_rebuild", "pruned"} {
+		t.Run(change, func(t *testing.T) {
+			t.Parallel()
+			const baseImage = "local/launch-test:v1"
+			name := userImageName(baseImage, activeCacheKey(nil, ""), PlatformLinuxAMD64.String())
+			c, rt := newImageDecisionTestClient(t, name, baseImage)
+			rt.localBase = true
+			rt.baseDigest = rt.baseID
+			if built, err := c.Warmup(t.Context(), io.Discard, io.Discard, &WarmupOpts{BaseImage: baseImage, Platform: PlatformLinuxAMD64.String()}); err != nil || built {
+				t.Fatalf("Warmup = %t, %v; want current image", built, err)
+			}
+			if change == "pruned" {
+				if _, err := c.PruneImages(t.Context(), io.Discard, io.Discard); err != nil {
+					t.Fatal(err)
+				}
+			} else if change != "current" {
+				rt.missing = true
+			}
+			ct := &Container{Client: c}
+			c.buildMu.Lock()
+			defer c.buildMu.Unlock()
+			if change == "failed_rebuild" {
+				rt.buildErr = errors.New("build failed")
+				if _, err := ct.ensureImageLocked(t.Context(), io.Discard, io.Discard, baseImage, PlatformLinuxAMD64.String(), nil, true); !errors.Is(err, rt.buildErr) {
+					t.Fatalf("ensureImageLocked = %v; want build failure", err)
+				}
+				rt.buildErr = nil
+			}
+			got, err := ct.ensureImageLocked(t.Context(), io.Discard, io.Discard, baseImage, PlatformLinuxAMD64.String(), nil, true)
+			if err != nil || got != "sha256:specialized" {
+				t.Fatalf("ensureImageLocked = %q, %v; want usable immutable image ID", got, err)
+			}
+			wantBuilds := 1
+			switch change {
+			case "current":
+				wantBuilds = 0
+			case "failed_rebuild":
+				wantBuilds = 2
+			}
+			if rt.builds != wantBuilds {
+				t.Fatalf("builds = %d, want %d", rt.builds, wantBuilds)
+			}
+		})
+	}
+}
 
-	got, err := ct.ensureImage(t.Context(), io.Discard, io.Discard, baseImage, PlatformLinuxAMD64.String(), nil, true)
-	if err != nil {
-		t.Fatal(err)
+// authOrderRuntime records image preparation and container creation around auth.
+type authOrderRuntime struct {
+	*launchPruneRuntime
+
+	events *[]string
+}
+
+func (r *authOrderRuntime) Run(ctx context.Context, dir string, args ...string) (string, error) {
+	if args[0] == "commit" {
+		*r.events = append(*r.events, "commit")
 	}
-	if got != rt.imageID {
-		t.Fatalf("ensureImage() = %q, want immutable image ID %q", got, rt.imageID)
+	return r.launchPruneRuntime.Run(ctx, dir, args...)
+}
+
+func (r *authOrderRuntime) RunOut(ctx context.Context, dir string, stdout, stderr io.Writer, args ...string) error {
+	if args[0] == "build" || args[0] == "run" {
+		*r.events = append(*r.events, args[0])
 	}
-	if rt.builds != 0 {
-		t.Fatalf("builds = %d, want 0", rt.builds)
+	if args[0] == "run" && !slices.Contains(args, "TAILSCALE_AUTHKEY=test-key") {
+		return errors.New("container did not receive generated auth key")
+	}
+	return r.launchPruneRuntime.RunOut(ctx, dir, stdout, stderr, args...)
+}
+
+type authKeyTransport struct {
+	events *[]string
+}
+
+func (r *authKeyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Method != http.MethodPost || req.URL.String() != "https://api.tailscale.com/api/v2/tailnet/-/keys" {
+		return nil, fmt.Errorf("unexpected request: %s %s", req.Method, req.URL)
+	}
+	*r.events = append(*r.events, "key")
+	return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"key":"test-key"}`)), Header: make(http.Header)}, nil
+}
+
+func TestContainerAuthKeyOrdering(t *testing.T) { //nolint:paralleltest // replaces the process-wide default HTTP transport.
+	originalTransport := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = originalTransport })
+	for _, operation := range []string{"Fork", "Launch"} { //nolint:paralleltest // shares the process-wide default HTTP transport.
+		t.Run(operation, func(t *testing.T) {
+			var events []string
+			http.DefaultTransport = &authKeyTransport{events: &events}
+			const baseImage = "local/auth-test:v1"
+			name := userImageName(baseImage, activeCacheKey(nil, ""), PlatformLinuxAMD64.String())
+			c, original := newImageDecisionTestClient(t, name, baseImage)
+			c.TailscaleAPIKey = "test-api-key"
+			original.localBase = true
+			original.missing = true
+			original.baseDigest = original.baseID
+			paused := &launchPruneRuntime{
+				imageDecisionRuntime: original,
+				entered:              make(chan struct{}),
+				release:              make(chan struct{}),
+				pruning:              make(chan struct{}),
+				launchErr:            errors.New("stop after container creation"),
+			}
+			close(paused.release)
+			rt := &authOrderRuntime{launchPruneRuntime: paused, events: &events}
+			c.Runtime = rt
+			ct, err := c.Container()
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := []string{"build", "key", "run"}
+			if operation == "Fork" {
+				ct.Name = "md-source"
+				paused.source = &containers.Container{Name: ct.Name, State: "running"}
+				configDir := filepath.Join(c.Home, ".ssh", "config.d")
+				if err := os.MkdirAll(configDir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(configDir, ct.Name+".conf"), nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				_, err = ct.Fork(t.Context(), io.Discard, io.Discard, &ForkOpts{Tailscale: true})
+				want = []string{"commit", "key", "run"}
+			} else {
+				err = ct.Launch(t.Context(), io.Discard, io.Discard, &StartOpts{BaseImage: baseImage, Platform: PlatformLinuxAMD64.String(), Tailscale: true})
+			}
+			if !errors.Is(err, paused.launchErr) {
+				t.Fatalf("%s = %v, want stopped container creation", operation, err)
+			}
+			if !slices.Equal(events, want) {
+				t.Fatalf("events = %v, want %v so the key is fresh at container creation", events, want)
+			}
+		})
+	}
+}
+
+// retagRuntime replaces the image tag immediately after its ID is resolved.
+type retagRuntime struct {
+	*imageDecisionRuntime
+
+	tagInspections int
+}
+
+func (r *retagRuntime) Run(ctx context.Context, dir string, args ...string) (string, error) {
+	if image, format, ok := testImageInspectArgs(args); ok && image == r.imageName {
+		if format != "{{.Id}}" {
+			return "", errors.New("label inspection used the mutable image tag")
+		}
+		r.tagInspections++
+		if r.tagInspections > 1 {
+			return "sha256:unchecked", nil
+		}
+	}
+	return r.imageDecisionRuntime.Run(ctx, dir, args...)
+}
+
+// launchPruneRuntime pauses container creation to exercise concurrent pruning.
+type launchPruneRuntime struct {
+	*imageDecisionRuntime
+
+	entered   chan struct{}
+	release   chan struct{}
+	pruning   chan struct{}
+	launchErr error
+	source    *containers.Container
+}
+
+func (r *launchPruneRuntime) Run(ctx context.Context, dir string, args ...string) (string, error) {
+	if args[0] == "images" {
+		close(r.pruning)
+	}
+	if args[0] == "inspect" && len(args) == 4 && r.source != nil && args[3] == r.source.Name {
+		return "", nil
+	}
+	if args[0] == "commit" {
+		r.imageName = args[len(args)-1]
+		r.missing = false
+		return r.imageID, nil
+	}
+	return r.imageDecisionRuntime.Run(ctx, dir, args...)
+}
+
+func (r *launchPruneRuntime) InspectContainer(ctx context.Context, name string) (*containers.Container, error) {
+	if r.source != nil && name == r.source.Name {
+		return r.source, nil
+	}
+	return r.imageDecisionRuntime.InspectContainer(ctx, name)
+}
+
+func (r *launchPruneRuntime) RunOut(ctx context.Context, dir string, stdout, stderr io.Writer, args ...string) error {
+	if args[0] != "run" {
+		return r.imageDecisionRuntime.RunOut(ctx, dir, stdout, stderr, args...)
+	}
+	close(r.entered)
+	select {
+	case <-r.release:
+		return r.launchErr
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
@@ -809,6 +1123,7 @@ func newImageDecisionTestClient(t *testing.T, imageName, baseImage string) (*Cli
 }
 
 type imageDecisionRuntime struct {
+	missing             bool
 	infoErr             error
 	imageName           string
 	baseImage           string
@@ -838,6 +1153,21 @@ func (r *imageDecisionRuntime) Executable() string {
 }
 
 func (r *imageDecisionRuntime) Run(_ context.Context, _ string, args ...string) (string, error) {
+	switch args[0] {
+	case "images":
+		if r.missing {
+			return "", nil
+		}
+		return r.imageID + "\t" + r.imageName, nil
+	case "ps", "builder":
+		return "", nil
+	case "rmi":
+		if args[1] != r.imageName {
+			return "", fmt.Errorf("unexpected image removal: %s", args[1])
+		}
+		r.missing = true
+		return "", nil
+	}
 	if len(args) > 0 && args[0] == "pull" {
 		r.pulled = true
 		return "", nil
@@ -857,7 +1187,7 @@ func (r *imageDecisionRuntime) Run(_ context.Context, _ string, args ...string) 
 		if image == r.baseImage {
 			return r.inspectBaseImage(format)
 		}
-		if r.imageName == "" || image == r.imageName {
+		if r.imageName == "" || image == r.imageName || image == r.imageID {
 			return r.inspectSpecializedImage(format)
 		}
 	}
@@ -870,11 +1200,18 @@ func (r *imageDecisionRuntime) RunOut(_ context.Context, _ string, _, _ io.Write
 		if r.buildErr != nil {
 			return r.buildErr
 		}
+		r.missing = false
 		df, err := os.ReadFile(filepath.Join(args[len(args)-1], "Dockerfile"))
 		if err != nil {
 			return err
 		}
 		for line := range strings.SplitSeq(string(df), "\n") {
+			if value, ok := strings.CutPrefix(line, "LABEL md.context_sha="); ok {
+				r.contextSHA, err = strconv.Unquote(value)
+				if err != nil {
+					return err
+				}
+			}
 			if value, ok := strings.CutPrefix(line, "LABEL md.base_manifest_digest="); ok {
 				r.storedManifest, err = strconv.Unquote(value)
 				if err != nil {
@@ -946,6 +1283,9 @@ func (r *imageDecisionRuntime) WatchDieEvents(context.Context, string) (iter.Seq
 }
 
 func (r *imageDecisionRuntime) inspectSpecializedImage(format string) (string, error) {
+	if r.missing {
+		return "", fmt.Errorf("No such image: %s", r.imageName)
+	}
 	switch format {
 	case "{{.Id}}":
 		return r.imageID, nil

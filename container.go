@@ -1547,15 +1547,25 @@ func (c *Container) Launch(ctx context.Context, stdout, stderr io.Writer, opts *
 	if baseImage == "" {
 		baseImage = DefaultBaseImage + ":latest"
 	}
-	imageName, err := c.ensureImage(ctx, stdout, stderr, baseImage, opts.Platform, opts.Caches, opts.Quiet)
-	if err != nil {
-		return err
-	}
-	c.prepareTailscaleAuthKey(ctx, stdout, opts)
 	c.Display = opts.Display
 	c.USB = opts.USB
 	c.Sudo = opts.Sudo
-	return c.launchContainer(ctx, stdout, stderr, opts, imageName)
+	// Keep the image protected until the runtime creates its container.
+	err = func() error {
+		c.buildMu.Lock()
+		defer c.buildMu.Unlock()
+		id, err := c.ensureImageLocked(ctx, stdout, stderr, baseImage, opts.Platform, opts.Caches, opts.Quiet)
+		if err != nil {
+			return err
+		}
+		// The auth key expires in five minutes; generate it after building.
+		c.prepareTailscaleAuthKey(ctx, stdout, opts)
+		return c.createContainer(ctx, stdout, stderr, opts, id)
+	}()
+	if err != nil {
+		return err
+	}
+	return c.configureLaunchedContainer(ctx, stdout, stderr, opts)
 }
 
 // Connect waits for SSH, pushes repos into the container, and completes
@@ -2384,9 +2394,9 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 	}
 
 	// Snapshot the source container, stripping all labels so
-	// launchContainer sets them fresh on the forked container.
+	// createContainer sets them fresh on the forked container.
 	// docker commit bakes container labels into the image; any label
-	// not explicitly re-set by launchContainer would leak through.
+	// not explicitly re-set by createContainer would leak through.
 	snapshotImage := "md-fork-" + c.Name
 	attempt.snapshotImage = snapshotImage
 	if !opts.Quiet {
@@ -2402,11 +2412,6 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 		commitArgs = append(commitArgs, "--change", change)
 	}
 	commitArgs = append(commitArgs, c.Name, snapshotImage)
-	if _, err := c.Runtime.Run(ctx, "", commitArgs...); err != nil {
-		return nil, fmt.Errorf("docker commit: %w", err)
-	}
-	attempt.snapshotCreated = true
-
 	// Create the new container handle with destination branches.
 	fork, err := c.Container(forkRepos...)
 	if err != nil {
@@ -2419,12 +2424,26 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 		_, _ = fmt.Fprintf(stdout, "- Starting forked container %s ...\n", fork.Name)
 	}
 	startOpts := opts.startOptions()
-	fork.prepareTailscaleAuthKey(ctx, stdout, startOpts)
 	fork.Display = startOpts.Display
 	fork.Tailscale = startOpts.Tailscale
 	fork.USB = startOpts.USB
 	fork.Sudo = startOpts.Sudo
-	if err := fork.launchContainer(ctx, stdout, stderr, startOpts, snapshotImage); err != nil {
+	// Protect the snapshot from its creation until its container exists.
+	err = func() error {
+		c.buildMu.Lock()
+		defer c.buildMu.Unlock()
+		if _, err := c.Runtime.Run(ctx, "", commitArgs...); err != nil {
+			return fmt.Errorf("docker commit: %w", err)
+		}
+		attempt.snapshotCreated = true
+		// Generate the short-lived key after lock contention and snapshotting.
+		fork.prepareTailscaleAuthKey(ctx, stdout, startOpts)
+		return fork.createContainer(ctx, stdout, stderr, startOpts, snapshotImage)
+	}()
+	if err != nil {
+		return nil, err
+	}
+	if err := fork.configureLaunchedContainer(ctx, stdout, stderr, startOpts); err != nil {
 		return nil, err
 	}
 	if !startOpts.Sudo {
@@ -2618,7 +2637,7 @@ func forkPrimaryBranchSetupCommand(oldBranch, newBranch string) string {
 // forkSnapshotConfigChanges returns docker commit --change entries for a fork snapshot.
 //
 // It clears labels and runtime ENV inherited from the source container image so
-// launchContainer can apply the fork's requested metadata and capabilities, then
+// createContainer can apply the fork's requested metadata and capabilities, then
 // stamps imageTypeLabelKey so the snapshot stays discoverable for pruning even
 // after it is untagged.
 func forkSnapshotConfigChanges(labelCSV string) []string {
@@ -3619,12 +3638,11 @@ func (c *Container) refreshRuntimeFields(ctx context.Context) error {
 	return c.loadMDLabels(ctx, raw.Labels)
 }
 
-// ensureImage checks whether the user image needs rebuilding and, if so,
+// ensureImageLocked checks whether the user image needs rebuilding and, if so,
 // builds it. Returns the immutable image ID so concurrent tag updates do not
-// affect the container launch. The build is serialized via Client.buildMu.
-func (c *Container) ensureImage(ctx context.Context, stdout, stderr io.Writer, baseImage, platform string, caches []CacheMount, quiet bool) (string, error) {
-	c.buildMu.Lock()
-	defer c.buildMu.Unlock()
+// affect the container launch. The caller must hold Client.buildMu until the
+// runtime has created the container to prevent pruning between build and launch.
+func (c *Container) ensureImageLocked(ctx context.Context, stdout, stderr io.Writer, baseImage, platform string, caches []CacheMount, quiet bool) (string, error) {
 	p := Platform(platform).Resolve()
 	if err := p.Validate(); err != nil {
 		return "", err
@@ -3634,15 +3652,15 @@ func (c *Container) ensureImage(ctx context.Context, stdout, stderr io.Writer, b
 	}
 	platform = p.String()
 	imageName := userImageName(baseImage, activeCacheKey(caches, c.Home), platform)
-	needed, err := c.imageBuildNeeded(ctx, imageName, baseImage, platform, caches)
+	id, err := c.currentImageID(ctx, imageName, baseImage, platform, caches)
 	if err != nil {
 		return "", err
 	}
-	if !needed {
+	if id != "" {
 		if !quiet {
 			_, _ = fmt.Fprintf(stdout, "- Docker image %s is up to date, skipping build.\n", imageName)
 		}
-		return c.imageID(ctx, imageName)
+		return id, nil
 	}
 	imageID, err := c.buildSpecializedImage(ctx, stdout, stderr, imageName, baseImage, platform, caches, agentContainerPaths(), quiet)
 	if err != nil {
@@ -3872,11 +3890,9 @@ export -f __md_sm_fix && __md_sm_fix`
 	return nil
 }
 
-// launchContainer starts the Docker container, queries mapped ports, writes
-// SSH config, and sets up host-side git remotes. It does NOT wait for SSH.
-// Port and creation-time results are stored directly on c (launchSSHPort,
-// launchVNCPort, CreatedAt) so that connectContainer can complete startup.
-func (c *Container) launchContainer(ctx context.Context, stdout, stderr io.Writer, opts *StartOpts, imageName string) error {
+// createContainer starts the runtime container and marks it running. The caller
+// must protect the image from pruning until this returns.
+func (c *Container) createContainer(ctx context.Context, stdout, stderr io.Writer, opts *StartOpts, imageName string) error {
 	if len(c.Repos) > 1000 {
 		return fmt.Errorf("too many repositories: %d (max 1000)", len(c.Repos))
 	}
@@ -4072,7 +4088,13 @@ func (c *Container) launchContainer(ctx context.Context, stdout, stderr io.Write
 		}
 	}
 	c.State = "running"
+	return nil
+}
 
+// configureLaunchedContainer queries ports, writes SSH config, and sets up
+// host-side git remotes after the runtime has created the container.
+func (c *Container) configureLaunchedContainer(ctx context.Context, stdout, stderr io.Writer, opts *StartOpts) error {
+	home := c.Home
 	// Get creation time and port mappings in one inspect call.
 	if err := c.refreshRuntimeFields(ctx); err != nil {
 		return fmt.Errorf("inspecting started container: %w", err)
@@ -4210,7 +4232,7 @@ done`
 }
 
 // provisionContainer waits for SSH, pushes repos and submodules, sends .env,
-// and waits for Tailscale auth. Must be called after launchContainer.
+// and waits for Tailscale auth. Must be called after configureLaunchedContainer.
 //
 // Mapped branches and default refs are pushed together to reduce latency.
 func (c *Container) provisionContainer(ctx context.Context, stdout, stderr io.Writer, opts *StartOpts) (*StartResult, error) {

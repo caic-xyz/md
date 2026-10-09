@@ -75,7 +75,7 @@ builds that `-short` skips; `-short` therefore still needs registry and Debian p
 
 ### When the user image is rebuilt
 
-`imageBuildNeeded` (`client.go`) returns `true` (triggering a rebuild) when any of the following change:
+`currentImageID` (`client.go`) returns the verified immutable image ID, or an empty ID (triggering a rebuild) when the image is missing or any of the following change:
 1. `md.base_digest` label missing/empty, or differs from the current base image digest.
 2. For remote base images: registry has a newer version than the local copy.
 3. `md.context_sha` label differs from the SHA of the SSH keys, embedded `rsc/specialized/` seed, or target user owner.

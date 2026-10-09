@@ -273,9 +273,8 @@ type Client struct {
 	// environments (podman, ssh, git, etc.).
 	env []string
 
-	// buildMu serializes image build operations (BuildImage, Warmup, and the
-	// build step inside Launch) so concurrent callers don't race on the same
-	// image tag.
+	// buildMu serializes builds, warmups, pruning, and launches through container
+	// creation so pruning cannot remove an image being prepared for launch.
 	buildMu sync.Mutex
 
 	// mu protects digestCache and imageBuildCache.
@@ -283,9 +282,10 @@ type Client struct {
 	// digestCache caches remote image digest queries to avoid repeated
 	// registry network round-trips. Entries expire after DigestCacheTTL.
 	digestCache map[string]remoteDigestEntry
-	// imageBuildCache stores the last imageBuildNeeded result so that
+	// imageBuildCache stores the last verified image so that
 	// back-to-back checks (e.g. Warmup then Launch) skip redundant
-	// docker inspect calls. Protected by mu; invalidated on successful build.
+	// label inspections. Cache hits verify the image ID; builds and pruning
+	// invalidate the decision. Protected by mu.
 	imageBuildCache *imageBuildCacheEntry
 }
 
@@ -482,15 +482,15 @@ func (c *Client) Warmup(ctx context.Context, stdout, stderr io.Writer, opts *War
 	}
 	platform := p.String()
 	imageName := userImageName(baseImage, activeCacheKey(opts.Caches, c.Home), platform)
-	needed := true
+	var id string
 	if !opts.Force {
 		var err error
-		needed, err = c.imageBuildNeeded(ctx, imageName, baseImage, platform, opts.Caches)
+		id, err = c.currentImageID(ctx, imageName, baseImage, platform, opts.Caches)
 		if err != nil {
 			return false, err
 		}
 	}
-	if !needed {
+	if id != "" {
 		if !opts.Quiet {
 			_, _ = fmt.Fprintf(stdout, "- Docker image %s is up to date, skipping build.\n", imageName)
 		}
@@ -506,6 +506,9 @@ func (c *Client) Warmup(ctx context.Context, stdout, stderr io.Writer, opts *War
 // PruneImages removes md-built images (specialized builds and fork snapshots)
 // that are not used by any container. Returns the list of removed image names.
 func (c *Client) PruneImages(ctx context.Context, stdout, stderr io.Writer) ([]string, error) {
+	c.buildMu.Lock()
+	defer c.buildMu.Unlock()
+	defer c.invalidateImageBuildCache()
 	// Select images by the md.image_type label rather than by name prefix so
 	// untagged (dangling) fork snapshots, left behind after their container is
 	// removed, are still discovered.
@@ -963,14 +966,14 @@ type activeCM struct {
 	files []string
 }
 
-// imageBuildCacheEntry caches the result of imageBuildNeeded so that
-// back-to-back calls with the same inputs skip docker inspect exec calls.
+// imageBuildCacheEntry records a verified image and its build inputs so that
+// back-to-back calls with the same inputs and image ID skip label inspections.
 type imageBuildCacheEntry struct {
+	imageID    string
 	baseImage  string
 	platform   string
 	contextSHA string
 	cacheKey   string
-	needed     bool
 }
 
 func (c *Client) remoteDigestCacheKey(image, arch string) string {
@@ -1082,55 +1085,30 @@ func activeCacheSpecLabel(active []activeCM) string {
 	return base64.StdEncoding.EncodeToString(data)
 }
 
-// imageBuildNeeded reports whether the specialized Docker image needs to be
-// rebuilt. It checks the base image digest, SSH keys hash, and cache spec
-// key against labels on the existing image. For remote base images it also
-// verifies the local copy matches the registry.
-// home is used to resolve "~/" in cache HostPaths so only caches that
-// resolveCaches would inject are compared.
-func (c *Client) imageBuildNeeded(ctx context.Context, imageName, baseImage, platform string, caches []CacheMount) (bool, error) {
+// currentImageID returns the immutable ID of a specialized image matching its
+// build inputs, or an empty ID when it needs rebuilding. Labels are inspected
+// by ID so a concurrent tag replacement cannot change the image being checked.
+func (c *Client) currentImageID(ctx context.Context, imageName, baseImage, platform string, caches []CacheMount) (string, error) {
 	p := Platform(platform).Resolve()
 	if err := p.Validate(); err != nil {
-		return false, err
+		return "", err
 	}
 	platform = p.String()
-	// Compute cheap inputs first so we can check the cache.
 	user, err := c.userIdentity(ctx)
 	if err != nil {
-		return false, err
+		return "", err
 	}
-	userOwner := user.owner()
-	contextSHA, err := keysSHA(c.keysDir, userOwner)
+	contextSHA, err := keysSHA(c.keysDir, user.owner())
 	if err != nil {
-		return false, err
+		return "", err
 	}
 	activeKey := activeCacheKey(caches, c.Home)
 
-	// Check cached result from a previous call with the same inputs.
-	c.mu.Lock()
-	if e := c.imageBuildCache; e != nil && e.baseImage == baseImage && e.platform == platform && e.contextSHA == contextSHA && e.cacheKey == activeKey {
-		needed := e.needed
-		c.mu.Unlock()
-		return needed, nil
-	}
-	c.mu.Unlock()
-
-	needed := c.imageBuildNeededSlow(ctx, imageName, baseImage, platform, contextSHA, activeKey)
-
-	c.mu.Lock()
-	c.imageBuildCache = &imageBuildCacheEntry{
-		baseImage:  baseImage,
-		platform:   platform,
-		contextSHA: contextSHA,
-		cacheKey:   activeKey,
-		needed:     needed,
-	}
-	c.mu.Unlock()
-	return needed, nil
+	return c.matchingImageID(ctx, imageName, baseImage, platform, contextSHA, activeKey), nil
 }
 
-// invalidateImageBuildCache clears the cached imageBuildNeeded result.
-// Must be called after a successful image build so the next check re-evaluates.
+// invalidateImageBuildCache clears the cached image verification.
+// Called after a successful image build or pruning so the next check re-evaluates.
 func (c *Client) invalidateImageBuildCache() {
 	c.mu.Lock()
 	c.imageBuildCache = nil
@@ -1164,40 +1142,54 @@ func (c *Client) baseImageDigest(ctx context.Context, baseImage string) (string,
 	return "", fmt.Errorf("cannot get base image digest for %s", baseImage)
 }
 
-// imageBuildNeededSlow performs the full check with docker inspect calls.
-func (c *Client) imageBuildNeededSlow(ctx context.Context, imageName, baseImage, platform, contextSHA, activeKey string) bool {
+// matchingImageID verifies the runtime image against its build inputs. A
+// missing image or failed inspection requires a build, which reports runtime
+// failures to the caller rather than treating an unverifiable image as current.
+func (c *Client) matchingImageID(ctx context.Context, imageName, baseImage, platform, contextSHA, activeKey string) string {
+	// Resolve the tag once and inspect this immutable image throughout.
+	id, err := c.imageID(ctx, imageName)
+	if err != nil {
+		c.Logger.Log(ctx, slog.LevelDebug, "build needed: cannot resolve image", "image", imageName, "err", err)
+		return ""
+	}
+	c.mu.Lock()
+	e := c.imageBuildCache
+	c.mu.Unlock()
+	if e != nil && e.imageID == id && e.baseImage == baseImage && e.platform == platform && e.contextSHA == contextSHA && e.cacheKey == activeKey {
+		return id
+	}
 	c.Logger.Log(ctx, slog.LevelDebug, "checking if image build needed", "image", imageName, "base", baseImage)
 	// Quick check: does the specialized image have labels at all?
-	currentDigest, err := c.Runtime.Run(ctx, "", "image", "inspect", imageName, "--format", `{{index .Config.Labels "md.base_digest"}}`)
+	currentDigest, err := c.Runtime.Run(ctx, "", "image", "inspect", id, "--format", `{{index .Config.Labels "md.base_digest"}}`)
 	if err != nil || currentDigest == "" || currentDigest == "<no value>" {
 		c.Logger.Log(ctx, slog.LevelDebug, "build needed: no base_digest label", "image", imageName)
-		return true
+		return ""
 	}
-	currentContext, err := c.Runtime.Run(ctx, "", "image", "inspect", imageName, "--format", `{{index .Config.Labels "md.context_sha"}}`)
+	currentContext, err := c.Runtime.Run(ctx, "", "image", "inspect", id, "--format", `{{index .Config.Labels "md.context_sha"}}`)
 	if err != nil || currentContext == "" || currentContext == "<no value>" {
 		c.Logger.Log(ctx, slog.LevelDebug, "build needed: no context_sha label", "image", imageName)
-		return true
+		return ""
 	}
 
 	baseDigest, err := c.baseImageDigest(ctx, baseImage)
 	if err != nil {
 		c.Logger.Log(ctx, slog.LevelDebug, "build needed: cannot get base image digest", "base", baseImage)
-		return true
+		return ""
 	}
 	if currentDigest != baseDigest {
 		c.Logger.Log(ctx, slog.LevelDebug, "build needed: base digest changed", "current", currentDigest, "base", baseDigest)
-		return true
+		return ""
 	}
 
-	currentArch, err := c.Runtime.ImageArchitecture(ctx, imageName)
+	currentArch, err := c.Runtime.ImageArchitecture(ctx, id)
 	if err == nil && currentArch != "" {
 		expectedArch, err := Platform(platform).Architecture()
 		if err != nil {
-			return true
+			return ""
 		}
 		if currentArch != expectedArch {
 			c.Logger.Log(ctx, slog.LevelDebug, "build needed: image architecture changed", "current", currentArch, "expected", expectedArch)
-			return true
+			return ""
 		}
 	}
 
@@ -1211,36 +1203,45 @@ func (c *Client) imageBuildNeededSlow(ctx context.Context, imageName, baseImage,
 	isLocal := c.Runtime.BaseImageIsLocal(ctx, baseImage)
 	if !isLocal {
 		c.Logger.Log(ctx, slog.LevelDebug, "checking remote manifest digest", "base", baseImage)
-		storedManifest, err := c.Runtime.Run(ctx, "", "image", "inspect", imageName, "--format", `{{index .Config.Labels "md.base_manifest_digest"}}`)
+		storedManifest, err := c.Runtime.Run(ctx, "", "image", "inspect", id, "--format", `{{index .Config.Labels "md.base_manifest_digest"}}`)
 		if err == nil && storedManifest != "" && storedManifest != "<no value>" {
 			arch, err := Platform(platform).Architecture()
 			if err != nil {
-				return true
+				return ""
 			}
 			remoteDigest, err := c.cachedRemoteManifestDigest(ctx, baseImage, arch)
 			if err == nil && remoteDigest != storedManifest {
 				c.Logger.Log(ctx, slog.LevelDebug, "build needed: remote manifest changed", "stored", storedManifest, "remote", remoteDigest)
-				return true
+				return ""
 			}
 		}
 	}
 
 	if currentContext != contextSHA {
 		c.Logger.Log(ctx, slog.LevelDebug, "build needed: context SHA changed", "current", currentContext, "expected", contextSHA)
-		return true
+		return ""
 	}
 
-	currentKey, err := c.Runtime.Run(ctx, "", "image", "inspect", imageName, "--format", `{{index .Config.Labels "md.cache_key"}}`)
+	currentKey, err := c.Runtime.Run(ctx, "", "image", "inspect", id, "--format", `{{index .Config.Labels "md.cache_key"}}`)
 	if err != nil || currentKey == "<no value>" {
 		currentKey = ""
 	}
 	if activeKey != currentKey {
 		c.Logger.Log(ctx, slog.LevelDebug, "build needed: cache key changed", "current", currentKey, "expected", activeKey)
-		return true
+		return ""
 	}
 
 	c.Logger.Log(ctx, slog.LevelDebug, "image is up to date", "image", imageName)
-	return false
+	c.mu.Lock()
+	c.imageBuildCache = &imageBuildCacheEntry{
+		imageID:    id,
+		baseImage:  baseImage,
+		platform:   platform,
+		contextSHA: contextSHA,
+		cacheKey:   activeKey,
+	}
+	c.mu.Unlock()
+	return id
 }
 
 // untagSpecializedImageIfBasedOn removes a specialized tag only when it still

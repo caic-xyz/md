@@ -71,7 +71,7 @@ func TestLaunchContainerCPULimit(t *testing.T) {
 			t.Parallel()
 			r := &cpuLimitRuntime{cpus: tc.cpus}
 			c := &Container{Client: &Client{Runtime: r}, Name: "md-test"}
-			if err := c.launchContainer(t.Context(), io.Discard, io.Discard, &StartOpts{MaxCPUs: tc.requested}, "test-image"); err == nil {
+			if err := c.createContainer(t.Context(), io.Discard, io.Discard, &StartOpts{MaxCPUs: tc.requested}, "test-image"); err == nil {
 				t.Fatal("expected recording runtime to stop launch")
 			}
 			i := slices.Index(r.args, "--cpus")
