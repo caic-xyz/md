@@ -3,7 +3,7 @@ module github.com/caic-xyz/md
 go 1.27.0
 
 require (
-	github.com/maruel/genai v0.10.1
+	github.com/maruel/genai v0.10.2
 	github.com/maruel/roundtrippers v0.5.1
 	golang.org/x/crypto v0.57.0
 	golang.org/x/sync v0.23.0
