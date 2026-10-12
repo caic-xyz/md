@@ -664,12 +664,17 @@ func (c *Client) AgentMounts(paths ...AgentPaths) ([]Mount, error) {
 func agentSymlinkTargetMounts(roots []agentMountRoot) ([]Mount, error) {
 	const maxDepth = 3
 	mounts := []Mount{}
-	for _, root := range roots {
+	scanRoots := make([]string, len(roots))
+	for i, root := range roots {
 		scanRoot, err := filepath.EvalSymlinks(root.hostPath)
 		if err != nil {
 			return nil, err
 		}
-		err = filepath.WalkDir(scanRoot, func(p string, d fs.DirEntry, err error) error {
+		scanRoots[i] = scanRoot
+	}
+	for i, root := range roots {
+		scanRoot := scanRoots[i]
+		err := filepath.WalkDir(scanRoot, func(p string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return err
 			}
@@ -685,7 +690,7 @@ func agentSymlinkTargetMounts(roots []agentMountRoot) ([]Mount, error) {
 				if err != nil {
 					return err
 				}
-				if ok {
+				if ok && !coveredByRoot(roots, scanRoots, m) {
 					mounts = append(mounts, m)
 				}
 				return nil
@@ -709,6 +714,25 @@ func agentSymlinkTargetMounts(roots []agentMountRoot) ([]Mount, error) {
 		}
 	}
 	return mounts, nil
+}
+
+// coveredByRoot reports whether a root mount already exposes m at the same
+// container path with the same access mode. scanRoots holds each root's
+// symlink-resolved host path.
+func coveredByRoot(roots []agentMountRoot, scanRoots []string, m Mount) bool {
+	for i, root := range roots {
+		if root.readOnly != m.ReadOnly {
+			continue
+		}
+		rel, err := filepath.Rel(scanRoots[i], m.HostPath)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			continue
+		}
+		if path.Join(root.containerPath, filepath.ToSlash(rel)) == m.ContainerPath {
+			return true
+		}
+	}
+	return false
 }
 
 func agentSymlinkTargetMount(root agentMountRoot, linkHostPath, rel string) (Mount, bool, error) {

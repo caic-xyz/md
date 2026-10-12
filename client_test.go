@@ -448,6 +448,32 @@ func TestClient(t *testing.T) {
 			}
 		}
 	})
+	t.Run("AgentMountsSymlinkInsideMount", func(t *testing.T) {
+		t.Parallel()
+		home := t.TempDir()
+		logger := testLogger(t)
+		c, err := newClient(home, logger, testRuntime(t, "docker", logger, nil), io.Discard)
+		if err != nil {
+			t.Fatalf("newClient: %v", err)
+		}
+		if err := os.MkdirAll(filepath.Join(home, ".agents", "skills"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		piDir := filepath.Join(home, ".pi")
+		if err := os.MkdirAll(piDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("../.agents/skills", filepath.Join(piDir, "skills")); err != nil {
+			t.Fatal(err)
+		}
+		mounts, err := c.AgentMounts(HarnessMounts[HarnessPi])
+		if err != nil {
+			t.Fatalf("AgentMounts: %v", err)
+		}
+		if i := slices.IndexFunc(mounts, func(m Mount) bool { return m.ContainerPath == "/home/user/.agents/skills" }); i >= 0 {
+			t.Fatalf("AgentMounts mounts %+v separately from its covering root: %+v", mounts[i], mounts)
+		}
+	})
 	t.Run("Container", func(t *testing.T) {
 		t.Parallel()
 		c := testClient(t)
