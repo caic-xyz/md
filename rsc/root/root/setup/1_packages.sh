@@ -66,6 +66,8 @@ apt-get install -qq -y --no-install-recommends \
   libfreetype-dev \
   libfribidi-dev \
   libgl1 \
+  libgstreamer-plugins-base1.0-0 \
+  libgstreamer1.0-0 \
   libguestfs-tools \
   libharfbuzz-dev \
   libjpeg-dev \
@@ -81,6 +83,7 @@ apt-get install -qq -y --no-install-recommends \
   libvirt-clients \
   libvirt-daemon \
   libvirt-daemon-system \
+  libwebkit2gtk-4.1-0 \
   libwebp-dev \
   libxml2-dev \
   lldb \
