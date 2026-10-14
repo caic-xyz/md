@@ -25,7 +25,7 @@ Notable executables available in the container:
 - Editors: nvim (vi, vim, vimdiff)
 - Browsers: google-chrome (amd64), chromium (arm64 fallback), chrome-devtools-mcp
 - Compression: brotli, zstd, unzip
-- Development: build-essential, git, actionlint, shellcheck, shfmt, golangci-lint, cmake, ninja-build, ccache, make, gcc, g++, arm-linux-gnueabi-gcc, libsodium-dev, protobuf-compiler, cargo-binstall, pylint, ruff, uv, asciinema
+- Development: build-essential, git, actionlint, shellcheck, shfmt, golangci-lint, cmake, ninja-build, ccache, make, gcc, g++, arm-linux-gnueabi-gcc, gettext (msgfmt), libsodium-dev, protobuf-compiler, cargo-binstall, pylint, ruff, uv, asciinema
 - Embedded: flex, bison, gperf, dfu-util, libusb-1.0-0, pahole (dwarves), libelf-dev. When md starts with `-usb`, it maps currently attached `/dev/ttyUSB*` and `/dev/ttyACM*` serial adapters; restart the container after attaching another adapter.
 - Languages: go, python3, java, R, rust (cargo, rustc)
 - Languages (web): node (v24), npm, npx, pnpm, bun, typescript, bun, eslint, tsx

@@ -59,6 +59,7 @@
   check_version "GCC" "gcc" "--version"
   check_version "G++" "g++" "--version"
   check_version "ARM GCC (EABI)" "arm-linux-gnueabi-gcc" "--version"
+  check_version "msgfmt" "msgfmt" "--version"
 
   # Utilities
   check_version "bc" "bc" "--version"

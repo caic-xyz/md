@@ -35,8 +35,8 @@ apt-get install -qq -y --no-install-recommends \
   crun \
   curl \
   dbus-x11 \
-  dwarves \
   dfu-util \
+  dwarves \
   extrepo \
   ffmpeg \
   file \
@@ -46,6 +46,7 @@ apt-get install -qq -y --no-install-recommends \
   fuse-overlayfs \
   g++-arm-linux-gnueabihf \
   gcc-arm-linux-gnueabi \
+  gettext \
   git \
   gperf \
   gpg \
@@ -57,9 +58,15 @@ apt-get install -qq -y --no-install-recommends \
   jq \
   kmod \
   less \
+  lib3mf-dev \
+  libboost-program-options-dev \
+  libboost-regex-dev \
   libc6-dev \
   libcairo2-dev \
+  libcgal-dev \
   libcurl4-openssl-dev \
+  libdouble-conversion-dev \
+  libeigen3-dev \
   libelf-dev \
   libffi-dev \
   libfontconfig1-dev \
@@ -71,12 +78,14 @@ apt-get install -qq -y --no-install-recommends \
   libguestfs-tools \
   libharfbuzz-dev \
   libjpeg-dev \
+  libmpfr-dev \
   libopenblas-dev \
   libopus-dev \
   libpng-dev \
   librsvg2-bin \
   libsodium-dev \
   libssl-dev \
+  libtbb-dev \
   libtiff-dev \
   libusb-1.0-0 \
   libuv1-dev \
@@ -86,6 +95,7 @@ apt-get install -qq -y --no-install-recommends \
   libwebkit2gtk-4.1-0 \
   libwebp-dev \
   libxml2-dev \
+  libzip-dev \
   lldb \
   locales \
   lsof \
@@ -124,12 +134,12 @@ apt-get install -qq -y --no-install-recommends \
   time \
   tmux \
   tokei \
+  traceroute \
   tzdata \
   uidmap \
   unzip \
   w3m \
   wget \
-  traceroute \
   whois \
   xfce4 \
   xfce4-terminal \
