@@ -8,7 +8,7 @@ set -euo pipefail
 
 export NVM_DIR="$HOME/.nvm"
 export PNPM_HOME="$HOME/.local/share/pnpm"
-export PATH="$HOME/.local/bin:$HOME/.opencode/bin:$PNPM_HOME/bin:$PNPM_HOME:$PATH"
+export PATH="$HOME/.local/bin:$PNPM_HOME/bin:$PATH"
 for node_bin in "$NVM_DIR"/versions/node/*/bin; do
   if [[ -d "$node_bin" ]]; then
     PATH="$node_bin:$PATH"
@@ -28,13 +28,13 @@ if ! command -v corepack >/dev/null 2>&1; then
 fi
 mkdir -p "$PNPM_HOME/bin"
 corepack enable pnpm
-pnpm add -g @openai/codex@latest @earendil-works/pi-coding-agent@latest
+# Install OpenCode through npm's registry to avoid GitHub release API rate limits.
+# Its postinstall selects the executable from its platform-specific npm package.
+pnpm add -g --allow-build=opencode-ai @openai/codex@latest @earendil-works/pi-coding-agent@latest opencode-ai@latest
 
 # A custom install directory avoids the installer's shell-profile edits.
 # The endpoint can serve a gzip Content-Encoding even without Accept-Encoding.
 curl -fsSL --compressed https://antigravity.google/cli/install.sh | bash -s -- --dir "$HOME/.local/bin"
-
-curl -fsSL https://opencode.ai/install | bash
 
 mkdir -p "$HOME/.claude"
 if [[ ! -f "$HOME/.claude/claude.json" ]]; then

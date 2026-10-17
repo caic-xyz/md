@@ -21,7 +21,7 @@ fi
 
 export PNPM_HOME="$HOME/.local/share/pnpm"
 mkdir -p "$PNPM_HOME/bin"
-export PATH="$PNPM_HOME/bin:$PNPM_HOME:$PATH"
+export PATH="$PNPM_HOME/bin:$PATH"
 corepack enable pnpm
 
 # 2. Install Global Node Packages
