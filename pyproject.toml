@@ -2,6 +2,24 @@
 # source code is governed by the Apache v2 license that can be found in the
 # LICENSE file.
 
+# Python development environment and tool configuration.
+
+[project]
+name = "md-dev"
+version = "0.0.0"
+requires-python = ">=3.12"
+dependencies = []
+
+[dependency-groups]
+dev = [
+  "pylint==4.0.8",
+  "ruff==0.16.8",
+  "shellcheck-py==0.10.0.1",
+]
+
+[tool.uv]
+package = false
+
 [tool.ruff]
 target-version = "py312"
 line-length = 120
@@ -14,6 +32,9 @@ quote-style = "double"
 indent-style = "space"
 skip-magic-trailing-comma = false
 line-ending = "lf"
+
+[tool.pylint.main]
+ignore = [".venv"]
 
 [tool.pylint."messages control"]
 disable = [

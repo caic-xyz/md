@@ -3,24 +3,9 @@
 .DEFAULT_GOAL := help
 .PHONY: help build test fix verify git-hooks tools custom-gcl
 
-# Go tool versions come from go.mod; the tools target installs Python tools
-# that are missing or at another version.
-RUFF_VERSION=0.16.8
-PYLINT_VERSION=4.0.8
-# shellcheck-py appends its own release number to the shellcheck version it ships.
-SHELLCHECK_VERSION=0.10.0
-SHELLCHECK_PY_VERSION=0.10.0.1
-
-# The tools target installs into the uv tool directory. Prepend it so a recipe
-# that just installed a Python tool can run it, whatever the caller's PATH holds.
-UV_BIN := $(if $(shell command -v uv 2>/dev/null),$(shell uv tool dir --bin 2>/dev/null))
-export PATH := $(if $(UV_BIN),$(UV_BIN):)$(PATH)
-
 tools:
-	@command -v uv > /dev/null 2>&1 || { echo 'uv is required to install the Python tools; see https://docs.astral.sh/uv/' >&2; exit 1; }
-	@ruff --version 2>/dev/null | grep -Fqw "$(RUFF_VERSION)" || uv tool install --force --quiet ruff==$(RUFF_VERSION)
-	@pylint --version 2>/dev/null | grep -Fqw "$(PYLINT_VERSION)" || uv tool install --force --quiet pylint==$(PYLINT_VERSION)
-	@shellcheck --version 2>/dev/null | grep -Fqw "$(SHELLCHECK_VERSION)" || uv tool install --force --quiet shellcheck-py==$(SHELLCHECK_PY_VERSION)
+	@command -v uv > /dev/null 2>&1 || { echo 'uv is required for Python development tools; see https://docs.astral.sh/uv/' >&2; exit 1; }
+	@uv sync --locked --quiet
 
 # Command listing the shell scripts that shellcheck and shfmt cover: every tracked *.sh,
 # plus every tracked executable whose first line is a shell shebang, because the container
@@ -52,30 +37,30 @@ custom-gcl:
 verify: tools custom-gcl
 	@go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
 	@./custom-gcl run --show-stats=false ./...
-	@pylint --score=n .
-	@ruff format --check --quiet .
-	@ruff check --quiet .
-	@files=$$($(SHELL_SCRIPTS)); [ -z "$$files" ] || shellcheck -x $$files
-	@files=$$($(SHELL_SCRIPTS)); [ -z "$$files" ] || go tool shfmt -l $$files
-	@go tool addlicense -ignore 'rsc/root/**' -ignore 'rsc/user/**' -check .
-	@python3 scripts/lint_binaries.py
-	@python3 scripts/update_agents_file_index.py --check
+	@uv run --locked pylint --score=n .
+	@uv run --locked ruff format --check --quiet .
+	@uv run --locked ruff check --quiet .
+	@files=$$($(SHELL_SCRIPTS)); [ -z "$$files" ] || uv run --locked shellcheck -x $$files
+	@files=$$($(SHELL_SCRIPTS)); [ -z "$$files" ] || go tool shfmt -d $$files
+	@go tool addlicense -ignore '.venv/**' -ignore '.ruff_cache/**' -ignore 'rsc/root/**' -ignore 'rsc/user/**' -check .
+	@uv run --locked python scripts/lint_binaries.py
+	@uv run --locked python scripts/update_agents_file_index.py --check
 
 # Apply every autofix, then refresh the generated file index. Does not
 # re-check; run verify for that. pylint and shellcheck have no autofixes.
 fix: tools custom-gcl
 	@./custom-gcl run --show-stats=false ./... --fix
 	@go tool golangci-lint fmt
-	@ruff check --quiet --fix .
-	@ruff format --quiet .
+	@uv run --locked ruff check --quiet --fix .
+	@uv run --locked ruff format --quiet .
 	@files=$$($(SHELL_SCRIPTS)); [ -z "$$files" ] || go tool shfmt -w $$files
-	@python3 scripts/update_agents_file_index.py
+	@uv run --locked python scripts/update_agents_file_index.py
 
 build:
 	@go build ./...
 
 test:
-	@go test ./...
+	@go test -timeout=600s -covermode=count -coverprofile coverage.txt -bench=. -benchtime=1x ./...
 
 git-hooks:
 	@./scripts/install-git-hooks.sh
@@ -86,6 +71,7 @@ help:
 	@echo 'Available targets:'
 	@printf '  %-14s - %s\n' 'make fix' 'Apply every autofix, then refresh the file index'
 	@printf '  %-14s - %s\n' 'make verify' 'Static gate: gofmt, ruff, pylint, shfmt, shellcheck, licenses, docs'
-	@printf '  %-14s - %s\n' 'make test' 'Run Go tests'
+	@printf '  %-14s - %s\n' 'make test' 'Run Go tests with coverage and benchmark smoke checks'
 	@printf '  %-14s - %s\n' 'make build' 'Build all Go packages'
 	@printf '  %-14s - %s\n' 'make git-hooks' 'Install git hooks'
+	@printf '  %-14s - %s\n' 'make tools' 'Sync pinned Python development tools with uv'

@@ -130,6 +130,7 @@ jobs:
       TRUSTED_BUILDER_NAME: "https://github.com/actions/runner/-/github.com/actions/runner"
     steps:
       - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
       - uses: docker/metadata-action@v6
         id: meta
         with:
@@ -153,7 +154,7 @@ jobs:
           merge-multiple: false
       - name: Merge and Upload Reports
         run: |
-          python3 .github/scripts/merge_tool_versions.py --amd64 reports/reports-amd64/tool_versions.md --arm64 reports/reports-arm64/tool_versions.md --output reports/tool_versions.md >> "$GITHUB_STEP_SUMMARY"
+          uv run --locked python .github/scripts/merge_tool_versions.py --amd64 reports/reports-amd64/tool_versions.md --arm64 reports/reports-arm64/tool_versions.md --output reports/tool_versions.md >> "$GITHUB_STEP_SUMMARY"
       - name: Create and Push Manifests
         id: push
         run: |
