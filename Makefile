@@ -1,7 +1,7 @@
-# Build, test, lint, and format the repository.
+# Test, lint, and format the repository.
 
 .DEFAULT_GOAL := help
-.PHONY: help build test fix verify git-hooks custom-gcl
+.PHONY: help test fix verify git-hooks custom-gcl
 
 # Command listing the shell scripts that shellcheck and shfmt cover: every tracked *.sh,
 # plus every tracked executable whose first line is a shell shebang, because the container
@@ -52,9 +52,6 @@ fix: custom-gcl
 	@files=$$($(SHELL_SCRIPTS)); [ -z "$$files" ] || go tool shfmt -w $$files
 	@uv run --locked python scripts/update_agents_file_index.py
 
-build:
-	@go build ./...
-
 test:
 	@go test -timeout=600s -covermode=count -coverprofile coverage.txt -bench=. -benchtime=1x ./...
 
@@ -68,5 +65,4 @@ help:
 	@printf '  %-14s - %s\n' 'make fix' 'Apply every autofix, then refresh the file index'
 	@printf '  %-14s - %s\n' 'make verify' 'Static gate: gofmt, ruff, pylint, shfmt, shellcheck, licenses, docs'
 	@printf '  %-14s - %s\n' 'make test' 'Run Go tests with coverage and benchmark smoke checks'
-	@printf '  %-14s - %s\n' 'make build' 'Build all Go packages'
 	@printf '  %-14s - %s\n' 'make git-hooks' 'Install git hooks'
