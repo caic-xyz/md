@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -43,7 +44,8 @@ type InspectInfo struct {
 	Platform     string
 	OS           string
 	Architecture string
-	CPULimit     int
+	CPULimit     float64 // Explicit quota in CPU units; zero means unrestricted.
+	CPUSet       []int   // Sorted configured logical CPU IDs; empty means inherited.
 	Mounts       []Mount
 	Labels       map[string]string
 }
@@ -111,6 +113,10 @@ func parseInspectInfo(runtimeName, requestedName string, data []byte) (*InspectI
 		name = requestedName
 	}
 	osName, architecture := inspectOSArch(&raw)
+	cpus, err := cpuSet(raw.HostConfig.CpusetCpus)
+	if err != nil {
+		return nil, err
+	}
 	return &InspectInfo{
 		Runtime:      runtimeName,
 		ID:           raw.ID,
@@ -122,6 +128,7 @@ func parseInspectInfo(runtimeName, requestedName string, data []byte) (*InspectI
 		OS:           osName,
 		Architecture: architecture,
 		CPULimit:     inspectCPULimit(raw.HostConfig),
+		CPUSet:       cpus,
 		Mounts:       mounts,
 		Labels:       maps.Clone(raw.Config.Labels),
 	}, nil
@@ -281,9 +288,10 @@ type inspectConfigJSON struct {
 }
 
 type inspectHostJSON struct {
-	NanoCpus  int64 `json:"NanoCpus"`
-	CPUQuota  int64 `json:"CpuQuota"`
-	CPUPeriod int64 `json:"CpuPeriod"`
+	CpusetCpus string `json:"CpusetCpus"`
+	NanoCpus   int64  `json:"NanoCpus"`
+	CPUQuota   int64  `json:"CpuQuota"`
+	CPUPeriod  int64  `json:"CpuPeriod"`
 }
 
 type inspectNetworkJSON struct {
@@ -362,12 +370,19 @@ func cleanInspectValue(v string) string {
 	return v
 }
 
-func inspectCPULimit(c inspectHostJSON) int {
+func inspectCPULimit(c inspectHostJSON) float64 {
 	if c.NanoCpus > 0 {
-		return int((c.NanoCpus + 1_000_000_000 - 1) / 1_000_000_000)
+		return float64(c.NanoCpus) / 1_000_000_000
 	}
-	if c.CPUQuota > 0 && c.CPUPeriod > 0 {
-		return int((c.CPUQuota + c.CPUPeriod - 1) / c.CPUPeriod)
+	if c.CPUQuota > 0 {
+		period := c.CPUPeriod
+		if period == 0 {
+			// Docker's omitted CFS period defaults to 100ms.
+			period = 100_000
+		}
+		if period > 0 {
+			return float64(c.CPUQuota) / float64(period)
+		}
 	}
 	return 0
 }
@@ -382,4 +397,32 @@ func hostPort(ports map[string][]inspectPortBindingJSON, containerPort string) i
 		return 0
 	}
 	return int32(port)
+}
+
+// cpuSet parses CPU ranges into sorted, unique logical CPU IDs.
+func cpuSet(s string) ([]int, error) {
+	var cpus []int
+	if s == "" {
+		return cpus, nil
+	}
+	for part := range strings.SplitSeq(s, ",") {
+		start, end, hasEnd := strings.Cut(part, "-")
+		a, err := strconv.Atoi(start)
+		if err != nil || a < 0 || a > 1_000_000 {
+			return nil, fmt.Errorf("invalid CPU set %q", s)
+		}
+		b := a
+		if hasEnd {
+			b, err = strconv.Atoi(end)
+		}
+		if err != nil || b < a || b > 1_000_000 {
+			return nil, fmt.Errorf("invalid CPU set %q", s)
+		}
+		cpus = slices.Grow(cpus, b-a+1)
+		for n := a; n <= b; n++ {
+			cpus = append(cpus, n)
+		}
+	}
+	slices.Sort(cpus)
+	return slices.Compact(cpus), nil
 }

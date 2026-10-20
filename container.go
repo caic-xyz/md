@@ -4957,7 +4957,8 @@ type InspectInfo struct {
 	Platform     string
 	OS           string
 	Architecture string
-	CPULimit     int
+	CPULimit     float64 // Explicit quota in CPU units; zero means unrestricted.
+	CPUSet       []int   // Sorted configured logical CPU IDs; empty means inherited.
 	Mounts       []Mount
 	Caches       []CacheMount
 }
@@ -4978,54 +4979,10 @@ func inspectInfoFromRuntime(info *containers.InspectInfo) *InspectInfo {
 		OS:           info.OS,
 		Architecture: info.Architecture,
 		CPULimit:     info.CPULimit,
+		CPUSet:       slices.Clone(info.CPUSet),
 		Mounts:       mounts,
 		Caches:       cacheSpecFromLabel(info.Labels["md.cache_spec"]),
 	}
-}
-
-// containerInspectJSON is the subset of `docker inspect` output we parse.
-type containerInspectJSON struct {
-	ID              string             `json:"Id"`
-	Name            string             `json:"Name"`
-	Image           string             `json:"Image"`
-	Platform        string             `json:"Platform"`
-	Architecture    string             `json:"Architecture"`
-	OS              string             `json:"Os"`
-	State           inspectStateJSON   `json:"State"`
-	Created         string             `json:"Created"`
-	Config          inspectConfigJSON  `json:"Config"`
-	HostConfig      inspectHostJSON    `json:"HostConfig"`
-	NetworkSettings inspectNetworkJSON `json:"NetworkSettings"`
-	Mounts          []inspectMountJSON `json:"Mounts"`
-}
-
-type inspectConfigJSON struct {
-	Image  string            `json:"Image"`
-	Labels map[string]string `json:"Labels"`
-}
-
-type inspectHostJSON struct {
-	NanoCpus  int64 `json:"NanoCpus"`
-	CPUQuota  int64 `json:"CpuQuota"`
-	CPUPeriod int64 `json:"CpuPeriod"`
-}
-
-type inspectNetworkJSON struct {
-	Ports map[string][]inspectPortBindingJSON `json:"Ports"`
-}
-
-type inspectPortBindingJSON struct {
-	HostPort string `json:"HostPort"`
-}
-
-type inspectMountJSON struct {
-	Source      string `json:"Source"`
-	Destination string `json:"Destination"`
-	RW          *bool  `json:"RW"`
-}
-
-type inspectStateJSON struct {
-	Status string `json:"Status"`
 }
 
 // parseCreatedAt parses a container creation timestamp. Docker uses
@@ -5042,111 +4999,6 @@ func parseCreatedAt(s string) (time.Time, error) {
 		}
 	}
 	return time.Time{}, fmt.Errorf("cannot parse CreatedAt %q", s)
-}
-
-func parseInspectInfo(runtimeName, requestedName string, data []byte) (*InspectInfo, error) {
-	raw, err := inspectDocument(data)
-	if err != nil {
-		return nil, err
-	}
-	mounts := make([]Mount, 0, len(raw.Mounts))
-	for _, m := range raw.Mounts {
-		if m.Source == "" && m.Destination == "" {
-			continue
-		}
-		readOnly := false
-		if m.RW != nil {
-			readOnly = !*m.RW
-		}
-		mounts = append(mounts, Mount{HostPath: m.Source, ContainerPath: m.Destination, ReadOnly: readOnly})
-	}
-	name := strings.TrimPrefix(raw.Name, "/")
-	if name == "" {
-		name = requestedName
-	}
-	osName, architecture := inspectOSArch(&raw)
-	return &InspectInfo{
-		Runtime:      runtimeName,
-		ID:           raw.ID,
-		Name:         name,
-		State:        raw.State.Status,
-		ImageRef:     raw.Config.Image,
-		ImageID:      raw.Image,
-		Platform:     inspectPlatform(&raw),
-		OS:           osName,
-		Architecture: architecture,
-		CPULimit:     inspectCPULimit(raw.HostConfig),
-		Mounts:       mounts,
-		Caches:       cacheSpecFromLabel(raw.Config.Labels["md.cache_spec"]),
-	}, nil
-}
-
-func inspectDocument(data []byte) (containerInspectJSON, error) {
-	var raws []containerInspectJSON
-	if err := json.Unmarshal(data, &raws); err != nil {
-		return containerInspectJSON{}, err
-	}
-	if len(raws) != 1 {
-		return containerInspectJSON{}, fmt.Errorf("inspect returned %d results, expected 1", len(raws))
-	}
-	return raws[0], nil
-}
-
-func inspectPlatform(raw *containerInspectJSON) string {
-	if raw.Platform != "" {
-		return raw.Platform
-	}
-	osName, architecture := inspectOSArch(raw)
-	if osName != "" && architecture != "" {
-		return osName + "/" + architecture
-	}
-	return ""
-}
-
-func inspectOSArch(raw *containerInspectJSON) (osName, architecture string) {
-	if osName, architecture, ok := splitOSArch(raw.Platform, ""); ok {
-		return osName, architecture
-	}
-	osName = cleanInspectValue(raw.OS)
-	if osName == "" {
-		osName = cleanInspectValue(raw.Platform)
-	}
-	architecture = cleanInspectValue(raw.Architecture)
-	return osName, architecture
-}
-
-func splitOSArch(platform, fallbackOS string) (osName, architecture string, ok bool) {
-	osName, architecture, ok = strings.Cut(platform, "/")
-	if !ok {
-		return "", "", false
-	}
-	osName = cleanInspectValue(osName)
-	if osName == "" {
-		osName = fallbackOS
-	}
-	architecture = cleanInspectValue(architecture)
-	if osName == "" || architecture == "" {
-		return "", "", false
-	}
-	return osName, architecture, true
-}
-
-func cleanInspectValue(v string) string {
-	v = strings.TrimSpace(v)
-	if v == "<no value>" {
-		return ""
-	}
-	return v
-}
-
-func inspectCPULimit(c inspectHostJSON) int {
-	if c.NanoCpus > 0 {
-		return int((c.NanoCpus + 1_000_000_000 - 1) / 1_000_000_000)
-	}
-	if c.CPUQuota > 0 && c.CPUPeriod > 0 {
-		return int((c.CPUQuota + c.CPUPeriod - 1) / c.CPUPeriod)
-	}
-	return 0
 }
 
 func cacheSpecFromLabel(label string) []CacheMount {
