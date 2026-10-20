@@ -68,7 +68,6 @@ linters:
     - revive
     - sloglint
     - sqlclosecheck
-    - tagalign
     - tparallel
     - unconvert
     - unparam
