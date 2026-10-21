@@ -427,9 +427,6 @@ func (a *app) newContainer(ctx context.Context, cf *containerFlags, extraRepoSpe
 			}
 		}
 		branches := append([]string{primary}, extraBranches...)
-		if err := validateBranchesExist(ctx, g, branches, "repo "+g.Root); err != nil {
-			return nil, err
-		}
 		repos = append(repos, md.Repo{GitRoot: g.Root, Branches: branches})
 	} else if cf.repo != nil && *cf.repo != "" {
 		// Explicit -repo that isn't a git root is an error.
@@ -471,9 +468,6 @@ func resolveRepoSpecs(ctx context.Context, logger *slog.Logger, specs []string) 
 			}
 			branchList = []string{b}
 		}
-		if err := validateBranchesExist(ctx, g, branchList, "extra repo "+g.Root); err != nil {
-			return nil, err
-		}
 		repos = append(repos, md.Repo{GitRoot: g.Root, Branches: branchList})
 	}
 	return repos, nil
@@ -499,10 +493,27 @@ func splitBranches(s string) ([]string, error) {
 	return branches, nil
 }
 
-func validateBranchesExist(ctx context.Context, g *git.Checkout, branches []string, label string) error {
-	for _, branch := range branches {
-		if _, err := g.RevParse(ctx, "refs/heads/"+branch+"^{commit}"); err != nil {
-			return fmt.Errorf("%s: branch %q does not exist: %w", label, branch, err)
+// ensureStartBranches creates missing mapped branches from each repository's cached
+// default upstream. Existing branches and the working tree are left untouched.
+func ensureStartBranches(ctx context.Context, logger *slog.Logger, repos []md.Repo) error {
+	for i := range repos {
+		r := &repos[i]
+		g := &git.Checkout{Root: r.GitRoot, Logger: logger}
+		for _, branch := range r.Branches {
+			exists, err := g.RefExists(ctx, "refs/heads/"+branch)
+			if err != nil {
+				return fmt.Errorf("repo %s: check branch %q: %w", r.GitRoot, branch, err)
+			}
+			if exists {
+				continue
+			}
+			if err := r.ResolveDefaults(ctx, logger); err != nil {
+				return fmt.Errorf("repo %s: resolve upstream for missing branch %q: %w", r.GitRoot, branch, err)
+			}
+			upstream := "refs/remotes/" + r.DefaultRemote + "/" + r.DefaultBranch
+			if err := g.CreateBranch(ctx, branch, upstream, true); err != nil {
+				return fmt.Errorf("repo %s: recreate branch %q: %w", r.GitRoot, branch, err)
+			}
 		}
 	}
 	return nil
@@ -635,6 +646,9 @@ func (a *app) cmdStart(ctx context.Context, args []string) error {
 		if !*quiet {
 			_, _ = fmt.Fprintf(os.Stdout, "- Reviving stopped container %s ...\n", ct.Name)
 		}
+		if err := ensureStartBranches(ctx, ct.Logger, ct.Repos); err != nil {
+			return err
+		}
 		if err := ct.Revive(ctx, os.Stdout, os.Stderr); err != nil {
 			return fmt.Errorf("reviving %s: %w", ct.Name, err)
 		}
@@ -647,6 +661,9 @@ func (a *app) cmdStart(ctx context.Context, args []string) error {
 		return fmt.Errorf("container %s is already running. SSH in with: ssh %s", ct.Name, ct.Name)
 	default:
 		// Container does not exist, proceed with normal launch.
+		if err := ensureStartBranches(ctx, ct.Logger, ct.Repos); err != nil {
+			return err
+		}
 		if err := ct.Launch(ctx, os.Stdout, os.Stderr, &opts); err != nil {
 			return err
 		}

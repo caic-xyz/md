@@ -341,41 +341,9 @@ func (r *Repo) Validate() error {
 	return nil
 }
 
-// resolveRemotes records external remotes, excluding the named remote and any
-// md container transport remote that targets this repository's mounted path.
-func (r *Repo) resolveRemotes(ctx context.Context, logger *slog.Logger, excludedRemote string) error {
-	g := &git.Checkout{Root: r.GitRoot, Logger: logger}
-	remotes, err := g.Remotes(ctx)
-	if err != nil {
-		return err
-	}
-	r.Remotes = r.Remotes[:0]
-	for _, remote := range remotes {
-		if remote == excludedRemote {
-			continue
-		}
-		if r.isMDTransportRemote(ctx, g, remote) {
-			continue
-		}
-		r.Remotes = append(r.Remotes, remote)
-	}
-	return nil
-}
-
-// isMDTransportRemote reports whether remote is an md SSH transport targeting
-// this repository. URL lookup errors return false because retaining an unknown
-// remote is safer than discarding potentially useful cached refs or legacy
-// configuration.
-func (r *Repo) isMDTransportRemote(ctx context.Context, g *git.Checkout, remote string) bool {
-	if remote == "" || remote == "." {
-		return false
-	}
-	remoteURL, err := g.RunGit(ctx, "remote", "get-url", remote)
-	return err == nil && remoteURL == "user@"+remote+":"+r.ContainerPath
-}
-
-// resolveDefaults populates Remotes, DefaultRemote, and DefaultBranch if not already set.
-func (r *Repo) resolveDefaults(ctx context.Context, logger *slog.Logger) error {
+// ResolveDefaults populates Remotes, DefaultRemote, and DefaultBranch if not already set.
+// It reads the host checkout without modifying its refs or configuration.
+func (r *Repo) ResolveDefaults(ctx context.Context, logger *slog.Logger) error {
 	g := &git.Checkout{Root: r.GitRoot, Logger: logger}
 	if len(r.Remotes) == 0 && r.DefaultRemote == "" {
 		if err := r.resolveRemotes(ctx, logger, ""); err != nil {
@@ -442,6 +410,39 @@ func (r *Repo) resolveDefaults(ctx context.Context, logger *slog.Logger) error {
 	return nil
 }
 
+// resolveRemotes records external remotes, excluding the named remote and any
+// md container transport remote that targets this repository's mounted path.
+func (r *Repo) resolveRemotes(ctx context.Context, logger *slog.Logger, excludedRemote string) error {
+	g := &git.Checkout{Root: r.GitRoot, Logger: logger}
+	remotes, err := g.Remotes(ctx)
+	if err != nil {
+		return err
+	}
+	r.Remotes = r.Remotes[:0]
+	for _, remote := range remotes {
+		if remote == excludedRemote {
+			continue
+		}
+		if r.isMDTransportRemote(ctx, g, remote) {
+			continue
+		}
+		r.Remotes = append(r.Remotes, remote)
+	}
+	return nil
+}
+
+// isMDTransportRemote reports whether remote is an md SSH transport targeting
+// this repository. URL lookup errors return false because retaining an unknown
+// remote is safer than discarding potentially useful cached refs or legacy
+// configuration.
+func (r *Repo) isMDTransportRemote(ctx context.Context, g *git.Checkout, remote string) bool {
+	if remote == "" || remote == "." {
+		return false
+	}
+	remoteURL, err := g.RunGit(ctx, "remote", "get-url", remote)
+	return err == nil && remoteURL == "user@"+remote+":"+r.ContainerPath
+}
+
 // populateContainerPath sets ContainerPath from GitRoot if not already set.
 func (r *Repo) populateContainerPath() {
 	if r.ContainerPath == "" {
@@ -466,7 +467,7 @@ func (r *Repo) containerSyncRefspecs(ctx context.Context, logger *slog.Logger) (
 	// Mirror every cached branch for the remotes that existed when the container
 	// was created. This makes remote branches usable even when the container
 	// cannot access the remote itself.
-	if err := r.resolveDefaults(ctx, logger); err != nil {
+	if err := r.ResolveDefaults(ctx, logger); err != nil {
 		return nil, fmt.Errorf("sync remote branches: %w", err)
 	}
 	g := &git.Checkout{Root: r.GitRoot, Logger: logger}
@@ -1504,7 +1505,7 @@ func (c *Container) Launch(ctx context.Context, stdout, stderr io.Writer, opts *
 				return fmt.Errorf("resolve remotes for %s: %w", c.Repos[i].ContainerPath, err)
 			}
 		}
-		if err := c.Repos[i].resolveDefaults(ctx, c.Logger); err != nil {
+		if err := c.Repos[i].ResolveDefaults(ctx, c.Logger); err != nil {
 			return fmt.Errorf("resolve defaults for %s: %w", c.Repos[i].ContainerPath, err)
 		}
 		if err := c.Repos[i].validateMappedBranchUpstreams(ctx, c.Logger); err != nil {
@@ -2041,7 +2042,7 @@ func (c *Container) Diff(ctx context.Context, stdout, stderr io.Writer, repoIdx 
 	}
 	repo := &c.Repos[repoIdx]
 	if repo.DefaultRemote == "" || repo.DefaultBranch == "" {
-		if err := repo.resolveDefaults(ctx, c.Logger); err != nil {
+		if err := repo.ResolveDefaults(ctx, c.Logger); err != nil {
 			return fmt.Errorf("resolving repository defaults for %q: %w", repo.GitRoot, err)
 		}
 	}
@@ -2321,7 +2322,7 @@ func planFork(ctx context.Context, logger *slog.Logger, excludedRemote string, s
 		if err := r.resolveRemotes(ctx, logger, excludedRemote); err != nil {
 			return nil, fmt.Errorf("resolving remotes for extra repo %s: %w", r.GitRoot, err)
 		}
-		if err := r.resolveDefaults(ctx, logger); err != nil {
+		if err := r.ResolveDefaults(ctx, logger); err != nil {
 			return nil, fmt.Errorf("resolving defaults for extra repo %s: %w", r.GitRoot, err)
 		}
 		if len(r.Branches) == 0 {
@@ -4285,7 +4286,7 @@ func (c *Container) provisionContainer(ctx context.Context, stdout, stderr io.Wr
 			if err != nil {
 				return err
 			}
-			if err := r.resolveDefaults(egCtx, c.Logger); err != nil {
+			if err := r.ResolveDefaults(egCtx, c.Logger); err != nil {
 				return fmt.Errorf("resolve defaults for %s: %w", r.ContainerPath, err)
 			}
 			bases, err := c.pushMappedBranchRefs(egCtx, stdout, stderr, r)

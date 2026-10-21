@@ -10,9 +10,12 @@ direction: `md push` writes into the container, `md pull` reads out of it.
 `md` maps one or more of your branches into a container. The first one is the
 primary: the container checks it out and its name goes into the container name.
 
-Each mapped branch must exist and must have an upstream, because **the container
-branch is configured to track the same upstream**. `md` refuses to start, revive,
-synchronize or fork otherwise, and tells you the command that repairs it.
+Each mapped branch must have an upstream, because **the container branch is
+configured to track the same upstream**. On start or revive, a missing host
+branch is created by the `md start` CLI from the repository's cached default
+remote branch and tracks that upstream. If that default is unavailable,
+`md` reports the missing start point. Existing branches must already have an
+upstream; synchronization and forking require the mapped branches to exist.
 
 A mapped branch may track another local branch through Git's `.` remote, and
 `md` then mirrors that local branch into the container so the tracking resolves
@@ -83,7 +86,8 @@ state; it disappears when the container is purged and recreated.
 `md start` creates the container, pushes your mapped branches, cached remote
 refs and selected tags into it, configures the remotes, upstreams and identity,
 checks out the primary branch, and records an integration point per branch. On
-the host it only adds the container remote. Your branches do not move.
+the host it adds the container remote and creates any missing mapped branches
+from the repository's cached default remote branch. Existing branches do not move.
 
 For large repositories, `md` first
 streams the host checkout's object store and temporary snapshot refs into the

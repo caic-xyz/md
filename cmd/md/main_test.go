@@ -447,28 +447,78 @@ func TestAllocateForkBranch(t *testing.T) {
 	}
 }
 
-func TestValidateBranchesExist(t *testing.T) {
+func TestEnsureStartBranches(t *testing.T) {
 	t.Parallel()
-	ctx := t.Context()
-	dir := t.TempDir()
-	runMainTestGit(t, dir, "init", "-q", "--initial-branch=main")
-	runMainTestGit(t, dir, "config", "user.name", "Test")
-	runMainTestGit(t, dir, "config", "user.email", "test@test")
-	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("main\n"), 0o644); err != nil { //nolint:gosec // test data, world-readable is fine.
-		t.Fatal(err)
-	}
-	runMainTestGit(t, dir, "add", ".")
-	runMainTestGit(t, dir, "commit", "-q", "-m", "main")
-	runMainTestGit(t, dir, "checkout", "-q", "-b", "feature")
-	g, err := git.RootDir(ctx, dir, testLogger(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := validateBranchesExist(ctx, g, []string{"main", "feature"}, "repo "+dir); err != nil {
-		t.Fatal(err)
-	}
-	if err := validateBranchesExist(ctx, g, []string{"missing"}, "repo "+dir); err == nil {
-		t.Fatal("validateBranchesExist error = nil, want missing branch error")
+	for _, name := range []string{"canonical_upstream", "deleted", "existing", "missing_upstream", "missing_upstream_collision", "recorded_upstream", "transport_remote"} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			ctx := t.Context()
+			dir := t.TempDir()
+			g := &git.Checkout{Root: dir, Logger: testLogger(t)}
+			readGit := func(args ...string) string {
+				out, err := g.RunGit(ctx, args...)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return out
+			}
+			runMainTestGit(t, dir, "init", "-q", "--initial-branch=main")
+			runMainTestGit(t, dir, "config", "user.name", "Test")
+			runMainTestGit(t, dir, "config", "user.email", "test@test")
+			runMainTestGit(t, dir, "commit", "-q", "--allow-empty", "-m", "main")
+			runMainTestGit(t, dir, "remote", "add", "upstream", "https://example.com/repo.git")
+			base := readGit("rev-parse", "HEAD")
+			runMainTestGit(t, dir, "update-ref", "refs/remotes/upstream/main", base)
+			runMainTestGit(t, dir, "remote", "set-head", "upstream", "main")
+			runMainTestGit(t, dir, "checkout", "-q", "--track", "-b", "feature", "upstream/main")
+			runMainTestGit(t, dir, "commit", "-q", "--allow-empty", "-m", "feature")
+			want := readGit("rev-parse", "HEAD")
+			runMainTestGit(t, dir, "checkout", "-q", "main")
+			if name != "existing" {
+				runMainTestGit(t, dir, "branch", "-D", "feature")
+				want = base
+			}
+			if strings.HasPrefix(name, "missing_upstream") {
+				runMainTestGit(t, dir, "update-ref", "-d", "refs/remotes/upstream/main")
+			}
+			if name == "missing_upstream_collision" {
+				runMainTestGit(t, dir, "branch", "upstream/main", "main")
+			}
+			if name == "canonical_upstream" {
+				runMainTestGit(t, dir, "remote", "add", "origin", "https://example.com/fork.git")
+				runMainTestGit(t, dir, "update-ref", "refs/remotes/origin/main", base)
+				runMainTestGit(t, dir, "branch", "--set-upstream-to=upstream/main", "main")
+			}
+			r := md.Repo{GitRoot: dir, Branches: []string{"feature"}, ContainerPath: "/repo"}
+			if name == "transport_remote" {
+				runMainTestGit(t, dir, "remote", "add", "md-test", "user@md-test:/repo")
+			}
+			if name == "recorded_upstream" {
+				// A stopped container's recorded upstream takes precedence over origin.
+				runMainTestGit(t, dir, "remote", "add", "origin", "https://example.com/fork.git")
+				r.DefaultRemote = "upstream"
+				r.DefaultBranch = "main"
+			}
+			err := ensureStartBranches(ctx, testLogger(t), []md.Repo{r})
+			if strings.HasPrefix(name, "missing_upstream") {
+				if err == nil {
+					t.Fatal("expected missing upstream error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := readGit("rev-parse", "feature"); got != want {
+				t.Errorf("feature = %q, want %q", got, want)
+			}
+			if got := readGit("rev-parse", "--abbrev-ref", "feature@{upstream}"); got != "upstream/main" {
+				t.Errorf("upstream = %q, want upstream/main", got)
+			}
+			if got := readGit("branch", "--show-current"); got != "main" {
+				t.Errorf("current branch = %q, want main", got)
+			}
+		})
 	}
 }
 

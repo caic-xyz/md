@@ -2564,7 +2564,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 
 			repo := Repo{GitRoot: dir, Branches: []string{"release"}, TagRegexp: "^release-"}
 			logger := testLogger(t)
-			if err := repo.resolveDefaults(ctx, logger); err != nil {
+			if err := repo.ResolveDefaults(ctx, logger); err != nil {
 				t.Fatal(err)
 			}
 			if want := []string{"origin", "upstream"}; !slices.Equal(repo.Remotes, want) {
@@ -2834,7 +2834,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 		// Simulate a persisted Repo label from before Remotes was added.
 		repo := Repo{GitRoot: dir, Branches: []string{"main"}, DefaultRemote: "origin", DefaultBranch: "main"}
 		logger := testLogger(t)
-		if err := repo.resolveDefaults(ctx, logger); err != nil {
+		if err := repo.ResolveDefaults(ctx, logger); err != nil {
 			t.Fatal(err)
 		}
 		if want := []string{"origin", "upstream"}; !slices.Equal(repo.Remotes, want) {
@@ -4791,7 +4791,7 @@ func TestTagRefspecs(t *testing.T) {
 
 func TestRepo(t *testing.T) {
 	t.Parallel()
-	t.Run("resolveDefaults_tracked_default_branch_remote", func(t *testing.T) {
+	t.Run("ResolveDefaults_tracked_default_branch_remote", func(t *testing.T) {
 		t.Parallel()
 		for _, branch := range []string{"main", "master"} {
 			t.Run(branch, func(t *testing.T) {
@@ -4814,7 +4814,7 @@ func TestRepo(t *testing.T) {
 				runTestGit(t, ctx, dir, "push", "-q", "-u", "upstream", branch)
 
 				repo := Repo{GitRoot: dir, Branches: []string{branch}}
-				if err := repo.resolveDefaults(ctx, testLogger(t)); err != nil {
+				if err := repo.ResolveDefaults(ctx, testLogger(t)); err != nil {
 					t.Fatal(err)
 				}
 				if repo.DefaultRemote != "upstream" || repo.DefaultBranch != branch {
@@ -4840,7 +4840,7 @@ func TestRepo(t *testing.T) {
 			runTestGit(t, ctx, dir, "config", "branch.master.merge", "refs/heads/master")
 
 			repo := Repo{GitRoot: dir, Branches: []string{"main"}}
-			if err := repo.resolveDefaults(ctx, testLogger(t)); err != nil {
+			if err := repo.ResolveDefaults(ctx, testLogger(t)); err != nil {
 				t.Fatal(err)
 			}
 			if repo.DefaultRemote != "upstream" {
@@ -4861,7 +4861,7 @@ func TestRepo(t *testing.T) {
 			runTestGit(t, ctx, dir, "config", "branch.main.merge", "refs/heads/main")
 
 			repo := Repo{GitRoot: dir, Branches: []string{"main"}, DefaultRemote: "origin"}
-			if err := repo.resolveDefaults(ctx, testLogger(t)); err != nil {
+			if err := repo.ResolveDefaults(ctx, testLogger(t)); err != nil {
 				t.Fatal(err)
 			}
 			if repo.DefaultRemote != "origin" || repo.DefaultBranch != "main" {
@@ -4882,7 +4882,7 @@ func TestRepo(t *testing.T) {
 			runTestGit(t, ctx, dir, "config", "branch.main.merge", "refs/heads/main")
 
 			repo := Repo{GitRoot: dir, Branches: []string{"main"}, Remotes: []string{"origin"}}
-			if err := repo.resolveDefaults(ctx, testLogger(t)); err != nil {
+			if err := repo.ResolveDefaults(ctx, testLogger(t)); err != nil {
 				t.Fatal(err)
 			}
 			if repo.DefaultRemote != "origin" {
@@ -4911,7 +4911,7 @@ func TestRepo(t *testing.T) {
 				Branches:      []string{"main", "master"},
 				ContainerPath: cp,
 			}
-			if err := repo.resolveDefaults(ctx, testLogger(t)); err != nil {
+			if err := repo.ResolveDefaults(ctx, testLogger(t)); err != nil {
 				t.Fatal(err)
 			}
 			if repo.DefaultRemote != "origin" {
@@ -4941,7 +4941,7 @@ func TestRepo(t *testing.T) {
 			runTestGit(t, ctx, dir, "config", "branch.main.merge", "refs/heads/release")
 
 			repo := Repo{GitRoot: dir, Branches: []string{"main"}}
-			if err := repo.resolveDefaults(ctx, testLogger(t)); err != nil {
+			if err := repo.ResolveDefaults(ctx, testLogger(t)); err != nil {
 				t.Fatal(err)
 			}
 			if repo.DefaultRemote != "upstream" || repo.DefaultBranch != "trunk" {
@@ -4949,7 +4949,7 @@ func TestRepo(t *testing.T) {
 			}
 		})
 	})
-	t.Run("resolveDefaults_legacy_non_origin_remote", func(t *testing.T) {
+	t.Run("ResolveDefaults_legacy_non_origin_remote", func(t *testing.T) {
 		t.Parallel()
 		ctx := t.Context()
 		dir := t.TempDir()
@@ -4978,7 +4978,7 @@ func TestRepo(t *testing.T) {
 		if want := []string{"upstream"}; !slices.Equal(repo.Remotes, want) {
 			t.Fatalf("migrated remotes = %v, want %v", repo.Remotes, want)
 		}
-		if err := repo.resolveDefaults(ctx, logger); err != nil {
+		if err := repo.ResolveDefaults(ctx, logger); err != nil {
 			t.Fatal(err)
 		}
 		if repo.DefaultRemote != "upstream" || repo.DefaultBranch != "main" {
