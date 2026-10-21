@@ -19,7 +19,7 @@ if ! command -v node >/dev/null 2>&1; then
   PROFILE=/dev/null curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash
   # shellcheck disable=SC1091
   . "$NVM_DIR/nvm.sh"
-  nvm install --no-progress v24
+  nvm install --no-progress v26
 fi
 export PATH="$HOME/.local/bin:$PNPM_HOME/bin:$PATH"
 if ! command -v pnpm >/dev/null 2>&1; then

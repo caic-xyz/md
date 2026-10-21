@@ -15,8 +15,7 @@ if ! which nvm &>/dev/null; then
 fi
 
 if ! which node &>/dev/null; then
-  # Lock to v24 as @sourcegraph/amp requires it as of 2025-10-15. Switch back to "node" to use latest.
-  nvm install --no-progress v24
+  nvm install --no-progress v26
 fi
 
 export PNPM_HOME="$HOME/.local/share/pnpm"

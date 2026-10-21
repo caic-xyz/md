@@ -57,7 +57,7 @@ Complete environment documentation for the md development container. For the aut
 
 ## Development Languages
 
-**Node.js**: v24 (pinned for Amp compatibility; managed via nvm)
+**Node.js**: v26 (managed via nvm)
 - Global packages: pnpm, npm, typescript, eslint, tsx
 - MCP servers: chrome-devtools-mcp
 - AI tools: @google/gemini-cli, @openai/codex, @qwen-code/qwen-code

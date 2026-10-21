@@ -28,7 +28,7 @@ Notable executables available in the container:
 - Development: build-essential, git, actionlint, shellcheck, shfmt, golangci-lint, cmake, ninja-build, ccache, make, gcc, g++, arm-linux-gnueabi-gcc, gettext (msgfmt), libsodium-dev, protobuf-compiler, cargo-binstall, pylint, ruff, uv, asciinema
 - Embedded: flex, bison, gperf, dfu-util, libusb-1.0-0, pahole (dwarves), libelf-dev. When md starts with `-usb`, it maps currently attached `/dev/ttyUSB*` and `/dev/ttyACM*` serial adapters; restart the container after attaching another adapter.
 - Languages: go, python3, java, R, rust (cargo, rustc)
-- Languages (web): node (v24), npm, npx, pnpm (standalone in `~/.local/share/pnpm/bin`), bun, typescript, bun, eslint, tsx
+- Languages (web): node (v26), npm, npx, pnpm (standalone in `~/.local/share/pnpm/bin`), bun, typescript, bun, eslint, tsx
 - Math: bc
 - AI Tools: claude, codex, kilo, qwen-code, kimi, opencode, amp, pi, agent-browser
 - Containers: podman (rootless, requires -sudo for nested containers)

@@ -23,7 +23,6 @@ readonly opencode_version
 curl -fsSL https://opencode.ai/install | VERSION="$opencode_version" bash
 
 # Amp
-# Note: Amp may require Node.js v24 environment to run, but the installer is standalone.
 curl -fsSL https://ampcode.com/install.sh | bash
 
 # Claude Code
