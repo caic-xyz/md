@@ -59,6 +59,7 @@ apt-get install -qq -y --no-install-recommends \
   kmod \
   less \
   lib3mf-dev \
+  libatomic1 \
   libboost-program-options-dev \
   libboost-regex-dev \
   libc6-dev \

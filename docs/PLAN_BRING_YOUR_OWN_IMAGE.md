@@ -2,6 +2,10 @@
 
 `md start --image` and `md run --image` accept any conforming Linux base image, including one whose development account has a different name, UID/GID, or home directory. They produce the same SSH-managed development environment on Docker and Podman and reject unsupported images before a persistent container exists. md owns the container lifecycle, so the base image's `CMD`, `ENTRYPOINT`, and default `USER` do not control startup. The specialized build enforces the startup contract and installs current coding agents before a container exists (see Container Startup Capabilities in [AGENTS.md](../AGENTS.md)); a base image must provide curl, su, and network access during the build. Specialized setup installs standalone pnpm only when it is missing. The `foreign_base` group in `smoke_test.go` exercises this contract.
 
+Coding-agent setup uses Node.js 26 when the base has no Node.js installation. Its official Linux binaries require
+the `libatomic` runtime (`libatomic1` on Debian), which the base image must provide even when installing packages
+with `--no-install-recommends`. See the [Node.js binary requirements](https://github.com/nodejs/node/blob/main/BUILDING.md#official-binary-platforms-and-toolchains).
+
 ## Phase 1 — account-identity: Preserve the base image's development account
 
 The specialized build and container startup use the selected development account's name, UID/GID, primary group, and home directory. When the base has no suitable account, md creates its default `user` account with UID/GID 1000.

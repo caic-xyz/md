@@ -178,13 +178,13 @@ func launchSmokeContainer(t *testing.T, ctx context.Context, c *Client, baseImag
 // smokeForeignBaseDockerfile builds the reference Debian-family base image used
 // by the foreign_base subtests. It carries only what the md startup contract
 // needs beyond sshd itself: git for post-SSH provisioning, curl with CA
-// certificates for coding agent installation, and su for user setup. It
-// deliberately has none of the md-specific packages (no Xvnc, no tailscaled,
+// certificates for coding agent installation, libatomic for Node.js, and su for
+// user setup. It deliberately has none of the md-specific packages (no Xvnc, no tailscaled,
 // no DBus, no sudo) and no `user` account, so the specialized build provisions
 // the account and startup tolerates the subsystems md did not request.
 const smokeForeignBaseDockerfile = `FROM debian:stable-slim
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates curl git openssh-server util-linux \
+ && apt-get install -y --no-install-recommends ca-certificates curl git libatomic1 openssh-server util-linux \
  && rm -rf /var/lib/apt/lists/*
 `
 
