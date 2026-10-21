@@ -8,7 +8,6 @@ set -euo pipefail
 
 export NVM_DIR="$HOME/.nvm"
 export PNPM_HOME="$HOME/.local/share/pnpm"
-export PATH="$HOME/.local/bin:$PNPM_HOME/bin:$PATH"
 for node_bin in "$NVM_DIR"/versions/node/*/bin; do
   if [[ -d "$node_bin" ]]; then
     PATH="$node_bin:$PATH"
@@ -22,15 +21,19 @@ if ! command -v node >/dev/null 2>&1; then
   . "$NVM_DIR/nvm.sh"
   nvm install --no-progress v24
 fi
-if ! command -v corepack >/dev/null 2>&1; then
-  echo 'md: installing coding agents requires corepack in the base image or Node.js installation' >&2
-  exit 1
+export PATH="$HOME/.local/bin:$PNPM_HOME/bin:$PATH"
+if ! command -v pnpm >/dev/null 2>&1; then
+  # Custom bases may lack pnpm. Install standalone without changing shell profiles.
+  (
+    config=$(mktemp)
+    trap 'unlink "$config"' EXIT
+    curl -fsSL https://get.pnpm.io/install.sh | ENV="$config" SHELL=/bin/sh sh -
+  )
 fi
-mkdir -p "$PNPM_HOME/bin"
-corepack enable pnpm
 # Install OpenCode through npm's registry to avoid GitHub release API rate limits.
 # Its postinstall selects the executable from its platform-specific npm package.
-pnpm add -g --allow-build=opencode-ai @openai/codex@latest @earendil-works/pi-coding-agent@latest opencode-ai@latest
+pnpm add -g --allow-build=opencode-ai \
+  @openai/codex@latest @earendil-works/pi-coding-agent@latest opencode-ai@latest
 
 # A custom install directory avoids the installer's shell-profile edits.
 # The endpoint can serve a gzip Content-Encoding even without Accept-Encoding.

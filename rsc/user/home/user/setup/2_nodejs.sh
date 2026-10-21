@@ -1,5 +1,5 @@
 #!/bin/bash
-# Install nvm, node.js, npm, typescript, eslint, MCP servers, and global LLM packages (as user)
+# Install nvm, node.js, standalone pnpm, and global Node packages (as user).
 set -euo pipefail
 echo "- $0"
 
@@ -22,7 +22,12 @@ fi
 export PNPM_HOME="$HOME/.local/share/pnpm"
 mkdir -p "$PNPM_HOME/bin"
 export PATH="$PNPM_HOME/bin:$PATH"
-corepack enable pnpm
+# The shared Bash environment owns PATH; redirect the installer's shell configuration.
+(
+  config=$(mktemp)
+  trap 'unlink "$config"' EXIT
+  curl -fsSL https://get.pnpm.io/install.sh | ENV="$config" SHELL=/bin/sh sh -
+)
 
 # 2. Install Global Node Packages
 pnpm add -g \
