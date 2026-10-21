@@ -449,7 +449,7 @@ func TestAllocateForkBranch(t *testing.T) {
 
 func TestEnsureStartBranches(t *testing.T) {
 	t.Parallel()
-	for _, name := range []string{"canonical_upstream", "deleted", "existing", "missing_upstream", "missing_upstream_collision", "recorded_upstream", "transport_remote"} {
+	for _, name := range []string{"canonical_upstream", "deleted", "existing", "existing_fetch_filtered", "existing_local_upstream", "missing_upstream", "missing_upstream_collision", "recorded_upstream", "transport_remote", "untracked_existing"} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			ctx := t.Context()
@@ -474,9 +474,21 @@ func TestEnsureStartBranches(t *testing.T) {
 			runMainTestGit(t, dir, "commit", "-q", "--allow-empty", "-m", "feature")
 			want := readGit("rev-parse", "HEAD")
 			runMainTestGit(t, dir, "checkout", "-q", "main")
-			if name != "existing" {
+			if !strings.HasPrefix(name, "existing") && name != "untracked_existing" {
 				runMainTestGit(t, dir, "branch", "-D", "feature")
 				want = base
+			}
+			wantUpstream := "upstream/main"
+			if name == "existing_local_upstream" {
+				runMainTestGit(t, dir, "branch", "--set-upstream-to=main", "feature")
+				wantUpstream = "main"
+			}
+			if name == "existing_fetch_filtered" {
+				runMainTestGit(t, dir, "config", "remote.upstream.fetch", "+refs/heads/main:refs/remotes/upstream/main")
+				runMainTestGit(t, dir, "config", "branch.feature.merge", "refs/heads/unfetched")
+			}
+			if name == "untracked_existing" {
+				runMainTestGit(t, dir, "branch", "--unset-upstream", "feature")
 			}
 			if strings.HasPrefix(name, "missing_upstream") {
 				runMainTestGit(t, dir, "update-ref", "-d", "refs/remotes/upstream/main")
@@ -512,8 +524,12 @@ func TestEnsureStartBranches(t *testing.T) {
 			if got := readGit("rev-parse", "feature"); got != want {
 				t.Errorf("feature = %q, want %q", got, want)
 			}
-			if got := readGit("rev-parse", "--abbrev-ref", "feature@{upstream}"); got != "upstream/main" {
-				t.Errorf("upstream = %q, want upstream/main", got)
+			if name == "existing_fetch_filtered" {
+				if got := readGit("config", "--get", "branch.feature.merge"); got != "refs/heads/unfetched" {
+					t.Errorf("configured merge changed to %q", got)
+				}
+			} else if got := readGit("rev-parse", "--abbrev-ref", "feature@{upstream}"); got != wantUpstream {
+				t.Errorf("upstream = %q, want %q", got, wantUpstream)
 			}
 			if got := readGit("branch", "--show-current"); got != "main" {
 				t.Errorf("current branch = %q, want main", got)

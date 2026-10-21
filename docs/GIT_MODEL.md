@@ -14,8 +14,10 @@ Each mapped branch must have an upstream, because **the container branch is
 configured to track the same upstream**. On start or revive, a missing host
 branch is created by the `md start` CLI from the repository's cached default
 remote branch and tracks that upstream. If that default is unavailable,
-`md` reports the missing start point. Existing branches must already have an
-upstream; synchronization and forking require the mapped branches to exist.
+`md` reports the missing start point. The CLI also configures an existing branch
+without an upstream to track that cached default, preserving its commits.
+Configured upstreams are preserved. Synchronization and forking require the
+mapped branches to exist and have upstreams.
 
 A mapped branch may track another local branch through Git's `.` remote, and
 `md` then mirrors that local branch into the container so the tracking resolves

@@ -493,8 +493,9 @@ func splitBranches(s string) ([]string, error) {
 	return branches, nil
 }
 
-// ensureStartBranches creates missing mapped branches from each repository's cached
-// default upstream. Existing branches and the working tree are left untouched.
+// ensureStartBranches creates missing mapped branches and configures untracked
+// branches using each repository's cached default upstream. Existing branch tips
+// and configured upstreams are preserved.
 func ensureStartBranches(ctx context.Context, logger *slog.Logger, repos []md.Repo) error {
 	for i := range repos {
 		r := &repos[i]
@@ -505,12 +506,31 @@ func ensureStartBranches(ctx context.Context, logger *slog.Logger, repos []md.Re
 				return fmt.Errorf("repo %s: check branch %q: %w", r.GitRoot, branch, err)
 			}
 			if exists {
-				continue
+				configured := false
+				for _, key := range []string{"remote", "merge"} {
+					_, err := g.RunGit(ctx, "config", "--get", "branch."+branch+"."+key)
+					if err == nil {
+						configured = true
+						break
+					}
+					if e, ok := errors.AsType[*exec.ExitError](err); !ok || e.ExitCode() != 1 {
+						return fmt.Errorf("repo %s: read upstream for branch %q: %w", r.GitRoot, branch, err)
+					}
+				}
+				if configured {
+					continue
+				}
 			}
 			if err := r.ResolveDefaults(ctx, logger); err != nil {
-				return fmt.Errorf("repo %s: resolve upstream for missing branch %q: %w", r.GitRoot, branch, err)
+				return fmt.Errorf("repo %s: resolve upstream for branch %q: %w", r.GitRoot, branch, err)
 			}
 			upstream := "refs/remotes/" + r.DefaultRemote + "/" + r.DefaultBranch
+			if exists {
+				if _, err := g.RunGit(ctx, "branch", "--set-upstream-to="+upstream, branch); err != nil {
+					return fmt.Errorf("repo %s: configure upstream for branch %q: %w", r.GitRoot, branch, err)
+				}
+				continue
+			}
 			if err := g.CreateBranch(ctx, branch, upstream, true); err != nil {
 				return fmt.Errorf("repo %s: recreate branch %q: %w", r.GitRoot, branch, err)
 			}
