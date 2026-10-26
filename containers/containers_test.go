@@ -22,6 +22,24 @@ import (
 const fakeBaseRunEnv = "MD_TEST_FAKE_BASE_RUN"
 
 func TestMain(m *testing.M) {
+	if os.Getenv("MD_TEST_BATCH") != "" {
+		var output, failure string
+		switch strings.Join(os.Args[1:], " ") {
+		case "stats --no-stream --no-trunc --format {{json .}} task other":
+			output, failure = os.Getenv("MD_TEST_BATCH_STATS"), os.Getenv("MD_TEST_BATCH_STATS_ERROR")
+		case "inspect --size --format {{.Name}}\t{{json .SizeRw}} task other":
+			output, failure = os.Getenv("MD_TEST_BATCH_INSPECT"), os.Getenv("MD_TEST_BATCH_INSPECT_ERROR")
+		default:
+			_, _ = fmt.Fprintln(os.Stderr, "unexpected arguments:", os.Args[1:])
+			os.Exit(2)
+		}
+		_, _ = fmt.Fprint(os.Stdout, output)
+		if failure != "" {
+			_, _ = fmt.Fprintln(os.Stderr, "runtime unavailable")
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 	if output := os.Getenv("MD_TEST_STATS_JSON"); output != "" {
 		if strings.Join(os.Args[1:], " ") != "stats --no-trunc --format {{json .}} task other" {
 			os.Exit(2)
@@ -45,6 +63,86 @@ func TestMain(m *testing.M) {
 
 func TestBase(t *testing.T) {
 	t.Parallel()
+	t.Run("StatsAll", func(t *testing.T) {
+		t.Parallel()
+		exe, err := os.Executable()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, runtime := range []string{"docker", "podman"} {
+			t.Run(runtime, func(t *testing.T) {
+				t.Parallel()
+				other := `{"Name":"other","CPU":2}`
+				unavailable := `{"Name":"task","CPU":"--"}`
+				if runtime == "docker" {
+					other = `{"Name":"other","CPUPerc":"2%","MemUsage":"1MiB / 1GiB","MemPerc":"1%","PIDs":"1","NetIO":"0B / 0B","BlockIO":"0B / 0B"}`
+					unavailable = `{"Name":"task","CPUPerc":"--"}`
+				}
+				run := func(t *testing.T, stats, inspect, statsFailure, inspectFailure string) (map[string]*Stats, error) {
+					env := []string{"MD_TEST_BATCH=1", "MD_TEST_BATCH_STATS=" + stats, "MD_TEST_BATCH_INSPECT=" + inspect,
+						"MD_TEST_BATCH_STATS_ERROR=" + statsFailure, "MD_TEST_BATCH_INSPECT_ERROR=" + inspectFailure}
+					var b *base
+					if runtime == "docker" {
+						b = &newDocker(exe, nil, env).base
+					} else {
+						b = &newPodman(exe, nil, env).base
+					}
+					b.name = runtime
+					return b.StatsAll(t.Context(), []string{"task", "other"})
+				}
+				t.Run("valid", func(t *testing.T) {
+					t.Parallel()
+					for _, tc := range []struct {
+						name, stats, inspect string
+						count                int
+						disk                 int64
+					}{
+						{name: "healthy", stats: other, inspect: "/task\t99\n/other\t42\n", count: 1, disk: 42},
+						{name: "missing_disk", stats: other, inspect: "/task\t99\n", count: 1, disk: -1},
+						{name: "no_samples", inspect: "/task\t99\n/other\t42\n"},
+					} {
+						t.Run(tc.name, func(t *testing.T) {
+							t.Parallel()
+							got, err := run(t, tc.stats, tc.inspect, "", "")
+							if err != nil {
+								t.Fatal(err)
+							}
+							if len(got) != tc.count {
+								t.Fatalf("samples = %+v, want %d", got, tc.count)
+							}
+							if tc.count > 0 && (got["other"] == nil || got["other"].CPUPerc != 2 || got["other"].DiskUsed != tc.disk) {
+								t.Fatalf("other = %+v, want CPU 2 and disk %d", got["other"], tc.disk)
+							}
+						})
+					}
+				})
+				t.Run("error", func(t *testing.T) {
+					t.Parallel()
+					for _, tc := range []struct {
+						name, stats, inspect, statsFailure, inspectFailure, errorText string
+						disk                                                          int64
+					}{
+						{name: "unavailable", stats: unavailable + "\n" + other, inspect: "/task\t99\n/other\t42\n", errorText: runtime + " stats: container stats unavailable", disk: 42},
+						{name: "malformed_stats", stats: "{bad}\n" + other, inspect: "/task\t99\n/other\t42\n", errorText: runtime + " stats:", disk: 42},
+						{name: "stats_command", stats: other, statsFailure: "1", inspect: "/other\t42\n", errorText: runtime + " stats:", disk: 42},
+						{name: "inspect_command", stats: other, inspectFailure: "1", errorText: runtime + " inspect --size:", disk: -1},
+						{name: "malformed_inspect", stats: other, inspect: "/task\tbad\n/other\t42\n", errorText: runtime + " inspect --size:", disk: 42},
+					} {
+						t.Run(tc.name, func(t *testing.T) {
+							t.Parallel()
+							got, err := run(t, tc.stats, tc.inspect, tc.statsFailure, tc.inspectFailure)
+							if err == nil || !strings.Contains(err.Error(), tc.errorText) {
+								t.Fatalf("error = %v, want %s", err, tc.errorText)
+							}
+							if len(got) != 1 || got["other"] == nil || got["other"].CPUPerc != 2 || got["other"].DiskUsed != tc.disk {
+								t.Fatalf("samples = %+v, other = %+v; want only healthy other with disk %d", got, got["other"], tc.disk)
+							}
+						})
+					}
+				})
+			})
+		}
+	})
 	t.Run("WatchStats", func(t *testing.T) {
 		t.Parallel()
 		exe, err := os.Executable()
@@ -408,8 +506,8 @@ func TestStatsUnavailable(t *testing.T) {
 		},
 		{
 			name: "podman", parse: parsePodmanStats,
-			line:   `{"Name":"task","CPU":1,"MemUsage":1024,"MemLimit":2048,"MemPerc":50,"PIDs":1,"NetInput":1,"NetOutput":2,"BlockInput":3,"BlockOutput":4}`,
-			fields: []string{"BlockInput", "BlockOutput", "CPU", "MemLimit", "MemPerc", "MemUsage", "NetInput", "NetOutput", "PIDs", "cpu_percent"},
+			line:   `{"Name":"task","CPU":1,"MemUsage":1024,"MemLimit":2048,"MemPerc":50,"PIDs":1,"Network":{"eth0":{"RxBytes":1,"TxBytes":2}},"BlockInput":3,"BlockOutput":4}`,
+			fields: []string{"BlockInput", "BlockOutput", "CPU", "MemLimit", "MemPerc", "MemUsage", "PIDs", "cpu_percent"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -533,12 +631,24 @@ func TestParseDockerStats(t *testing.T) {
 
 func TestParsePodmanStats(t *testing.T) {
 	t.Parallel()
+	t.Run("unavailable_network", func(t *testing.T) {
+		t.Parallel()
+		for _, line := range []string{
+			`{"Name":"task","CPU":1,"Network":{"eth0":{"RxBytes":"--","TxBytes":2}}}`,
+			`{"Name":"task","CPU":1,"Network":{"eth0":{"RxBytes":1,"TxBytes":"--"}}}`,
+		} {
+			if _, _, err := parsePodmanStats(line); !errors.Is(err, errStatsUnavailable) {
+				t.Fatalf("error = %v, want unavailable network", err)
+			}
+		}
+	})
 	t.Run("error", func(t *testing.T) {
 		t.Parallel()
 		for _, line := range []string{
 			`{invalid json}`,
 			`{"Name":"task","CPU":"bad%"}`,
 			`{"Name":"task","CPU":0,"PIDs":"bad"}`,
+			`{"Name":"task","CPU":1,"Network":{"eth0":{"RxBytes":"bad"}}}`,
 			`{"name":"task","cpu_percent":"2.00%"}`,
 		} {
 			if _, _, err := parsePodmanStats(line); err == nil || errors.Is(err, errStatsUnavailable) {
@@ -557,7 +667,7 @@ func TestParsePodmanStats(t *testing.T) {
 		})
 		t.Run("full_record", func(t *testing.T) {
 			t.Parallel()
-			line := `{"AvgCPU":4.902134241779032,"ContainerID":"ec4da855007520bd1702e702cbce0f3346ed1282ec88a273169329e22f2f9be1","Name":"md-caic-caic-28","PerCPU":null,"CPU":4.902134241779032,"CPUNano":6682560000,"CPUSystemNano":1298987,"SystemNano":1784235244400324567,"MemUsage":120074240,"MemLimit":33325363200,"MemPerc":0.3603088712923615,"NetInput":104882,"NetOutput":105535,"BlockInput":0,"BlockOutput":0,"PIDs":27,"UpTime":6682560000,"Duration":6682560000}`
+			line := `{"AvgCPU":4.902134241779032,"ContainerID":"ec4da855007520bd1702e702cbce0f3346ed1282ec88a273169329e22f2f9be1","Name":"md-caic-caic-28","PerCPU":null,"CPU":4.902134241779032,"CPUNano":6682560000,"CPUSystemNano":1298987,"SystemNano":1784235244400324567,"MemUsage":120074240,"MemLimit":33325363200,"MemPerc":0.3603088712923615,"Network":{"eth0":{"RxBytes":100000,"TxBytes":100000},"eth1":{"RxBytes":4882,"TxBytes":5535}},"BlockInput":0,"BlockOutput":0,"PIDs":27,"UpTime":6682560000,"Duration":6682560000}`
 			s, name, err := parsePodmanStats(line)
 			if err != nil {
 				t.Fatal(err)

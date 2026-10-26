@@ -309,13 +309,14 @@ func (b *base) WatchStats(ctx context.Context, names []string) (iter.Seq2[StatsS
 	}, nil
 }
 
-// StatsAll fetches resource usage for multiple containers in batch.
+// StatsAll fetches resource usage in batch, returning valid samples alongside
+// collection errors. Disk sizes are attached only to available resource samples.
 func (b *base) StatsAll(ctx context.Context, names []string) (map[string]*Stats, error) {
 	result := make(map[string]*Stats, len(names))
 	if len(names) == 0 {
 		return result, nil
 	}
-	var mu sync.Mutex
+	diskUsage := make(map[string]int64, len(names))
 	var statsErr, inspectErr error
 	var wg sync.WaitGroup
 	wg.Go(func() {
@@ -323,30 +324,22 @@ func (b *base) StatsAll(ctx context.Context, names []string) (map[string]*Stats,
 		args = append(args, "stats", "--no-stream", "--no-trunc", "--format", "{{json .}}")
 		args = append(args, names...)
 		out, err := b.Run(ctx, "", args...)
-		if err != nil {
-			statsErr = fmt.Errorf("docker stats: %w", err)
-			return
-		}
+		statsErr = err
 		for line := range strings.SplitSeq(out, "\n") {
 			line, err := normalizeStatsLine(line)
 			if err != nil {
-				statsErr = fmt.Errorf("docker stats: %w", err)
-				return
+				statsErr = errors.Join(statsErr, err)
+				continue
 			}
 			if line == "" {
 				continue
 			}
 			s, name, err := b.statsParser(line)
 			if err != nil {
-				statsErr = fmt.Errorf("docker stats: %w", err)
-				return
-			}
-			mu.Lock()
-			if existing, ok := result[name]; ok {
-				s.DiskUsed = existing.DiskUsed
+				statsErr = errors.Join(statsErr, err)
+				continue
 			}
 			result[name] = s
-			mu.Unlock()
 		}
 	})
 	wg.Go(func() {
@@ -354,34 +347,37 @@ func (b *base) StatsAll(ctx context.Context, names []string) (map[string]*Stats,
 		args = append(args, "inspect", "--size", "--format", "{{.Name}}\t{{json .SizeRw}}")
 		args = append(args, names...)
 		out, err := b.Run(ctx, "", args...)
-		if err != nil {
-			inspectErr = fmt.Errorf("docker inspect --size: %w", err)
-			return
-		}
+		inspectErr = err
 		for line := range strings.SplitSeq(out, "\n") {
 			line = strings.TrimSpace(line)
 			if line == "" {
 				continue
 			}
-			parts := strings.SplitN(line, "\t", 2)
-			if len(parts) != 2 {
+			name, size, ok := strings.Cut(line, "\t")
+			if !ok {
+				inspectErr = errors.Join(inspectErr, fmt.Errorf("invalid size record %q", line))
 				continue
 			}
-			name := strings.TrimPrefix(parts[0], "/")
 			var sz int64
-			if err := json.Unmarshal([]byte(parts[1]), &sz); err != nil {
+			if err := json.Unmarshal([]byte(size), &sz); err != nil {
+				inspectErr = errors.Join(inspectErr, fmt.Errorf("%s: %w", name, err))
 				continue
 			}
-			mu.Lock()
-			if s, ok := result[name]; ok {
-				s.DiskUsed = sz
-			} else {
-				result[name] = &Stats{DiskUsed: sz}
-			}
-			mu.Unlock()
+			diskUsage[strings.TrimPrefix(name, "/")] = sz
 		}
 	})
 	wg.Wait()
+	for name, s := range result {
+		if sz, ok := diskUsage[name]; ok {
+			s.DiskUsed = sz
+		}
+	}
+	if statsErr != nil {
+		statsErr = fmt.Errorf("%s stats: %w", b.name, statsErr)
+	}
+	if inspectErr != nil {
+		inspectErr = fmt.Errorf("%s inspect --size: %w", b.name, inspectErr)
+	}
 	return result, errors.Join(statsErr, inspectErr)
 }
 

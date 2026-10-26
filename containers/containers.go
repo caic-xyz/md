@@ -206,6 +206,10 @@ func (v *statsValue[T]) UnmarshalJSON(data []byte) error {
 				return errStatsUnavailable
 			}
 		}
+		if dst, ok := any(&v.value).(*string); ok {
+			*dst = s
+			return nil
+		}
 	}
 	return json.Unmarshal(data, &v.value)
 }
@@ -360,7 +364,8 @@ type Runtime interface {
 	Stats(ctx context.Context, name string) (*Stats, error)
 	// DiskUsage returns the writable container layer size in bytes.
 	DiskUsage(ctx context.Context, name string) (int64, error)
-	// StatsAll fetches resource usage for multiple containers in batch.
+	// StatsAll returns available resource samples with disk usage, alongside
+	// collection errors. Containers without resource samples are omitted.
 	StatsAll(ctx context.Context, names []string) (map[string]*Stats, error)
 	// WatchStats streams resource usage for the named running containers.
 	WatchStats(ctx context.Context, names []string) (iter.Seq2[StatsSample, error], error)

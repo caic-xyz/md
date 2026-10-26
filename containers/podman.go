@@ -64,17 +64,21 @@ type podmanSecurityInfoJSON struct {
 }
 
 type podmanStats struct {
-	Name        string              `json:"Name"`
-	CPU         statsValue[float64] `json:"CPU"`
-	CPUPercent  statsValue[float64] `json:"cpu_percent"`
-	MemUsage    statsValue[uint64]  `json:"MemUsage"`
-	MemLimit    statsValue[uint64]  `json:"MemLimit"`
-	MemPerc     statsValue[float64] `json:"MemPerc"`
-	PIDs        statsValue[uint64]  `json:"PIDs"`
-	NetInput    statsValue[uint64]  `json:"NetInput"`
-	NetOutput   statsValue[uint64]  `json:"NetOutput"`
-	BlockInput  statsValue[uint64]  `json:"BlockInput"`
-	BlockOutput statsValue[uint64]  `json:"BlockOutput"`
+	Name        string                        `json:"Name"`
+	CPU         statsValue[float64]           `json:"CPU"`
+	CPUPercent  statsValue[float64]           `json:"cpu_percent"`
+	MemUsage    statsValue[uint64]            `json:"MemUsage"`
+	MemLimit    statsValue[uint64]            `json:"MemLimit"`
+	MemPerc     statsValue[float64]           `json:"MemPerc"`
+	PIDs        statsValue[uint64]            `json:"PIDs"`
+	Network     map[string]podmanNetworkStats `json:"Network"`
+	BlockInput  statsValue[uint64]            `json:"BlockInput"`
+	BlockOutput statsValue[uint64]            `json:"BlockOutput"`
+}
+
+type podmanNetworkStats struct {
+	RxBytes statsValue[uint64] `json:"RxBytes"`
+	TxBytes statsValue[uint64] `json:"TxBytes"`
 }
 
 // parsePodmanStats parses raw Podman stats and identifies unavailable samples.
@@ -90,5 +94,10 @@ func parsePodmanStats(line string) (*Stats, string, error) {
 	if err != nil {
 		return nil, "", fmt.Errorf("parsing PIDs: %w", err)
 	}
-	return &Stats{CPUPerc: raw.CPU.value, MemUsed: raw.MemUsage.value, MemLimit: raw.MemLimit.value, MemPerc: raw.MemPerc.value, PIDs: pids, NetRx: raw.NetInput.value, NetTx: raw.NetOutput.value, BlockRead: raw.BlockInput.value, BlockWrite: raw.BlockOutput.value, DiskUsed: -1}, raw.Name, nil
+	var netRx, netTx uint64
+	for _, network := range raw.Network {
+		netRx += network.RxBytes.value
+		netTx += network.TxBytes.value
+	}
+	return &Stats{CPUPerc: raw.CPU.value, MemUsed: raw.MemUsage.value, MemLimit: raw.MemLimit.value, MemPerc: raw.MemPerc.value, PIDs: pids, NetRx: netRx, NetTx: netTx, BlockRead: raw.BlockInput.value, BlockWrite: raw.BlockOutput.value, DiskUsed: -1}, raw.Name, nil
 }
