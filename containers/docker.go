@@ -9,6 +9,7 @@ package containers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -69,11 +70,19 @@ type dockerStats struct {
 	BlockIO  string `json:"BlockIO"`
 }
 
-// parseDockerStats parses one JSON line from Docker stats output.
+var errDockerStatsUnavailable = errors.New("docker stats unavailable")
+
+// parseDockerStats parses one JSON line from Docker stats output, returning
+// errDockerStatsUnavailable when Docker marks the sample invalid.
 func parseDockerStats(line string) (*Stats, string, error) {
 	var raw dockerStats
 	if err := json.Unmarshal([]byte(line), &raw); err != nil {
 		return nil, "", fmt.Errorf("parsing Docker stats JSON: %w", err)
+	}
+	// Docker renders invalid samples as "--" after a collection timeout or
+	// stream error. They are missing measurements, not zero resource usage.
+	if raw.CPUPerc == "--" {
+		return nil, raw.Name, errDockerStatsUnavailable
 	}
 	cpuPerc, err := parsePercent(raw.CPUPerc)
 	if err != nil {

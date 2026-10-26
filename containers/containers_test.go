@@ -21,6 +21,13 @@ import (
 const fakeBaseRunEnv = "MD_TEST_FAKE_BASE_RUN"
 
 func TestMain(m *testing.M) {
+	if output := os.Getenv("MD_TEST_STATS_JSON"); output != "" {
+		if strings.Join(os.Args[1:], " ") != "stats --no-trunc --format {{json .}} task other" {
+			os.Exit(2)
+		}
+		_, _ = fmt.Fprintln(os.Stdout, output)
+		os.Exit(0)
+	}
 	if output := os.Getenv("MD_TEST_INFO_JSON"); output != "" {
 		if strings.Join(os.Args[1:], " ") != "info --format {{json .}}" {
 			os.Exit(2)
@@ -33,6 +40,61 @@ func TestMain(m *testing.M) {
 		os.Exit(0)
 	}
 	os.Exit(m.Run())
+}
+
+func TestBase(t *testing.T) {
+	t.Parallel()
+	t.Run("WatchStats", func(t *testing.T) {
+		t.Parallel()
+		exe, err := os.Executable()
+		if err != nil {
+			t.Fatal(err)
+		}
+		unavailable := `{"Name":"task","CPUPerc":"--","MemUsage":"-- / --","MemPerc":"--","PIDs":"--","NetIO":"--","BlockIO":"--"}`
+		other := `{"Name":"other","CPUPerc":"2.00%","MemUsage":"1MiB / 1GiB","MemPerc":"0.10%","PIDs":"1","NetIO":"0B / 0B","BlockIO":"0B / 0B"}`
+		recovered := `{"Name":"task","CPUPerc":"3.00%","MemUsage":"2MiB / 1GiB","MemPerc":"0.20%","PIDs":"2","NetIO":"0B / 0B","BlockIO":"0B / 0B"}`
+		for _, tc := range []struct {
+			name, tail string
+		}{
+			{name: "valid"},
+			{name: "error", tail: `{"Name":"task","CPUPerc":"bad%"}`},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				lines := []string{unavailable, other, unavailable, recovered}
+				if tc.tail != "" {
+					lines = append(lines, tc.tail)
+				}
+				r := newDocker(exe, nil, []string{"MD_TEST_STATS_JSON=" + strings.Join(lines, "\n")})
+				seq, err := r.WatchStats(t.Context(), []string{"task", "other"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				var samples []StatsSample
+				var streamErr error
+				for sample, err := range seq {
+					if err != nil {
+						streamErr = err
+						break
+					}
+					samples = append(samples, sample)
+				}
+				if len(samples) != 2 {
+					t.Fatalf("samples = %+v, err = %v; want two available samples", samples, streamErr)
+				}
+				if samples[0].Name != "other" || samples[0].Stats.CPUPerc != 2 || samples[1].Name != "task" || samples[1].Stats.CPUPerc != 3 {
+					t.Fatalf("unexpected samples: %+v", samples)
+				}
+				if tc.tail == "" {
+					if streamErr != nil {
+						t.Fatal(streamErr)
+					}
+				} else if streamErr == nil || !strings.Contains(streamErr.Error(), "parsing CPU%") {
+					t.Fatalf("error = %v, want malformed CPU error", streamErr)
+				}
+			})
+		}
+	})
 }
 
 func TestInfo(t *testing.T) {
