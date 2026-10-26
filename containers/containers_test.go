@@ -8,6 +8,7 @@ package containers
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -50,50 +51,84 @@ func TestBase(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		unavailable := `{"Name":"task","CPUPerc":"--","MemUsage":"-- / --","MemPerc":"--","PIDs":"--","NetIO":"--","BlockIO":"--"}`
-		other := `{"Name":"other","CPUPerc":"2.00%","MemUsage":"1MiB / 1GiB","MemPerc":"0.10%","PIDs":"1","NetIO":"0B / 0B","BlockIO":"0B / 0B"}`
-		recovered := `{"Name":"task","CPUPerc":"3.00%","MemUsage":"2MiB / 1GiB","MemPerc":"0.20%","PIDs":"2","NetIO":"0B / 0B","BlockIO":"0B / 0B"}`
-		for _, tc := range []struct {
-			name, tail string
+		fixtures := []struct {
+			name, runtime, unavailable, other, recovered, malformed, errorText string
 		}{
-			{name: "valid"},
-			{name: "error", tail: `{"Name":"task","CPUPerc":"bad%"}`},
-		} {
-			t.Run(tc.name, func(t *testing.T) {
-				t.Parallel()
-				lines := []string{unavailable, other, unavailable, recovered}
-				if tc.tail != "" {
-					lines = append(lines, tc.tail)
-				}
-				r := newDocker(exe, nil, []string{"MD_TEST_STATS_JSON=" + strings.Join(lines, "\n")})
-				seq, err := r.WatchStats(t.Context(), []string{"task", "other"})
-				if err != nil {
-					t.Fatal(err)
-				}
-				var samples []StatsSample
-				var streamErr error
-				for sample, err := range seq {
-					if err != nil {
-						streamErr = err
-						break
-					}
-					samples = append(samples, sample)
-				}
-				if len(samples) != 2 {
-					t.Fatalf("samples = %+v, err = %v; want two available samples", samples, streamErr)
-				}
-				if samples[0].Name != "other" || samples[0].Stats.CPUPerc != 2 || samples[1].Name != "task" || samples[1].Stats.CPUPerc != 3 {
-					t.Fatalf("unexpected samples: %+v", samples)
-				}
-				if tc.tail == "" {
-					if streamErr != nil {
-						t.Fatal(streamErr)
-					}
-				} else if streamErr == nil || !strings.Contains(streamErr.Error(), "parsing CPU%") {
-					t.Fatalf("error = %v, want malformed CPU error", streamErr)
-				}
-			})
+			{
+				name: "docker", runtime: "docker",
+				unavailable: `{"Name":"task","CPUPerc":"--","MemUsage":"-- / --","MemPerc":"--","PIDs":"--","NetIO":"--","BlockIO":"--"}`,
+				other:       `{"Name":"other","CPUPerc":"2.00%","MemUsage":"1MiB / 1GiB","MemPerc":"0.10%","PIDs":"1","NetIO":"0B / 0B","BlockIO":"0B / 0B"}`,
+				recovered:   `{"Name":"task","CPUPerc":"3.00%","MemUsage":"2MiB / 1GiB","MemPerc":"0.20%","PIDs":"2","NetIO":"0B / 0B","BlockIO":"0B / 0B"}`,
+				malformed:   `{"Name":"task","CPUPerc":"bad%"}`, errorText: "parsing CPU%",
+			},
+			{
+				name: "podman_raw", runtime: "podman",
+				unavailable: `{"Name":"task","CPU":"--"}`,
+				other:       `{"Name":"other","CPU":2}`, recovered: `{"Name":"task","CPU":3}`,
+				malformed: `{"Name":"task","CPU":"bad%"}`, errorText: "parsing Podman stats JSON",
+			},
+			{
+				name: "podman_formatted", runtime: "podman",
+				unavailable: `{"name":"task","cpu_percent":"--","mem_usage":"-- / --","mem_percent":"--","pids":"--"}`,
+				other:       `{"Name":"other","CPU":2}`, recovered: `{"Name":"task","CPU":3}`,
+				malformed: `{"name":"task","cpu_percent":"2.00%"}`, errorText: "parsing Podman stats JSON",
+			},
 		}
+		collect := func(t *testing.T, runtime string, lines []string) ([]StatsSample, error) {
+			var r Runtime
+			env := []string{"MD_TEST_STATS_JSON=" + strings.Join(lines, "\n")}
+			if runtime == "podman" {
+				r = newPodman(exe, nil, env)
+			} else {
+				r = newDocker(exe, nil, env)
+			}
+			seq, err := r.WatchStats(t.Context(), []string{"task", "other"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var samples []StatsSample
+			for sample, err := range seq {
+				if err != nil {
+					return samples, err
+				}
+				samples = append(samples, sample)
+			}
+			return samples, nil
+		}
+		checkSamples := func(t *testing.T, samples []StatsSample) {
+			if len(samples) != 2 {
+				t.Fatalf("samples = %+v; want two available samples", samples)
+			}
+			if samples[0].Name != "other" || samples[0].Stats.CPUPerc != 2 || samples[1].Name != "task" || samples[1].Stats.CPUPerc != 3 {
+				t.Fatalf("unexpected samples: %+v", samples)
+			}
+		}
+		t.Run("valid", func(t *testing.T) {
+			t.Parallel()
+			for _, tc := range fixtures {
+				t.Run(tc.name, func(t *testing.T) {
+					t.Parallel()
+					samples, err := collect(t, tc.runtime, []string{tc.unavailable, tc.other, tc.unavailable, tc.recovered})
+					if err != nil {
+						t.Fatal(err)
+					}
+					checkSamples(t, samples)
+				})
+			}
+		})
+		t.Run("error", func(t *testing.T) {
+			t.Parallel()
+			for _, tc := range fixtures {
+				t.Run(tc.name, func(t *testing.T) {
+					t.Parallel()
+					samples, err := collect(t, tc.runtime, []string{tc.unavailable, tc.other, tc.recovered, tc.malformed})
+					if err == nil || !strings.Contains(err.Error(), tc.errorText) {
+						t.Fatalf("error = %v, want %s", err, tc.errorText)
+					}
+					checkSamples(t, samples)
+				})
+			}
+		})
 	})
 }
 
@@ -358,6 +393,68 @@ func TestHasExplicitRegistry(t *testing.T) {
 	})
 }
 
+func TestStatsUnavailable(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		parse  statsParser
+		line   string
+		fields []string
+	}{
+		{
+			name: "docker", parse: parseDockerStats,
+			line:   `{"Name":"task","CPUPerc":"1%","MemUsage":"1MiB / 1GiB","MemPerc":"1%","PIDs":"1","NetIO":"1kB / 2kB","BlockIO":"3kB / 4kB"}`,
+			fields: []string{"BlockIO", "CPUPerc", "MemPerc", "MemUsage", "NetIO", "PIDs"},
+		},
+		{
+			name: "podman", parse: parsePodmanStats,
+			line:   `{"Name":"task","CPU":1,"MemUsage":1024,"MemLimit":2048,"MemPerc":50,"PIDs":1,"NetInput":1,"NetOutput":2,"BlockInput":3,"BlockOutput":4}`,
+			fields: []string{"BlockInput", "BlockOutput", "CPU", "MemLimit", "MemPerc", "MemUsage", "NetInput", "NetOutput", "PIDs", "cpu_percent"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			for _, field := range tc.fields {
+				t.Run(field, func(t *testing.T) {
+					t.Parallel()
+					var record map[string]any
+					if err := json.Unmarshal([]byte(tc.line), &record); err != nil {
+						t.Fatal(err)
+					}
+					record[field] = "--"
+					line, err := json.Marshal(record)
+					if err != nil {
+						t.Fatal(err)
+					}
+					sample, _, err := tc.parse(string(line))
+					if sample != nil || !errors.Is(err, errStatsUnavailable) {
+						t.Fatalf("sample = %+v, error = %v; want unavailable", sample, err)
+					}
+				})
+			}
+			t.Run("name", func(t *testing.T) {
+				t.Parallel()
+				line := strings.Replace(tc.line, `"task"`, `"--"`, 1)
+				if sample, name, err := tc.parse(line); sample == nil || name != "--" || err != nil {
+					t.Fatalf("metadata marker: sample = %+v, name = %q, error = %v", sample, name, err)
+				}
+			})
+		})
+	}
+	t.Run("pairs", func(t *testing.T) {
+		t.Parallel()
+		for _, line := range []string{
+			`{"CPUPerc":"0%","MemPerc":"0%","MemUsage":"1MiB / --","PIDs":"0","NetIO":"0B / 0B","BlockIO":"0B / 0B"}`,
+			`{"CPUPerc":"0%","MemPerc":"0%","MemUsage":"0B / 0B","PIDs":"0","NetIO":"-- / 1kB","BlockIO":"0B / 0B"}`,
+			`{"CPUPerc":"0%","MemPerc":"0%","MemUsage":"0B / 0B","PIDs":"0","NetIO":"0B / 0B","BlockIO":"-- / --"}`,
+		} {
+			if _, _, err := parseDockerStats(line); !errors.Is(err, errStatsUnavailable) {
+				t.Fatalf("parseDockerStats(%s) = %v, want unavailable", line, err)
+			}
+		}
+	})
+}
+
 func TestParseDockerStats(t *testing.T) {
 	t.Parallel()
 	t.Run("normal", func(t *testing.T) {
@@ -436,29 +533,55 @@ func TestParseDockerStats(t *testing.T) {
 
 func TestParsePodmanStats(t *testing.T) {
 	t.Parallel()
-	line := `{"AvgCPU":4.902134241779032,"ContainerID":"ec4da855007520bd1702e702cbce0f3346ed1282ec88a273169329e22f2f9be1","Name":"md-caic-caic-28","PerCPU":null,"CPU":4.902134241779032,"CPUNano":6682560000,"CPUSystemNano":1298987,"SystemNano":1784235244400324567,"MemUsage":120074240,"MemLimit":33325363200,"MemPerc":0.3603088712923615,"NetInput":104882,"NetOutput":105535,"BlockInput":0,"BlockOutput":0,"PIDs":27,"UpTime":6682560000,"Duration":6682560000}`
-	s, name, err := parsePodmanStats(line)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if name != "md-caic-caic-28" {
-		t.Errorf("name = %q, want md-caic-caic-28", name)
-	}
-	if s.CPUPerc != 4.902134241779032 {
-		t.Errorf("CPUPerc = %v, want 4.902134241779032", s.CPUPerc)
-	}
-	if s.MemUsed != 120074240 || s.MemLimit != 33325363200 {
-		t.Errorf("memory = %d / %d, want 120074240 / 33325363200", s.MemUsed, s.MemLimit)
-	}
-	if s.MemPerc != 0.3603088712923615 {
-		t.Errorf("MemPerc = %v, want 0.3603088712923615", s.MemPerc)
-	}
-	if s.PIDs != 27 {
-		t.Errorf("PIDs = %d, want 27", s.PIDs)
-	}
-	if s.NetRx != 104882 || s.NetTx != 105535 {
-		t.Errorf("network I/O = %d / %d, want 104882 / 105535", s.NetRx, s.NetTx)
-	}
+	t.Run("error", func(t *testing.T) {
+		t.Parallel()
+		for _, line := range []string{
+			`{invalid json}`,
+			`{"Name":"task","CPU":"bad%"}`,
+			`{"Name":"task","CPU":0,"PIDs":"bad"}`,
+			`{"name":"task","cpu_percent":"2.00%"}`,
+		} {
+			if _, _, err := parsePodmanStats(line); err == nil || errors.Is(err, errStatsUnavailable) {
+				t.Errorf("parsePodmanStats(%s) = %v, want malformed-record error", line, err)
+			}
+		}
+	})
+	t.Run("valid", func(t *testing.T) {
+		t.Parallel()
+		t.Run("zero", func(t *testing.T) {
+			t.Parallel()
+			s, _, err := parsePodmanStats(`{"Name":"task","CPU":0}`)
+			if err != nil || s == nil || s.CPUPerc != 0 {
+				t.Fatalf("zero CPU = %+v, %v", s, err)
+			}
+		})
+		t.Run("full_record", func(t *testing.T) {
+			t.Parallel()
+			line := `{"AvgCPU":4.902134241779032,"ContainerID":"ec4da855007520bd1702e702cbce0f3346ed1282ec88a273169329e22f2f9be1","Name":"md-caic-caic-28","PerCPU":null,"CPU":4.902134241779032,"CPUNano":6682560000,"CPUSystemNano":1298987,"SystemNano":1784235244400324567,"MemUsage":120074240,"MemLimit":33325363200,"MemPerc":0.3603088712923615,"NetInput":104882,"NetOutput":105535,"BlockInput":0,"BlockOutput":0,"PIDs":27,"UpTime":6682560000,"Duration":6682560000}`
+			s, name, err := parsePodmanStats(line)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if name != "md-caic-caic-28" {
+				t.Errorf("name = %q, want md-caic-caic-28", name)
+			}
+			if s.CPUPerc != 4.902134241779032 {
+				t.Errorf("CPUPerc = %v, want 4.902134241779032", s.CPUPerc)
+			}
+			if s.MemUsed != 120074240 || s.MemLimit != 33325363200 {
+				t.Errorf("memory = %d / %d, want 120074240 / 33325363200", s.MemUsed, s.MemLimit)
+			}
+			if s.MemPerc != 0.3603088712923615 {
+				t.Errorf("MemPerc = %v, want 0.3603088712923615", s.MemPerc)
+			}
+			if s.PIDs != 27 {
+				t.Errorf("PIDs = %d, want 27", s.PIDs)
+			}
+			if s.NetRx != 104882 || s.NetTx != 105535 {
+				t.Errorf("network I/O = %d / %d, want 104882 / 105535", s.NetRx, s.NetTx)
+			}
+		})
+	})
 }
 
 func TestNormalizeStatsLine(t *testing.T) {

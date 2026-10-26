@@ -184,6 +184,32 @@ func hasExplicitRegistry(image string) bool {
 	return first == "localhost" || strings.ContainsAny(first, ".:")
 }
 
+var errStatsUnavailable = errors.New("container stats unavailable")
+
+// statsValue decodes a runtime metric, reporting unavailable samples when a
+// scalar or either side of a formatted pair contains the "--" marker.
+// Unavailable metrics are missing measurements, not zero resource usage.
+// Metadata fields use ordinary JSON types so container names are not markers.
+type statsValue[T string | float64 | uint64] struct {
+	value T
+}
+
+// UnmarshalJSON decodes a metric or reports that the sample is unavailable.
+func (v *statsValue[T]) UnmarshalJSON(data []byte) error {
+	if len(data) > 0 && data[0] == '"' {
+		var s string
+		if err := json.Unmarshal(data, &s); err != nil {
+			return err
+		}
+		for part := range strings.SplitSeq(s, "/") {
+			if strings.TrimSpace(part) == "--" {
+				return errStatsUnavailable
+			}
+		}
+	}
+	return json.Unmarshal(data, &v.value)
+}
+
 type statsParser func(string) (*Stats, string, error)
 
 // normalizeStatsLine removes terminal control sequences and whitespace from a

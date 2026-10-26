@@ -61,53 +61,49 @@ type dockerInfoJSON struct {
 }
 
 type dockerStats struct {
-	Name     string `json:"Name"`
-	CPUPerc  string `json:"CPUPerc"`
-	MemUsage string `json:"MemUsage"`
-	MemPerc  string `json:"MemPerc"`
-	PIDs     string `json:"PIDs"`
-	NetIO    string `json:"NetIO"`
-	BlockIO  string `json:"BlockIO"`
+	Name     string             `json:"Name"`
+	CPUPerc  statsValue[string] `json:"CPUPerc"`
+	MemUsage statsValue[string] `json:"MemUsage"`
+	MemPerc  statsValue[string] `json:"MemPerc"`
+	PIDs     statsValue[string] `json:"PIDs"`
+	NetIO    statsValue[string] `json:"NetIO"`
+	BlockIO  statsValue[string] `json:"BlockIO"`
 }
 
-var errDockerStatsUnavailable = errors.New("docker stats unavailable")
-
 // parseDockerStats parses one JSON line from Docker stats output, returning
-// errDockerStatsUnavailable when Docker marks the sample invalid.
+// errStatsUnavailable when Docker marks the sample invalid.
 func parseDockerStats(line string) (*Stats, string, error) {
 	var raw dockerStats
 	if err := json.Unmarshal([]byte(line), &raw); err != nil {
+		if errors.Is(err, errStatsUnavailable) {
+			return nil, "", err
+		}
 		return nil, "", fmt.Errorf("parsing Docker stats JSON: %w", err)
 	}
-	// Docker renders invalid samples as "--" after a collection timeout or
-	// stream error. They are missing measurements, not zero resource usage.
-	if raw.CPUPerc == "--" {
-		return nil, raw.Name, errDockerStatsUnavailable
-	}
-	cpuPerc, err := parsePercent(raw.CPUPerc)
+	cpuPerc, err := parsePercent(raw.CPUPerc.value)
 	if err != nil {
 		return nil, "", fmt.Errorf("parsing CPU%%: %w", err)
 	}
-	memPerc, err := parsePercent(raw.MemPerc)
+	memPerc, err := parsePercent(raw.MemPerc.value)
 	if err != nil {
 		return nil, "", fmt.Errorf("parsing mem%%: %w", err)
 	}
-	memUsed, memLimit, err := parseMemUsage(raw.MemUsage)
+	memUsed, memLimit, err := parseMemUsage(raw.MemUsage.value)
 	if err != nil {
 		return nil, "", fmt.Errorf("parsing mem usage: %w", err)
 	}
 	var pids int
-	if raw.PIDs != "N/A" {
-		pids, err = strconv.Atoi(raw.PIDs)
+	if raw.PIDs.value != "N/A" {
+		pids, err = strconv.Atoi(raw.PIDs.value)
 		if err != nil {
 			return nil, "", fmt.Errorf("parsing PIDs: %w", err)
 		}
 	}
-	netRx, netTx, err := parseIOPair(raw.NetIO)
+	netRx, netTx, err := parseIOPair(raw.NetIO.value)
 	if err != nil {
 		return nil, "", fmt.Errorf("parsing net I/O: %w", err)
 	}
-	blockRead, blockWrite, err := parseIOPair(raw.BlockIO)
+	blockRead, blockWrite, err := parseIOPair(raw.BlockIO.value)
 	if err != nil {
 		return nil, "", fmt.Errorf("parsing block I/O: %w", err)
 	}

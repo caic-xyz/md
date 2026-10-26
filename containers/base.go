@@ -245,7 +245,7 @@ func (b *base) DiskUsage(ctx context.Context, name string) (int64, error) {
 }
 
 // WatchStats streams resource usage for the named running containers, skipping
-// unavailable Docker samples until collection resumes.
+// unavailable samples until collection resumes.
 func (b *base) WatchStats(ctx context.Context, names []string) (iter.Seq2[StatsSample, error], error) {
 	args := make([]string, 0, 4+len(names))
 	args = append(args, "stats", "--no-trunc", "--format", "{{json .}}")
@@ -274,7 +274,7 @@ func (b *base) WatchStats(ctx context.Context, names []string) (iter.Seq2[StatsS
 				continue
 			}
 			s, name, err := b.statsParser(line)
-			if errors.Is(err, errDockerStatsUnavailable) {
+			if errors.Is(err, errStatsUnavailable) {
 				continue
 			}
 			if err != nil {

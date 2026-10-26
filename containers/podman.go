@@ -9,6 +9,7 @@ package containers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -63,26 +64,31 @@ type podmanSecurityInfoJSON struct {
 }
 
 type podmanStats struct {
-	Name        string  `json:"Name"`
-	CPU         float64 `json:"CPU"`
-	MemUsage    uint64  `json:"MemUsage"`
-	MemLimit    uint64  `json:"MemLimit"`
-	MemPerc     float64 `json:"MemPerc"`
-	PIDs        uint64  `json:"PIDs"`
-	NetInput    uint64  `json:"NetInput"`
-	NetOutput   uint64  `json:"NetOutput"`
-	BlockInput  uint64  `json:"BlockInput"`
-	BlockOutput uint64  `json:"BlockOutput"`
+	Name        string              `json:"Name"`
+	CPU         statsValue[float64] `json:"CPU"`
+	CPUPercent  statsValue[float64] `json:"cpu_percent"`
+	MemUsage    statsValue[uint64]  `json:"MemUsage"`
+	MemLimit    statsValue[uint64]  `json:"MemLimit"`
+	MemPerc     statsValue[float64] `json:"MemPerc"`
+	PIDs        statsValue[uint64]  `json:"PIDs"`
+	NetInput    statsValue[uint64]  `json:"NetInput"`
+	NetOutput   statsValue[uint64]  `json:"NetOutput"`
+	BlockInput  statsValue[uint64]  `json:"BlockInput"`
+	BlockOutput statsValue[uint64]  `json:"BlockOutput"`
 }
 
+// parsePodmanStats parses raw Podman stats and identifies unavailable samples.
 func parsePodmanStats(line string) (*Stats, string, error) {
 	var raw podmanStats
 	if err := json.Unmarshal([]byte(line), &raw); err != nil {
+		if errors.Is(err, errStatsUnavailable) {
+			return nil, "", err
+		}
 		return nil, "", fmt.Errorf("parsing Podman stats JSON: %w", err)
 	}
-	pids, err := strconv.Atoi(strconv.FormatUint(raw.PIDs, 10))
+	pids, err := strconv.Atoi(strconv.FormatUint(raw.PIDs.value, 10))
 	if err != nil {
 		return nil, "", fmt.Errorf("parsing PIDs: %w", err)
 	}
-	return &Stats{CPUPerc: raw.CPU, MemUsed: raw.MemUsage, MemLimit: raw.MemLimit, MemPerc: raw.MemPerc, PIDs: pids, NetRx: raw.NetInput, NetTx: raw.NetOutput, BlockRead: raw.BlockInput, BlockWrite: raw.BlockOutput, DiskUsed: -1}, raw.Name, nil
+	return &Stats{CPUPerc: raw.CPU.value, MemUsed: raw.MemUsage.value, MemLimit: raw.MemLimit.value, MemPerc: raw.MemPerc.value, PIDs: pids, NetRx: raw.NetInput.value, NetTx: raw.NetOutput.value, BlockRead: raw.BlockInput.value, BlockWrite: raw.BlockOutput.value, DiskUsed: -1}, raw.Name, nil
 }
