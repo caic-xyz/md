@@ -921,7 +921,15 @@ func TestSmoke(t *testing.T) {
 						removeSmokeImageIfPresent(t, cleanupCtx, client, "md-fork-"+ct.Name)
 					})
 
+					if _, err := client.Runtime.Run(t.Context(), "", "exec", "--user", "0:0", ct.Name, "touch", "/tmp/fork-root-owned"); err != nil {
+						t.Fatalf("prepare root-owned symlink target: %v", err)
+					}
 					prepareForkCmd := "printf snapshot > /tmp/fork-marker" +
+						" && mkdir /home/user/fork-links" +
+						" && printf target > /home/user/fork-links/target" +
+						" && ln -s target /home/user/fork-links/valid" +
+						" && ln -s missing /home/user/fork-links/dangling" +
+						" && ln -s /tmp/fork-root-owned /home/user/fork-links/external" +
 						" && cd " + shellQuote(cp) +
 						" && printf 'fork-committed\n' > fork-committed.txt" +
 						" && git add fork-committed.txt" +
@@ -990,6 +998,13 @@ func TestSmoke(t *testing.T) {
 
 					if _, err := client.Runtime.Run(t.Context(), "", "image", "inspect", "md-fork-"+ct.Name); err == nil {
 						t.Fatalf("temporary fork snapshot tag md-fork-%s still exists", ct.Name)
+					}
+					links, err := fork.runCmd(t.Context(), "", fork.SSHCommand(nil, "stat -c '%U:%G' /home/user/fork-links/{target,valid,dangling,external} /tmp/fork-root-owned && readlink /home/user/fork-links/{valid,dangling,external}"))
+					if err != nil {
+						t.Fatalf("inspect fork symlinks: %v", err)
+					}
+					if want := "user:user\nuser:user\nuser:user\nuser:user\nroot:root\ntarget\nmissing\n/tmp/fork-root-owned"; links != want {
+						t.Fatalf("fork symlink ownership and targets = %q, want %q", links, want)
 					}
 
 					if got := ct.Status(t.Context()); got != "exited" {

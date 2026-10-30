@@ -90,14 +90,16 @@ this case:
   sharing translates host ownership.
 - In `Fork`, after the fork's SSH is up and before pushing branches, restore
   every collapsed file in the home back to `user`
-  (`find /home/user -xdev -uid 0 -exec chown user:user {} +`), gated on the
+  (`find /home/user -xdev -uid 0 -exec chown -h user:user {} +`), gated on the
   resolved identity's Podman keep-id mode. Whole-home rather than just `~/src`,
   because the collapse is not limited to the repos. This is safe: a fresh home has no legitimately
   root-owned files (verified), so `-uid 0` only ever matches collapse
   artifacts. `-xdev` keeps the walk on the container's own filesystem, so it
   never descends into a bind-mounted host directory (which keep-id presents as
   user-owned anyway) — host ownership is never rewritten, the same reason `:U`
-  was rejected. The walk is cheap (~0.2s over ~180k inodes).
+  was rejected. `chown -h` restores symlink ownership without following targets,
+  including dangling links and links outside the home. The walk is cheap
+  (~0.2s over ~180k inodes).
 - `smoke_test.go`'s `mounts` subtest guards the keep-id invariant (a writable,
   host-owned bind mount and a read-only one), so a future attempt to drop
   keep-id will fail observably rather than silently regress mounts.

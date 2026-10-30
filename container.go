@@ -2490,13 +2490,15 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 	// `find -xdev` stays on the container's own filesystem, so it never
 	// descends into a bind-mounted host directory (which keep-id presents as
 	// user-owned anyway) — host ownership is never rewritten, the reason `:U`
-	// was rejected. `-uid 0` restores only the collapsed files.
+	// was rejected. `-uid 0` restores only the collapsed files. `chown -h`
+	// restores symlinks themselves, including dangling links, without touching
+	// targets outside this walk.
 	user, err := c.userIdentity(ctx)
 	if err != nil {
 		return nil, err
 	}
 	if user.keepID {
-		if _, err := c.Runtime.Run(ctx, "", "exec", "--user", "0:0", fork.Name, "find", containerHomeDir, "-xdev", "-uid", "0", "-exec", "chown", "user:user", "{}", "+"); err != nil {
+		if _, err := c.Runtime.Run(ctx, "", "exec", "--user", "0:0", fork.Name, "find", containerHomeDir, "-xdev", "-uid", "0", "-exec", "chown", "-h", "user:user", "{}", "+"); err != nil {
 			return nil, fmt.Errorf("restoring ownership on forked container: %w", err)
 		}
 	}
