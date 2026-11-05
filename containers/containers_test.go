@@ -22,6 +22,17 @@ import (
 const fakeBaseRunEnv = "MD_TEST_FAKE_BASE_RUN"
 
 func TestMain(m *testing.M) {
+	if want := os.Getenv("MD_TEST_REMOVE_ARGS"); want != "" {
+		if got := strings.Join(os.Args[1:], " "); got != want {
+			_, _ = fmt.Fprintf(os.Stderr, "removal arguments = %q, want %q\n", got, want)
+			os.Exit(2)
+		}
+		if os.Getenv("MD_TEST_REMOVE_ERROR") != "" {
+			_, _ = fmt.Fprintln(os.Stderr, "removal failed")
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 	if os.Getenv("MD_TEST_BATCH") != "" {
 		var output, failure string
 		switch strings.Join(os.Args[1:], " ") {
@@ -59,6 +70,45 @@ func TestMain(m *testing.M) {
 		os.Exit(0)
 	}
 	os.Exit(m.Run())
+}
+
+func TestRuntime(t *testing.T) {
+	t.Parallel()
+	t.Run("RemoveContainer", func(t *testing.T) {
+		t.Parallel()
+		exe, err := os.Executable()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, tc := range []struct{ name, args string }{
+			{"docker", "rm -f -v task"},
+			{"podman", "rm -f -v --time 0 task"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				makeRuntime := func(env []string) Runtime {
+					if tc.name == "podman" {
+						return newPodman(exe, nil, env)
+					}
+					return newDocker(exe, nil, env)
+				}
+				t.Run("valid", func(t *testing.T) {
+					t.Parallel()
+					r := makeRuntime([]string{"MD_TEST_REMOVE_ARGS=" + tc.args})
+					if err := r.RemoveContainer(t.Context(), "task"); err != nil {
+						t.Fatal(err)
+					}
+				})
+				t.Run("error", func(t *testing.T) {
+					t.Parallel()
+					r := makeRuntime([]string{"MD_TEST_REMOVE_ARGS=" + tc.args, "MD_TEST_REMOVE_ERROR=1"})
+					if err := r.RemoveContainer(t.Context(), "task"); err == nil {
+						t.Fatal("removal failure was hidden")
+					}
+				})
+			})
+		}
+	})
 }
 
 func TestBase(t *testing.T) {

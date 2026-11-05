@@ -48,6 +48,12 @@ func (d *docker) Info(ctx context.Context) (Info, error) {
 	}, nil
 }
 
+// RemoveContainer immediately kills and removes a container and its anonymous volumes.
+func (d *docker) RemoveContainer(ctx context.Context, name string) error {
+	_, err := d.Run(ctx, "", "rm", "-f", "-v", name)
+	return err
+}
+
 // UntagImage removes an image tag without deleting containers that use it.
 func (d *docker) UntagImage(ctx context.Context, image string) error {
 	_, err := d.Run(ctx, "", "rmi", "-f", "--no-prune", image)

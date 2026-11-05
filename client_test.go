@@ -1186,6 +1186,11 @@ func (r *imageDecisionRuntime) Executable() string {
 	return "docker"
 }
 
+func (r *imageDecisionRuntime) RemoveContainer(ctx context.Context, name string) error {
+	_, err := r.Run(ctx, "", "rm", "-f", "-v", name)
+	return err
+}
+
 func (r *imageDecisionRuntime) Run(_ context.Context, _ string, args ...string) (string, error) {
 	switch args[0] {
 	case "images":

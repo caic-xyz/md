@@ -1764,7 +1764,7 @@ func (c *Container) Purge(ctx context.Context, stdout, stderr io.Writer) error {
 		}
 	}
 	if containerExists {
-		if _, err := c.Runtime.Run(ctx, "", "rm", "-f", "-v", c.Name); err != nil {
+		if err := c.Runtime.RemoveContainer(ctx, c.Name); err != nil {
 			retErr = err
 		}
 	}

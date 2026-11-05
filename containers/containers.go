@@ -342,6 +342,9 @@ type Runtime interface {
 	// Info queries the runtime server CPU capacity and isolation environment.
 	Info(ctx context.Context) (Info, error)
 
+	// RemoveContainer immediately kills and removes a container and its anonymous volumes.
+	RemoveContainer(ctx context.Context, name string) error
+
 	// List returns all containers known to the runtime.
 	List(ctx context.Context) ([]Container, error)
 	// InspectContainer returns normalized inspect metadata for one container.

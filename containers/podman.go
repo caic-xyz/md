@@ -44,6 +44,12 @@ func (p *podman) Info(ctx context.Context) (Info, error) {
 	return Info{CPUs: raw.Host.CPUs, Rootless: raw.Host.Security.Rootless}, nil
 }
 
+// RemoveContainer immediately kills and removes a container and its anonymous volumes.
+func (p *podman) RemoveContainer(ctx context.Context, name string) error {
+	_, err := p.Run(ctx, "", "rm", "-f", "-v", "--time", "0", name)
+	return err
+}
+
 // UntagImage removes an image tag without deleting containers that use it.
 func (p *podman) UntagImage(ctx context.Context, image string) error {
 	_, err := p.Run(ctx, "", "image", "untag", image)

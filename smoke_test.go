@@ -165,7 +165,7 @@ func removeSmokeContainerIfPresent(t testing.TB, ctx context.Context, c *Client,
 	if !slices.Contains(strings.Fields(out), name) {
 		return
 	}
-	if _, err := c.Runtime.Run(ctx, "", "rm", "-f", "-v", name); err != nil {
+	if err := c.Runtime.RemoveContainer(ctx, name); err != nil {
 		t.Errorf("remove container %s: %v", name, err)
 	}
 }
