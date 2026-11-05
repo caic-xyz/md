@@ -3,8 +3,13 @@
 Each container is locked to a repository-branch pair. No confusion. Safe parallel work.
 
 **Safe parallel work with multiple AI coding agents.** Run Claude Code, Codex,
-Amp CLI, Kilo CLI, Pi, and other tools in isolated containers
+DeepSeek Harness (dsh), Amp CLI, Kilo CLI, Pi, and other tools in isolated containers
 without branch conflicts, file interference, or environmental headaches.
+
+Specialized images install `dsh` from `@deepseek-ai/dsh`. Its default `~/.dsh`
+data directory and the shared `~/.agents` configuration directory are mounted
+from the host into containers, preserving settings, credentials, plugins, and
+sessions. Run `dsh web` to launch its Web UI.
 
 [![codecov](https://codecov.io/gh/caic-xyz/md/graph/badge.svg?token=Q2ZK312LNF)](https://codecov.io/gh/caic-xyz/md)
 

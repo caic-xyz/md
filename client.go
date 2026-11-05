@@ -1917,6 +1917,7 @@ const (
 	HarnessAntigravity Harness = "antigravity"
 	HarnessClaude      Harness = "claude"
 	HarnessCodex       Harness = "codex"
+	HarnessDsh         Harness = "dsh"
 	HarnessGoose       Harness = "goose"
 	HarnessKilo        Harness = "kilo"
 	HarnessKimi        Harness = "kimi"
@@ -1955,6 +1956,7 @@ var HarnessMounts = map[Harness]AgentPaths{
 	HarnessAntigravity: {Description: "Antigravity", HomePaths: []string{".gemini"}},
 	HarnessClaude:      {Description: "Claude Code", HomePaths: []string{".claude"}},
 	HarnessCodex:       {Description: "Codex", HomePaths: []string{".codex"}},
+	HarnessDsh:         {Description: "DeepSeek Harness", HomePaths: []string{".dsh"}},
 	HarnessGoose:       {Description: "Goose", XDGConfigPaths: []string{"goose"}, LocalSharePaths: []string{"goose"}},
 	HarnessKilo:        {Description: "Kilo Code", HomePaths: []string{".kilocode"}},
 	HarnessKimi:        {Description: "Kimi", HomePaths: []string{".kimi"}},

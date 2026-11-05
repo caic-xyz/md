@@ -30,7 +30,7 @@ Notable executables available in the container:
 - Languages: go, python3, java, R, rust (cargo, rustc)
 - Languages (web): node (v26), npm, npx, pnpm (standalone in `~/.local/share/pnpm/bin`), bun, typescript, bun, eslint, tsx
 - Math: bc
-- AI Tools: claude, codex, kilo, qwen-code, kimi, opencode, amp, pi, agent-browser
+- AI Tools: claude, codex, dsh, kilo, qwen-code, kimi, opencode, amp, pi, agent-browser
 - Containers: podman (rootless, requires -sudo for nested containers)
 - Virtualization: qemu-kvm, libvirt-clients, libguestfs-tools (guestfish, guestmount, virt-inspector)
 - Media: ffmpeg, imagemagick

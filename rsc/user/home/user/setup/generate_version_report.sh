@@ -150,6 +150,7 @@
   # AI Tools
   check_version "Claude CLI" "claude" "--version"
   check_version "Codex" "codex" "--version"
+  check_version "DeepSeek Harness" "dsh" "--version"
   check_version "Kilo CLI" "kilo" "--version"
   check_version "Qwen Code" "qwen" "--version"
   check_version "Kimi CLI" "kimi" "--version"

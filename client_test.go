@@ -273,7 +273,7 @@ func TestHarnessMounts(t *testing.T) {
 func TestAgentContainerPaths(t *testing.T) {
 	t.Parallel()
 	paths := agentContainerPaths()
-	for _, want := range []string{"/home/user/src", "/home/user/.agents"} {
+	for _, want := range []string{"/home/user/src", "/home/user/.agents", "/home/user/.dsh"} {
 		if !slices.Contains(paths, want) {
 			t.Errorf("agentContainerPaths() = %v, want %s", paths, want)
 		}
@@ -337,6 +337,7 @@ func TestClient(t *testing.T) {
 		}
 		mounts, err := c.AgentMounts(
 			HarnessMounts[HarnessClaude],
+			HarnessMounts[HarnessDsh],
 			AgentPaths{HomePaths: []string{"custom-ro"}, ReadOnly: true},
 		)
 		if err != nil {
@@ -346,6 +347,7 @@ func TestClient(t *testing.T) {
 			filepath.Join(home, ".agents"),
 			filepath.Join(home, ".claude"),
 			filepath.Join(home, ".config", "md"),
+			filepath.Join(home, ".dsh"),
 			filepath.Join(home, "custom-ro"),
 		}
 		for _, d := range wantDirs {
@@ -371,6 +373,11 @@ func TestClient(t *testing.T) {
 			return m.HostPath == filepath.Join(home, ".claude") && m.ContainerPath == "/home/user/.claude"
 		}) {
 			t.Fatalf("AgentMounts missing Claude mount: %+v", mounts)
+		}
+		if !slices.ContainsFunc(mounts, func(m Mount) bool {
+			return m.HostPath == filepath.Join(home, ".dsh") && m.ContainerPath == "/home/user/.dsh" && !m.ReadOnly
+		}) {
+			t.Fatalf("AgentMounts missing writable DeepSeek Harness mount: %+v", mounts)
 		}
 		if !slices.ContainsFunc(mounts, func(m Mount) bool {
 			return m.HostPath == filepath.Join(home, ".config", "md") && m.ContainerPath == "/home/user/.config/md" && m.ReadOnly

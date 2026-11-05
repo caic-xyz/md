@@ -35,6 +35,11 @@ fi
 pnpm add -g --allow-build=opencode-ai \
   @openai/codex@latest @earendil-works/pi-coding-agent@latest opencode-ai@latest
 
+# Use npm's flat layout to work around dsh's native-loader resolution bug
+# with pnpm's global virtual store:
+# https://github.com/deepseek-ai/deepseek-harness/discussions/9432
+npm install -g --prefix "$HOME/.local" @deepseek-ai/dsh@latest
+
 # A custom install directory avoids the installer's shell-profile edits.
 # The endpoint can serve a gzip Content-Encoding even without Accept-Encoding.
 curl -fsSL --compressed https://antigravity.google/cli/install.sh | bash -s -- --dir "$HOME/.local/bin"
@@ -47,7 +52,7 @@ ln -sf "$HOME/.claude/claude.json" "$HOME/.claude.json"
 curl -fsSL https://claude.ai/install.sh | bash
 ln -sf "$HOME/.claude/claude.json" "$HOME/.claude.json"
 
-for agent in agy claude codex opencode pi; do
+for agent in agy claude codex dsh opencode pi; do
   if ! command -v "$agent" >/dev/null 2>&1; then
     echo "md: $agent installation did not provide an executable" >&2
     exit 1
@@ -57,7 +62,7 @@ done
 if [[ -f "$HOME/src/tool_versions.md" ]]; then
   {
     printf '\n## Specialized Image Coding Agents\n\n| Tool | Version |\n| :--- | :--- |\n'
-    for agent in agy claude codex opencode pi; do
+    for agent in agy claude codex dsh opencode pi; do
       version="$($agent --version 2>&1)"
       version="${version%%$'\n'*}"
       printf '| %s | %s |\n' "$agent" "${version//|/\\|}"
