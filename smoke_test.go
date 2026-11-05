@@ -50,6 +50,12 @@ func newSmokeClient(t *testing.T, rt string) *Client {
 		"HOME=" + tmpHome,
 		"GIT_SSH_COMMAND=ssh -F " + filepath.Join(tmpHome, ".ssh", "config"),
 		"XDG_CONFIG_HOME=" + filepath.Join(tmpHome, ".config"),
+		// Force the private store for rootful Podman too, and override any
+		// storage configuration inherited from the developer's environment.
+		"CONTAINERS_STORAGE_CONF=" + filepath.Join(cfgDir, "storage.conf"),
+		// Smoke cases consume final images, never the intermediate build cache.
+		// Commit one layer per build instead of retaining every installer step.
+		"BUILDAH_LAYERS=false",
 	}
 	client, err := newClient(tmpHome, logger, testRuntime(t, rt, logger, clientEnv), io.Discard)
 	if err != nil {
@@ -61,15 +67,87 @@ func newSmokeClient(t *testing.T, rt string) *Client {
 	// avoiding permission errors. Removing a large image can take over two minutes
 	// on a loaded CI runner.
 	if rt == "podman" {
+		if err := checkSmokePodmanStore(t.Context(), client); err != nil {
+			t.Fatal(err)
+		}
 		t.Cleanup(func() {
 			ctx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 5*time.Minute)
 			defer cancel()
+			if err := checkSmokePodmanStore(ctx, client); err != nil {
+				t.Error(err)
+				return
+			}
 			if _, err := client.Runtime.Run(ctx, "", "system", "reset", "-f"); err != nil {
 				t.Errorf("podman system reset cleanup: %v", errors.Join(err, ctx.Err()))
 			}
 		})
 	}
 	return client
+}
+
+// checkSmokePodmanStore refuses remote connections and inherited storage overrides
+// before any image work and immediately before destructive store cleanup.
+func checkSmokePodmanStore(ctx context.Context, c *Client) error {
+	out, err := c.Runtime.Run(ctx, "", "info", "--format", "{{.Host.ServiceIsRemote}}\n{{.Store.GraphRoot}}")
+	if err != nil {
+		return fmt.Errorf("verify private Podman smoke store: %w", err)
+	}
+	want := "false\n" + filepath.ToSlash(filepath.Join(c.Home, ".local", "share", "containers", "storage"))
+	if strings.TrimSpace(out) != want {
+		return fmt.Errorf("smoke tests require local Podman with private storage: got %q, want %q", out, want)
+	}
+	return nil
+}
+
+func TestCheckSmokePodmanStore(t *testing.T) {
+	t.Parallel()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	store := filepath.ToSlash(filepath.Join(home, ".local", "share", "containers", "storage"))
+	t.Run("valid", func(t *testing.T) {
+		t.Parallel()
+		c, err := newClient(home, testLogger(t), testRuntime(t, exe, testLogger(t), []string{
+			fakeRuntimeEnv + "=1",
+			fakeRuntimeInfoEnv + "=false\n" + store,
+			fakeRuntimeLogEnv + "=" + filepath.Join(t.TempDir(), "runtime.log"),
+		}), io.Discard)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := checkSmokePodmanStore(t.Context(), c); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("error", func(t *testing.T) {
+		t.Parallel()
+		for _, tc := range []struct{ name, remote, graphRoot string }{
+			{"remote", "true", ""},
+			{"wrong_store", "false", "/var/lib/containers/storage"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				home := t.TempDir()
+				graphRoot := tc.graphRoot
+				if graphRoot == "" {
+					graphRoot = filepath.ToSlash(filepath.Join(home, ".local", "share", "containers", "storage"))
+				}
+				c, err := newClient(home, testLogger(t), testRuntime(t, exe, testLogger(t), []string{
+					fakeRuntimeEnv + "=1",
+					fakeRuntimeInfoEnv + "=" + tc.remote + "\n" + graphRoot,
+					fakeRuntimeLogEnv + "=" + filepath.Join(t.TempDir(), "runtime.log"),
+				}), io.Discard)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := checkSmokePodmanStore(t.Context(), c); err == nil {
+					t.Fatal("accepted Podman outside the private local store")
+				}
+			})
+		}
+	})
 }
 
 // hasImage checks whether a container image exists in the local store.
@@ -102,16 +180,36 @@ func removeSmokeImageIfPresent(t testing.TB, ctx context.Context, c *Client, nam
 }
 
 // ensureImages ensures md-root-local and md-user-local exist. When they don't
-// and -short is passed, falls back to the remote default image instead of
-// building. Returns the base image to use.
+// and -short is passed, pulls the remote default image and pins a local tag
+// instead of building. Returns the base image to use.
 func ensureImages(t *testing.T, ctx context.Context, c *Client) string {
 	if hasImage(ctx, c, "md-root-local") && hasImage(ctx, c, "md-user-local") {
 		t.Log("local images already present, skipping build")
 		return "md-user-local"
 	}
 	if testing.Short() {
-		t.Log("short mode: using remote image " + DefaultBaseImage)
-		return DefaultBaseImage + ":latest"
+		remote := DefaultBaseImage + ":latest"
+		t.Log("short mode: pulling remote image " + remote)
+		if out, err := c.Runtime.Run(ctx, "", "pull", "--platform", PlatformDefault.Resolve().String(), remote); err != nil {
+			t.Fatalf("pull smoke base: %v\n%s", err, out)
+		}
+		// Use a local tag throughout the run: a registry update must not rebuild
+		// specialized images between subtests or in a separate CLI process.
+		base := "md-smoke-base-" + c.Runtime.Name()
+		if _, err := c.Runtime.Run(ctx, "", "tag", remote, base); err != nil {
+			t.Fatalf("tag smoke base: %v", err)
+		}
+		t.Cleanup(func() {
+			ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+			defer cancel()
+			// Podman's isolated store may already have been pruned.
+			if hasImage(ctx, c, base) {
+				if err := c.Runtime.UntagImage(ctx, base); err != nil {
+					t.Errorf("untag smoke base: %v", err)
+				}
+			}
+		})
+		return base
 	}
 	t.Log("building local images (md-root-local → md-user-local) ...")
 	if err := c.BuildImage(ctx, io.Discard, io.Discard, PlatformDefault); err != nil {
@@ -387,18 +485,11 @@ func runSmokeGit(t *testing.T, ctx context.Context, wd string, args ...string) s
 	return strings.TrimSpace(string(out))
 }
 
-func runSmokeMD(t *testing.T, c *Client, args ...string) string {
-	ctx := t.Context()
-	repoRoot, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("get working directory: %v", err)
-	}
-	goArgs := append([]string{"run", "./cmd/md", "--runtime", c.Runtime.Name()}, args...)
-	cmd := exec.CommandContext(ctx, "go", goArgs...) //nolint:gosec // args are test-controlled.
-	cmd.Dir = repoRoot
+func runSmokeMD(t *testing.T, binary string, c *Client, args ...string) string {
+	cliArgs := append([]string{"--runtime", c.Runtime.Name()}, args...)
+	cmd := exec.CommandContext(t.Context(), binary, cliArgs...) //nolint:gosec // binary and args are test-controlled.
 	overrides := append([]string(nil), c.env...)
 	overrides = append(overrides, "LANG=C")
-	overrides = append(overrides, smokeGoEnv(t)...)
 	cmd.Env = containers.EnvWithOverrides(os.Environ(), overrides)
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
@@ -407,26 +498,6 @@ func runSmokeMD(t *testing.T, c *Client, args ...string) string {
 		t.Fatalf("md %s: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
 	}
 	return stdout.String()
-}
-
-func smokeGoEnv(t *testing.T) []string {
-	cmd := exec.CommandContext(t.Context(), "go", "env", "GOCACHE", "GOMODCACHE", "GOPATH")
-	out, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("go env: %v", err)
-	}
-	keys := []string{"GOCACHE", "GOMODCACHE", "GOPATH"}
-	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-	if len(lines) != len(keys) {
-		t.Fatalf("go env returned %d lines, want %d:\n%s", len(lines), len(keys), out)
-	}
-	env := make([]string, 0, len(keys))
-	for i, value := range lines {
-		if value != "" {
-			env = append(env, keys[i]+"="+value)
-		}
-	}
-	return env
 }
 
 func runSmokeContainerGit(t *testing.T, ct *Container, repoPath string, args ...string) string {
@@ -469,6 +540,10 @@ func assertSmokeContainerNoDiff(t *testing.T, ct *Container, repoIdx int) {
 // container lifecycle. Runs under each available container runtime.
 func TestSmoke(t *testing.T) {
 	t.Parallel()
+	binary := filepath.Join(t.TempDir(), "md")
+	if out, err := exec.CommandContext(t.Context(), "go", "build", "-o", binary, "./cmd/md").CombinedOutput(); err != nil { //nolint:gosec // binary is a test temp path.
+		t.Fatalf("build smoke CLI: %v\n%s", err, out)
+	}
 	for _, rt := range []string{"docker", "podman"} {
 		t.Run(rt, func(t *testing.T) {
 			if _, err := exec.LookPath(rt); err != nil {
@@ -494,25 +569,21 @@ func TestSmoke(t *testing.T) {
 			// Fetch md-user upfront so all subtests can reuse it.
 			baseImage := ensureImages(t, t.Context(), client)
 
-			// Rootless Podman can spend over a minute preparing the ID mapping for
-			// each distinct large image. Include the cache fixture in the shared
-			// specialized image so cache coverage does not require a second image.
-			var sharedCaches []CacheMount
-			var smokeCacheSource string
-			if rootlessRuntime {
-				smokeCacheSource = filepath.Join(t.TempDir(), "smoke-cache")
-				if err := os.Mkdir(smokeCacheSource, 0o700); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(filepath.Join(smokeCacheSource, "hello.txt"), []byte("cache-works"), 0o600); err != nil {
-					t.Fatal(err)
-				}
-				sharedCaches = []CacheMount{{
-					Name:          "smoke-cache",
-					HostPath:      smokeCacheSource,
-					ContainerPath: "/home/user/.cache/smoke",
-				}}
+			// Share one cache-bearing specialized image across API and CLI tests.
+			// Every distinct image reinstalls agents, and rootless Podman also
+			// prepares an expensive ID mapping for it.
+			smokeCacheSource := filepath.Join(t.TempDir(), "smoke-cache")
+			if err := os.Mkdir(smokeCacheSource, 0o700); err != nil {
+				t.Fatal(err)
 			}
+			if err := os.WriteFile(filepath.Join(smokeCacheSource, "hello.txt"), []byte("cache-works"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			sharedCaches := []CacheMount{{
+				Name:          "smoke-cache",
+				HostPath:      smokeCacheSource,
+				ContainerPath: "/home/user/.cache/smoke",
+			}}
 
 			// Pre-build the specialized image once so subtests reuse it.
 			prebuildSpecializedImage(t, t.Context(), client, baseImage, sharedCaches)
@@ -1053,21 +1124,16 @@ func TestSmoke(t *testing.T) {
 
 			t.Run("run_apply_patch", func(t *testing.T) {
 				repo := createSmokeGitRepo(t, "main", "main", false)
-				args := []string{
+				runSmokeMD(t, binary, client,
 					"run",
 					"-image", baseImage,
 					"-repo", repo,
 					"-branch", "main",
 					"-no-caches",
-				}
-				if rootlessRuntime {
-					args = append(args, "-cache", smokeCacheSource+":/home/user/.cache/smoke")
-				}
-				args = append(args,
+					"-cache", smokeCacheSource+":/home/user/.cache/smoke",
 					"-apply-patch",
 					"bash", "-c", "echo foo > bar.txt",
 				)
-				runSmokeMD(t, client, args...)
 				data, err := os.ReadFile(filepath.Join(repo, "bar.txt")) //nolint:gosec // repo is a test temp dir.
 				if err != nil {
 					t.Fatalf("read applied file: %v", err)
@@ -1106,7 +1172,7 @@ func TestSmoke(t *testing.T) {
 					t.Fatalf("prepare in-progress rebase: %v", err)
 				}
 
-				out := runSmokeMD(t, client,
+				out := runSmokeMD(t, binary, client,
 					"diff",
 					"-repo", repo,
 					"-branch", "main",
@@ -1145,26 +1211,9 @@ func TestSmoke(t *testing.T) {
 				assertSmokeContainerGitRefMissing(t, ct, cp, "refs/remotes/host/HEAD")
 			})
 
-			// Cache subtest. Rootless Podman reuses the shared cache-bearing image
-			// to avoid preparing an ID mapping for a second copy of the large base.
-			// Do not run this in parallel with build_image below: build_image removes
-			// and rebuilds md-user-local, which this test uses as the Dockerfile FROM
-			// image. Podman then tries to resolve the missing local short name via
-			// registries.conf and fails when no unqualified registry is configured.
+			// Verify the cache baked into the shared specialized image.
 			t.Run("cache", func(t *testing.T) {
-				cacheMounts := sharedCaches
-				if len(cacheMounts) == 0 {
-					src := t.TempDir()
-					if err := os.WriteFile(filepath.Join(src, "hello.txt"), []byte("cache-works"), 0o600); err != nil {
-						t.Fatal(err)
-					}
-					cacheMounts = []CacheMount{{
-						Name:          "smoke-cache",
-						HostPath:      src,
-						ContainerPath: "/home/user/.cache/smoke",
-					}}
-				}
-				ct := launchSmokeContainer(t, t.Context(), client, baseImage, rt+"-cache", false, cacheMounts...)
+				ct := launchSmokeContainer(t, t.Context(), client, baseImage, rt+"-cache", false, sharedCaches...)
 
 				out, err := ct.runCmd(t.Context(), "", ct.SSHCommand(nil, "cat /home/user/.cache/smoke/hello.txt"))
 				if err != nil {
@@ -1224,6 +1273,19 @@ func TestSmoke(t *testing.T) {
 			// SSH however hostile the metadata it inherited, and an image that cannot
 			// carry md fails its own build, naming the missing capability.
 			t.Run("foreign_base", func(t *testing.T) {
+				if rt == "podman" {
+					// newSmokeClient gives Podman a private store. All preceding
+					// containers have been purged; release their base, mapped layers,
+					// build cache and untagged fork snapshots before installing agents
+					// in foreign images. build_image starts after this serial group.
+					if err := checkSmokePodmanStore(t.Context(), client); err != nil {
+						t.Fatal(err)
+					}
+					if out, err := client.Runtime.Run(t.Context(), "", "system", "prune", "--all", "--force"); err != nil {
+						t.Fatalf("prune isolated smoke store: %v\n%s", err, out)
+					}
+					client.invalidateImageBuildCache()
+				}
 				slim := "debian:stable-slim"
 				reduced := ensureSmokeFixture(t, t.Context(), client, "debian-slim", smokeForeignBaseDockerfile)
 				metadataUID, metadataGID := smokeContainerUser(t, client)
@@ -1249,13 +1311,21 @@ func TestSmoke(t *testing.T) {
 					if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(df), 0o600); err != nil {
 						t.Fatal(err)
 					}
-					if out, err := client.Runtime.Run(t.Context(), dir, "build", "."); err != nil {
+					iidFile := filepath.Join(t.TempDir(), "iid")
+					if out, err := client.Runtime.Run(t.Context(), dir, "build", "--iidfile", filepath.ToSlash(iidFile), "."); err != nil {
 						t.Fatalf("building with host owner 1001:1001: %v\n%s", err, out)
 					}
+					id, err := os.ReadFile(iidFile) //nolint:gosec // iidFile is a test temp path.
+					if err != nil {
+						t.Fatal(err)
+					}
+					// This build-only image has no consumer. Remove it and its unused
+					// parent layers before building the launchable foreign fixtures.
+					removeSmokeImageIfPresent(t, t.Context(), client, strings.TrimSpace(string(id)))
 				})
 
+				prebuildSpecializedImage(t, t.Context(), client, reduced, nil)
 				t.Run("reduced_image_reaches_ssh", func(t *testing.T) {
-					prebuildSpecializedImage(t, t.Context(), client, reduced, nil)
 					ct := launchSmokeContainer(t, t.Context(), client, reduced, rt+"-debian-slim", false)
 
 					// The specialized build provisions the account, since the base image has none.

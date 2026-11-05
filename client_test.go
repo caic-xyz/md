@@ -34,6 +34,7 @@ import (
 const (
 	fakeRuntimeEnv          = "MD_TEST_FAKE_RUNTIME"
 	fakeRuntimeErrorEnv     = "MD_TEST_FAKE_RUNTIME_ERROR"
+	fakeRuntimeInfoEnv      = "MD_TEST_FAKE_RUNTIME_INFO"
 	fakeRuntimeStateEnv     = "MD_TEST_FAKE_RUNTIME_STATE"
 	fakeRuntimeLocalBaseEnv = "MD_TEST_FAKE_RUNTIME_LOCAL_BASE"
 	fakeRuntimeLogEnv       = "MD_TEST_FAKE_RUNTIME_LOG"
@@ -1560,7 +1561,11 @@ func runFakeRuntime(args []string, logPath string, localBase bool, containerStat
 		return 1
 	}
 	if len(args) > 0 && args[0] == "info" {
-		_, _ = fmt.Fprintln(os.Stdout, `{"NCPU":14}`)
+		out := os.Getenv(fakeRuntimeInfoEnv)
+		if out == "" {
+			out = `{"NCPU":14}`
+		}
+		_, _ = fmt.Fprintln(os.Stdout, out)
 		return 0
 	}
 	if len(args) >= 2 && args[0] == "inspect" {

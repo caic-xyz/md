@@ -85,25 +85,24 @@ jobs:
       fail-fast: false
       # Run Docker and Podman on separate runners. They use separate image
       # stores and unpack large base images; sharing one runner can exhaust
-      # /mnt even though both stores are relocated there.
+      # /mnt. Podman's private store lives under TMPDIR.
       matrix:
         runtime: [docker, podman]
     env:
       PYTHONDONTWRITEBYTECODE: x
     steps:
-      - name: Maximize Docker/Podman Space
+      - name: Relocate Docker storage
+        if: matrix.runtime == 'docker'
         run: |
           sudo systemctl stop docker.service docker.socket containerd.service
           sudo rm -rf /var/lib/docker
           sudo mkdir -p /mnt/docker
           sudo ln -s /mnt/docker /var/lib/docker
           sudo systemctl start containerd.service docker.service
-          sudo mkdir -p /mnt/user-containers
-          sudo chown "$USER:$USER" /mnt/user-containers
+      - name: Prepare smoke temporary storage
+        run: |
           sudo mkdir -p /mnt/go-test-tmp
           sudo chown "$USER:$USER" /mnt/go-test-tmp
-          mkdir -p ~/.local/share
-          ln -s /mnt/user-containers ~/.local/share/containers
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
