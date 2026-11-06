@@ -3505,6 +3505,173 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 		})
 	})
 	t.Run("Push", func(t *testing.T) {
+		t.Run("skips_backups_for_preserved_history", func(t *testing.T) { //nolint:paralleltest // setup uses t.Setenv.
+			for _, advance := range []bool{false, true} {
+				name := "unchanged"
+				if advance {
+					name = "fast_forward"
+				}
+				t.Run(name, func(t *testing.T) { //nolint:paralleltest // setup uses t.Setenv.
+					ctx := t.Context()
+					ct, hostDir, containerDir := setupMultiBranchPullTest(t)
+					runTestGit(t, ctx, containerDir, "branch", "feature", "origin/feature")
+					if advance {
+						for _, branch := range ct.Repos[0].Branches {
+							runTestGit(t, ctx, hostDir, "switch", "-q", branch)
+							writeTestFile(t, filepath.Join(hostDir, branch+".txt"), "host advance\n")
+							runTestGit(t, ctx, hostDir, "commit", "-q", "-am", "host advance")
+						}
+					}
+					backup, err := ct.Push(ctx, io.Discard, io.Discard, 0)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if backup != "" {
+						t.Fatalf("backup = %q, want none", backup)
+					}
+					if got := runTestGit(t, ctx, containerDir, "for-each-ref", "--format=%(refname)", "refs/heads/backup-*"); got != "" {
+						t.Fatalf("unexpected backup refs: %s", got)
+					}
+					for _, branch := range ct.Repos[0].Branches {
+						want := runTestGit(t, ctx, hostDir, "rev-parse", "refs/heads/"+branch)
+						for _, ref := range []string{"refs/heads/" + branch, containerSyncRefPrefix + branch} {
+							if got := runTestGit(t, ctx, containerDir, "rev-parse", ref); got != want {
+								t.Fatalf("%s = %s, want %s", ref, got, want)
+							}
+						}
+					}
+				})
+			}
+		})
+		t.Run("backs_up_lost_history", func(t *testing.T) { //nolint:paralleltest // setup uses t.Setenv.
+			for _, scenario := range []string{"ahead", "diverged", "dirty", "detached", "unmapped_branch"} {
+				t.Run(scenario, func(t *testing.T) { //nolint:paralleltest // setup uses t.Setenv.
+					ctx := t.Context()
+					ct, hostDir, containerDir := setupPullTest(t)
+					switch scenario {
+					case "detached":
+						runTestGit(t, ctx, containerDir, "switch", "-q", "--detach")
+					case "unmapped_branch":
+						runTestGit(t, ctx, containerDir, "switch", "-q", "-c", "other")
+					}
+					writeTestFile(t, filepath.Join(containerDir, "work.txt"), "container work\n")
+					if scenario != "dirty" {
+						runTestGit(t, ctx, containerDir, "add", ".")
+						runTestGit(t, ctx, containerDir, "commit", "-q", "-m", "container work")
+					}
+					if scenario == "diverged" {
+						writeTestFile(t, filepath.Join(hostDir, "host.txt"), "host work\n")
+						runTestGit(t, ctx, hostDir, "add", ".")
+						runTestGit(t, ctx, hostDir, "commit", "-q", "-m", "host work")
+					}
+					backup, err := ct.Push(ctx, io.Discard, io.Discard, 0)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if !strings.HasPrefix(backup, "backup-") {
+						t.Fatalf("backup = %q, want backup branch", backup)
+					}
+					if got := runTestGit(t, ctx, containerDir, "show", backup+":work.txt"); got != "container work" {
+						t.Fatalf("backed-up work = %q", got)
+					}
+					want := runTestGit(t, ctx, hostDir, "rev-parse", "main")
+					if got := runTestGit(t, ctx, containerDir, "rev-parse", "HEAD"); got != want {
+						t.Fatalf("HEAD = %s, want %s", got, want)
+					}
+				})
+			}
+		})
+
+		t.Run("backs_up_checked_out_local_upstream", func(t *testing.T) { //nolint:paralleltest // setup uses t.Setenv.
+			for _, dirty := range []bool{false, true} {
+				name := "committed"
+				if dirty {
+					name = "dirty"
+				}
+				t.Run(name, func(t *testing.T) { //nolint:paralleltest // setup uses t.Setenv.
+					ctx := t.Context()
+					ct, hostDir, containerDir := setupPullTest(t)
+					runTestGit(t, ctx, hostDir, "branch", "base", "main")
+					runTestGit(t, ctx, hostDir, "branch", "--set-upstream-to=base", "main")
+					runTestGit(t, ctx, containerDir, "switch", "-q", "-c", "base")
+					runTestGit(t, ctx, containerDir, "config", "receive.denyCurrentBranch", "ignore")
+					if dirty {
+						writeTestFile(t, filepath.Join(containerDir, "work.txt"), "upstream work\n")
+					} else {
+						runTestGit(t, ctx, containerDir, "commit", "-q", "--allow-empty", "-m", "upstream work")
+					}
+					tip := runTestGit(t, ctx, containerDir, "rev-parse", "HEAD")
+					var log bytes.Buffer
+					ct.Logger = slog.New(slog.NewJSONHandler(&log, testLoggerOptions()))
+					backup, err := ct.Push(ctx, io.Discard, io.Discard, 0)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if !strings.HasPrefix(backup, "backup-") {
+						t.Fatalf("backup = %q, want backup branch", backup)
+					}
+					if dirty {
+						if got := runTestGit(t, ctx, containerDir, "show", backup+":work.txt"); got != "upstream work" {
+							t.Fatalf("backed-up work = %q", got)
+						}
+					} else if got := runTestGit(t, ctx, containerDir, "rev-parse", backup); got != tip {
+						t.Fatalf("backup = %s, want original HEAD %s", got, tip)
+					}
+					want := runTestGit(t, ctx, hostDir, "rev-parse", "main")
+					if got := runTestGit(t, ctx, containerDir, "rev-parse", "HEAD"); got != want {
+						t.Fatalf("HEAD = %s, want %s", got, want)
+					}
+					if got := runTestGit(t, ctx, containerDir, "rev-parse", "refs/heads/base"); got != want {
+						t.Fatalf("upstream = %s, want host base %s", got, want)
+					}
+					if got := runTestGit(t, ctx, containerDir, "status", "--porcelain"); got != "" {
+						t.Fatalf("checkout is dirty after push: %s", got)
+					}
+					if got := runTestGit(t, ctx, containerDir, "for-each-ref", "--format=%(refname)", containerIncomingUpstreamRefPrefix); got != "" {
+						t.Fatalf("staged upstream refs remain: %s", got)
+					}
+					pushes, ssh := 0, 0
+					dec := json.NewDecoder(&log)
+					for dec.More() {
+						var record struct {
+							Cmd []string `json:"cmd"`
+						}
+						if err := dec.Decode(&record); err != nil {
+							t.Fatal(err)
+						}
+						if len(record.Cmd) > 1 && record.Cmd[0] == "git" && record.Cmd[1] == "push" {
+							pushes++
+						}
+						if len(record.Cmd) > 0 && record.Cmd[0] == "ssh" {
+							ssh++
+						}
+					}
+					// One transfer plus the existing integration-point push, and
+					// the existing backup and checkout SSH commands.
+					if pushes != 2 || ssh != 2 {
+						t.Fatalf("pushes = %d, SSH commands = %d, want 2 each", pushes, ssh)
+					}
+				})
+			}
+		})
+
+		t.Run("ancestry_error_aborts_reset", func(t *testing.T) { //nolint:paralleltest // setup uses t.Setenv.
+			ctx := t.Context()
+			ct, _, containerDir := setupMultiBranchPullTest(t)
+			// The fixture has no local feature branch, so its ancestry cannot be checked.
+			tip := runTestGit(t, ctx, containerDir, "rev-parse", "HEAD")
+			_, err := ct.Push(ctx, io.Discard, io.Discard, 0)
+			if err == nil || !strings.Contains(err.Error(), "backing up container state") {
+				t.Fatalf("Push error = %v, want ancestry failure", err)
+			}
+			if got := runTestGit(t, ctx, containerDir, "rev-parse", "HEAD"); got != tip {
+				t.Fatalf("HEAD = %s, want unchanged %s", got, tip)
+			}
+			if got := runTestGit(t, ctx, containerDir, "for-each-ref", "--format=%(refname)", "refs/heads/backup-*"); got != "" {
+				t.Fatalf("unexpected backup refs: %s", got)
+			}
+		})
+
 		t.Run("rejects_staged_host_changes", func(t *testing.T) { //nolint:paralleltest // setupPullTest uses t.Setenv.
 			ctx := t.Context()
 			ct, hostDir, containerDir := setupPullTest(t)

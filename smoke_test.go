@@ -951,8 +951,8 @@ func TestSmoke(t *testing.T) {
 					if err != nil {
 						t.Fatalf("Push: %v", err)
 					}
-					if !strings.HasPrefix(backupBranch, "backup-") {
-						t.Fatalf("backup branch = %q, want backup-*", backupBranch)
+					if backupBranch != "" {
+						t.Fatalf("backup branch = %q, want none for fast-forward", backupBranch)
 					}
 					out, err := ct.runCmd(t.Context(), "", ct.SSHCommand(nil, "cat "+shellQuote(cp+"/README.md")))
 					if err != nil {

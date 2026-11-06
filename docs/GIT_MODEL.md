@@ -50,6 +50,9 @@ remote. It holds:
 - while a branch is being reset, `refs/md/incoming/<branch>`, an internal
   checkout seed containing the host branch's commit when no mirrored remote ref
   holds that exact commit; it is deleted after the reset succeeds;
+- while a local upstream is being mirrored, `refs/md/incoming-upstreams/<branch>`,
+  holding its incoming tip until the checkout has been replaced; it is deleted
+  after the upstream update succeeds;
 - `refs/md/sync/<branch>`, the integration point: the container commit most
   recently established in the host branch. This is what `md diff` compares
   against;
@@ -133,15 +136,19 @@ is preserved and reported instead.
 ### md push
 
 `md push` overwrites the container with your host state. Before that it saves
-the container's Git-visible work: it commits anything dirty, then creates
-`backup-<timestamp>` at the container's HEAD and one
-`backup-<timestamp>-<n>-<branch>` per mapped branch. Ignored untracked files are
-not committed and can be overwritten if the host branch tracks the same path.
+the container's Git-visible work: it commits anything dirty, then checks whether
+HEAD and every mapped branch are ancestors of their incoming host tips (HEAD is
+compared with the primary branch's tip). When all are ancestors, including equal
+tips, no backup is needed. Otherwise it creates `backup-<timestamp>` at the
+container's HEAD and one `backup-<timestamp>-<n>-<branch>` per mapped branch.
+Ignored untracked files are not committed and can be overwritten if the host branch tracks the same path.
 The container's checked-out state is then replaced.
 
-It then force-pushes your mapped branches into the container, resets the
-container's branches to them, and moves each integration point to the pushed
-commit. So `md diff` reports nothing immediately after a push.
+The mapped tips, cached remote refs, selected tags and local upstream tips
+transfer in one push before the backup check. Local upstream tips go into
+staging refs so a checked-out upstream cannot move HEAD before the check.
+After backup handling, md resets the mapped branches, applies the staged local
+upstream updates, and moves each integration point to the pushed commit. So `md diff` reports nothing immediately after a push.
 
 It refuses to run when you have uncommitted changes on a mapped branch on the
 host, since those would not reach the container.

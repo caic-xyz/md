@@ -1219,6 +1219,9 @@ func (a *app) cmdPush(ctx context.Context, args []string) error {
 	}
 	var mu sync.Mutex
 	printBackup := func(i int, backup string) {
+		if backup == "" {
+			return
+		}
 		repoName := filepath.Base(ct.Repos[i].ContainerPath)
 		mu.Lock()
 		fmt.Printf("- %s: previous state saved as git branch: %s\n", repoName, backup)
@@ -1239,9 +1242,7 @@ func (a *app) cmdPush(ctx context.Context, args []string) error {
 			if err != nil {
 				return err
 			}
-			if backup != "" {
-				printBackup(i, backup)
-			}
+			printBackup(i, backup)
 			return nil
 		})
 	}

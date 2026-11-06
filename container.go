@@ -139,6 +139,9 @@ fi`
 	containerSyncRefPrefix     = "refs/md/sync/"
 	containerIncomingRefPrefix = "refs/md/incoming/"
 
+	// Local upstream tips wait here until backup checks and checkout finish.
+	containerIncomingUpstreamRefPrefix = "refs/md/incoming-upstreams/"
+
 	// containerSubmoduleHeadRef retains the transferred host module HEAD for
 	// later offline checkouts, even after the container switches branches.
 	// Setup updates it; it intentionally survives submodule checkout.
@@ -1773,7 +1776,8 @@ func (c *Container) Purge(ctx context.Context, stdout, stderr io.Writer) error {
 }
 
 // Push force-pushes local state for Repos[repoIdx] into the container,
-// saving a backup of the container state and returning the backup branch name.
+// saving a backup when container commits would be lost. It returns the backup
+// branch name, or an empty string when every update preserves container history.
 // All branches in Branches are synced.
 func (c *Container) Push(ctx context.Context, stdout, stderr io.Writer, repoIdx int) (string, error) {
 	if len(c.Repos) == 0 {
@@ -1795,21 +1799,6 @@ func (c *Container) Push(ctx context.Context, stdout, stderr io.Writer, repoIdx 
 	if err != nil {
 		return "", err
 	}
-	backupBranch := "backup-" + time.Now().Format("20060102-150405")
-	// Do the dirty check, optional commit, and backup branch creation in one
-	// remote shell so every step observes the same index and HEAD.
-	backupCommands := make([]string, 0, 7+2*len(r.Branches))
-	backupCommands = append(backupCommands, "cd "+mp)
-	backupCommands = append(backupCommands, gitIdentityCommands("--local", identity)...)
-	backupCommands = append(backupCommands,
-		"git add .",
-		"diff_status=0",
-		"{ git diff --quiet HEAD -- . || diff_status=$?; if [ \"$diff_status\" -gt 1 ]; then exit \"$diff_status\"; fi; if [ \"$diff_status\" -ne 0 ]; then git commit -q -m 'Backup before push'; fi; }",
-	)
-	backupCommands = append(backupCommands, backupContainerBranchesCommands(r.Branches, backupBranch)...)
-	if err := c.runCmdOut(ctx, "", c.SSHCommand(nil, strings.Join(backupCommands, " && ")), stdout, stderr); err != nil {
-		return "", fmt.Errorf("backing up container state: %w", err)
-	}
 	// Refuse if there are pending local changes on any mapped branch.
 	currentBranch, err := g.RunGit(ctx, "branch", "--show-current")
 	if err != nil {
@@ -1824,13 +1813,30 @@ func (c *Container) Push(ctx context.Context, stdout, stderr io.Writer, repoIdx 
 			return "", fmt.Errorf("there are pending changes on branch %s locally. Please commit or stash them before pushing", currentBranch)
 		}
 	}
-	bases, err := c.pushMappedBranchRefs(ctx, stdout, stderr, r)
+	transfer, err := c.pushMappedBranchRefs(ctx, stdout, stderr, r)
 	if err != nil {
 		return "", err
 	}
+	backupBranch := "backup-" + time.Now().Format("20060102-150405")
+	// The incoming refs now hold the host commits without moving container
+	// branches. Commit pending work before checking which histories a reset loses.
+	backupCommands := make([]string, 0, 7+2*len(r.Branches))
+	backupCommands = append(backupCommands, "cd "+mp)
+	backupCommands = append(backupCommands, gitIdentityCommands("--local", identity)...)
+	backupCommands = append(backupCommands,
+		"git add .",
+		"diff_status=0",
+		"{ git diff --quiet HEAD -- . || diff_status=$?; if [ \"$diff_status\" -gt 1 ]; then exit \"$diff_status\"; fi; if [ \"$diff_status\" -ne 0 ]; then git commit -q -m 'Backup before push' >&2; fi; }",
+	)
+	backupCommands = append(backupCommands, backupContainerBranchesCommands(transfer.bases, backupBranch)...)
+	var backupOut bytes.Buffer
+	if err := c.runCmdOut(ctx, "", c.SSHCommand(nil, strings.Join(backupCommands, " && ")), &backupOut, stderr); err != nil {
+		return "", fmt.Errorf("backing up container state: %w", err)
+	}
+	backupBranch = strings.TrimSpace(backupOut.String())
 	// Configure remotes before moving the branches; the branch resets depend on the
 	// refs and upstreams set by the preceding push.
-	if err := c.configureContainerRemotes(ctx, stdout, stderr, repoIdx, true, containerBranchSetupCommands(bases)...); err != nil {
+	if err := c.configureContainerRemotes(ctx, stdout, stderr, repoIdx, true, transfer.setupCommands()...); err != nil {
 		return "", err
 	}
 	if err := c.recordHostBranchSyncPoints(ctx, r); err != nil {
@@ -3154,32 +3160,36 @@ func refspecDestination(refspec string) string {
 	return destination
 }
 
-// pushMappedBranchRefs pushes all mapped host branches and the refs that seed
-// them inside the container into the container remote.
-//
-// It returns one base per mapped branch for configuring the container working
-// tree.
-func (c *Container) pushMappedBranchRefs(ctx context.Context, stdout, stderr io.Writer, r *Repo) ([]containerBranchBase, error) {
-	bases := make([]containerBranchBase, len(r.Branches))
+// pushMappedBranchRefs transfers mapped tips, cached remote refs, tags, and
+// local upstreams together. Local upstreams are staged so the transfer cannot
+// move container HEAD before callers preserve its history.
+func (c *Container) pushMappedBranchRefs(ctx context.Context, stdout, stderr io.Writer, r *Repo) (*containerBranchTransfer, error) {
+	transfer := &containerBranchTransfer{bases: make([]containerBranchBase, len(r.Branches))}
 	refspecs := make([]string, 0, len(r.Branches))
 	for i, b := range r.Branches {
 		base, err := r.resolveContainerBranchBase(ctx, c.Logger, b)
 		if err != nil {
 			return nil, fmt.Errorf("resolve branch base for %s: %w", b, err)
 		}
-		bases[i] = base
+		transfer.bases[i] = base
 		refspecs = appendUniqueRefspecs(refspecs, base.source+":"+base.destination)
 	}
 	syncRefspecs, err := r.containerSyncRefspecs(ctx, c.Logger)
 	if err != nil {
 		return nil, err
 	}
-	refspecs = appendUniqueRefspecs(refspecs, syncRefspecs...)
-
+	for _, refspec := range syncRefspecs {
+		source, destination, _ := strings.Cut(refspec, ":")
+		if branch, ok := strings.CutPrefix(destination, "refs/heads/"); ok {
+			transfer.upstreams = append(transfer.upstreams, branch)
+			refspec = source + ":" + containerIncomingUpstreamRefPrefix + branch
+		}
+		refspecs = appendUniqueRefspecs(refspecs, refspec)
+	}
 	if err := c.pushRefspecs(ctx, r.GitRoot, "", c.Name, refspecs, true, stdout, stderr); err != nil {
 		return nil, fmt.Errorf("push mapped branches: %w", err)
 	}
-	return bases, nil
+	return transfer, nil
 }
 
 // containerBranchSetupCommands returns shell commands that create/reset mapped
@@ -3247,102 +3257,6 @@ func (c *Container) recordFetchedBranchSyncPoints(ctx context.Context, r *Repo, 
 		return fmt.Errorf("recording integration points for %s: %w", r.ContainerPath, err)
 	}
 	return nil
-}
-
-// forkSyncPointCommands records the fork's committed branch tips as fresh
-// integration points. Fork fetched those tips to the host before running these
-// commands, so inherited committed work is already present on both sides while
-// inherited working-tree changes remain visible to md diff.
-// planFork guarantees oldPrimary is absent from branches, so the final
-// deletion cannot remove an integration point recorded above.
-func forkSyncPointCommands(oldPrimary string, branches []string) []string {
-	commands := make([]string, 0, len(branches)+1)
-	for _, branch := range branches {
-		commands = append(commands, "git update-ref "+shellQuote(containerSyncRefPrefix+branch)+" "+shellQuote("refs/heads/"+branch))
-	}
-	commands = append(commands, "git update-ref -d "+shellQuote(containerSyncRefPrefix+oldPrimary))
-	return commands
-}
-
-func branchUpstreamCommands(branch, remote, upstreamBranch string) []string {
-	prefix := "branch." + branch
-	return []string{
-		"git config --replace-all " + shellQuote(prefix+".remote") + " " + shellQuote(remote),
-		"git config --replace-all " + shellQuote(prefix+".merge") + " " + shellQuote("refs/heads/"+upstreamBranch),
-	}
-}
-
-func branchTrackingCommands(branch string, spec branchUpstreamSpec) []string {
-	commands := branchUpstreamCommands(branch, spec.remote, spec.branch)
-	commands = append(commands, "(git config --unset-all "+shellQuote("branch."+branch+".pushRemote")+" >/dev/null 2>&1 || true)")
-	if spec.pushRemote != "" {
-		commands = append(commands, "git config --replace-all "+shellQuote("branch."+branch+".pushRemote")+" "+shellQuote(spec.pushRemote))
-	}
-	return commands
-}
-
-// backupContainerBranchesCommands returns shell commands that preserve the
-// current container HEAD and every mapped container branch before a destructive
-// push resets them from the host.
-func backupContainerBranchesCommands(branches []string, backupBranch string) []string {
-	commands := make([]string, 0, 1+2*len(branches))
-	commands = append(commands, "git branch -q -f "+shellQuote(backupBranch)+" HEAD")
-	for i, b := range branches {
-		branch := shellQuote("refs/heads/" + b)
-		backup := shellQuote(backupBranch + "-" + strconv.Itoa(i) + "-" + sanitizeDockerName(b))
-		commands = append(commands,
-			"git rev-parse --verify -q "+branch+" >/dev/null",
-			"git branch -q -f "+backup+" "+branch,
-		)
-	}
-	return commands
-}
-
-type containerBranchBase struct {
-	branch         string
-	source         string
-	ref            string
-	upstreamRemote string
-	upstreamBranch string
-	destination    string
-	pushRemote     string
-}
-
-type containerRemoteConfig struct {
-	name       string
-	url        string
-	pushURL    string
-	configured bool
-}
-
-type gitIdentity struct {
-	name  string
-	email string
-}
-
-func defaultBranchPushSource(ctx context.Context, r *Repo) (src string, ok bool, err error) {
-	g := &git.Checkout{Root: r.GitRoot}
-	remoteRef := remoteTrackingRef(r.DefaultRemote, r.DefaultBranch)
-	ok, err = g.RefExists(ctx, remoteRef)
-	if err != nil {
-		return "", false, err
-	}
-	if ok {
-		return remoteRef, true, nil
-	}
-	localRef := "refs/heads/" + r.DefaultBranch
-	ok, err = g.RefExists(ctx, localRef)
-	if err != nil {
-		return "", false, err
-	}
-	if ok {
-		return localRef, true, nil
-	}
-	return "", false, nil
-}
-
-func remoteTrackingRef(remote, branch string) string {
-	return "refs/remotes/" + remote + "/" + branch
 }
 
 func (c *Container) prepareTailscaleAuthKey(ctx context.Context, stdout io.Writer, opts *StartOpts) {
@@ -4291,7 +4205,7 @@ func (c *Container) provisionContainer(ctx context.Context, stdout, stderr io.Wr
 			if err := r.ResolveDefaults(egCtx, c.Logger); err != nil {
 				return fmt.Errorf("resolve defaults for %s: %w", r.ContainerPath, err)
 			}
-			bases, err := c.pushMappedBranchRefs(egCtx, stdout, stderr, r)
+			transfer, err := c.pushMappedBranchRefs(egCtx, stdout, stderr, r)
 			if err != nil {
 				return fmt.Errorf("push repo %s: %w", r.ContainerPath, err)
 			}
@@ -4300,7 +4214,7 @@ func (c *Container) provisionContainer(ctx context.Context, stdout, stderr io.Wr
 			if !opts.Quiet && httpsURL != "" {
 				_, _ = fmt.Fprintf(stdout, "- Set %s %s to %s\n", r.ContainerPath, r.DefaultRemote, httpsURL)
 			}
-			if err := c.configureContainerRemotes(egCtx, stdout, stderr, repoIdx, true, containerBranchSetupCommands(bases)...); err != nil {
+			if err := c.configureContainerRemotes(egCtx, stdout, stderr, repoIdx, true, transfer.setupCommands()...); err != nil {
 				return err
 			}
 			if err := c.recordHostBranchSyncPoints(egCtx, r); err != nil {
@@ -4759,6 +4673,134 @@ func (c *Container) sendEnv(ctx context.Context, stdout io.Writer, opts *StartOp
 		return fmt.Errorf("copying .env: %w\n%s", err, out)
 	}
 	return nil
+}
+
+// forkSyncPointCommands records the fork's committed branch tips as fresh
+// integration points. Fork fetched those tips to the host before running these
+// commands, so inherited committed work is already present on both sides while
+// inherited working-tree changes remain visible to md diff.
+// planFork guarantees oldPrimary is absent from branches, so the final
+// deletion cannot remove an integration point recorded above.
+func forkSyncPointCommands(oldPrimary string, branches []string) []string {
+	commands := make([]string, 0, len(branches)+1)
+	for _, branch := range branches {
+		commands = append(commands, "git update-ref "+shellQuote(containerSyncRefPrefix+branch)+" "+shellQuote("refs/heads/"+branch))
+	}
+	commands = append(commands, "git update-ref -d "+shellQuote(containerSyncRefPrefix+oldPrimary))
+	return commands
+}
+
+func branchUpstreamCommands(branch, remote, upstreamBranch string) []string {
+	prefix := "branch." + branch
+	return []string{
+		"git config --replace-all " + shellQuote(prefix+".remote") + " " + shellQuote(remote),
+		"git config --replace-all " + shellQuote(prefix+".merge") + " " + shellQuote("refs/heads/"+upstreamBranch),
+	}
+}
+
+func branchTrackingCommands(branch string, spec branchUpstreamSpec) []string {
+	commands := branchUpstreamCommands(branch, spec.remote, spec.branch)
+	commands = append(commands, "(git config --unset-all "+shellQuote("branch."+branch+".pushRemote")+" >/dev/null 2>&1 || true)")
+	if spec.pushRemote != "" {
+		commands = append(commands, "git config --replace-all "+shellQuote("branch."+branch+".pushRemote")+" "+shellQuote(spec.pushRemote))
+	}
+	return commands
+}
+
+// backupContainerBranchesCommands preserves HEAD and all mapped branches only
+// when resetting them would discard history. Ancestry errors abort the push.
+// The commands print the backup name when one is created.
+func backupContainerBranchesCommands(bases []containerBranchBase, backupBranch string) []string {
+	commands := []string{"needs_backup=0"}
+	for i, base := range bases {
+		refs := []string{"refs/heads/" + base.branch}
+		if i == 0 {
+			refs = append(refs, "HEAD")
+		}
+		for _, ref := range refs {
+			commands = append(commands,
+				"{ ancestry_status=0; git merge-base --is-ancestor "+shellQuote(ref)+" "+shellQuote(base.destination)+
+					" || ancestry_status=$?; if [ \"$ancestry_status\" -gt 1 ]; then exit \"$ancestry_status\"; fi; "+
+					"if [ \"$ancestry_status\" -ne 0 ]; then needs_backup=1; fi; }",
+			)
+		}
+	}
+	backups := make([]string, 0, 2+len(bases))
+	backups = append(backups, "git branch -q -f "+shellQuote(backupBranch)+" HEAD")
+	for i, base := range bases {
+		backup := backupBranch + "-" + strconv.Itoa(i) + "-" + sanitizeDockerName(base.branch)
+		backups = append(backups, "git branch -q -f "+shellQuote(backup)+" "+shellQuote("refs/heads/"+base.branch))
+	}
+	backups = append(backups, "printf '%s\n' "+shellQuote(backupBranch))
+	commands = append(commands, "if [ \"$needs_backup\" -ne 0 ]; then "+strings.Join(backups, " && ")+"; fi")
+	return commands
+}
+
+type containerBranchTransfer struct {
+	bases     []containerBranchBase
+	upstreams []string
+}
+
+// setupCommands applies staged tips after backup handling. Switch to the
+// primary before updating upstream branches, so the old checkout stays intact
+// until git switch has replaced it.
+func (t *containerBranchTransfer) setupCommands() []string {
+	commands := containerBranchSetupCommands(t.bases)
+	for _, branch := range t.upstreams {
+		ref := shellQuote(containerIncomingUpstreamRefPrefix + branch)
+		commands = append(commands,
+			"git update-ref "+shellQuote("refs/heads/"+branch)+" "+ref,
+			"git update-ref -d "+ref,
+		)
+	}
+	return commands
+}
+
+type containerBranchBase struct {
+	branch         string
+	source         string
+	ref            string
+	upstreamRemote string
+	upstreamBranch string
+	destination    string
+	pushRemote     string
+}
+
+type containerRemoteConfig struct {
+	name       string
+	url        string
+	pushURL    string
+	configured bool
+}
+
+type gitIdentity struct {
+	name  string
+	email string
+}
+
+func defaultBranchPushSource(ctx context.Context, r *Repo) (src string, ok bool, err error) {
+	g := &git.Checkout{Root: r.GitRoot}
+	remoteRef := remoteTrackingRef(r.DefaultRemote, r.DefaultBranch)
+	ok, err = g.RefExists(ctx, remoteRef)
+	if err != nil {
+		return "", false, err
+	}
+	if ok {
+		return remoteRef, true, nil
+	}
+	localRef := "refs/heads/" + r.DefaultBranch
+	ok, err = g.RefExists(ctx, localRef)
+	if err != nil {
+		return "", false, err
+	}
+	if ok {
+		return localRef, true, nil
+	}
+	return "", false, nil
+}
+
+func remoteTrackingRef(remote, branch string) string {
+	return "refs/remotes/" + remote + "/" + branch
 }
 
 // forkAttempt records external state created by one Fork call. On failure it
