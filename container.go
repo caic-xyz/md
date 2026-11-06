@@ -1051,8 +1051,11 @@ type StartOpts struct {
 	// Passed as --cpus to docker/podman. Zero means no limit.
 	// Use [DefaultMaxCPUs] to calculate a default from the runtime CPU count.
 	MaxCPUs int
+	// MaxMemory limits container memory in bytes. Zero means no limit.
+	MaxMemory uint64
 	// ExtraRunArgs are additional arguments passed verbatim to the
 	// container runtime's "run" command. Not portable across runtimes.
+	// Arguments that override MaxMemory are rejected when it is set.
 	ExtraRunArgs []string
 
 	// resetTailscale removes any Tailscale state inherited from a source image
@@ -1129,13 +1132,17 @@ type ForkOpts struct {
 	// Passed as --cpus to docker/podman. Zero means no limit.
 	// Use [DefaultMaxCPUs] to calculate a default from the runtime CPU count.
 	MaxCPUs int
+	// MaxMemory overrides the source container memory limit in bytes.
+	// Nil inherits the source limit; a pointer to zero means no limit.
+	MaxMemory *uint64
 	// ExtraRunArgs are additional arguments passed verbatim to the
 	// container runtime's "run" command. Not portable across runtimes.
+	// Arguments that override the effective memory limit are rejected when nonzero.
 	ExtraRunArgs []string
 }
 
 // startOptions converts fork options into startup options for the forked container.
-func (opts *ForkOpts) startOptions() *StartOpts {
+func (opts *ForkOpts) startOptions(sourceMemory uint64) *StartOpts {
 	startOpts := &StartOpts{
 		Quiet:        opts.Quiet,
 		Labels:       opts.Labels,
@@ -1146,7 +1153,11 @@ func (opts *ForkOpts) startOptions() *StartOpts {
 		USB:          opts.USB,
 		Sudo:         opts.Sudo,
 		MaxCPUs:      opts.MaxCPUs,
+		MaxMemory:    sourceMemory,
 		ExtraRunArgs: append(opts.runtimeEnvOverrides(), opts.ExtraRunArgs...),
+	}
+	if opts.MaxMemory != nil {
+		startOpts.MaxMemory = *opts.MaxMemory
 	}
 	startOpts.resetTailscale = startOpts.Tailscale
 	return startOpts
@@ -2409,13 +2420,13 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 	if !opts.Quiet {
 		_, _ = fmt.Fprintf(stdout, "- Snapshotting container %s → %s ...\n", c.Name, snapshotImage)
 	}
-	// Inspect the source container to discover all label keys.
-	labelCSV, err := c.Runtime.Run(ctx, "", "inspect", "--format", `{{range $k, $v := .Config.Labels}}{{$k}} {{end}}`, c.Name)
+	// Inspect the source for snapshot labels and the memory limit to inherit.
+	sourceInfo, err := c.Runtime.InspectInfo(ctx, c.Name)
 	if err != nil {
-		return nil, fmt.Errorf("inspecting labels: %w", err)
+		return nil, fmt.Errorf("inspecting source container: %w", err)
 	}
 	commitArgs := []string{"commit"}
-	for _, change := range forkSnapshotConfigChanges(labelCSV) {
+	for _, change := range forkSnapshotConfigChanges(strings.Join(slices.Sorted(maps.Keys(sourceInfo.Labels)), " ")) {
 		commitArgs = append(commitArgs, "--change", change)
 	}
 	commitArgs = append(commitArgs, c.Name, snapshotImage)
@@ -2430,7 +2441,7 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 	if !opts.Quiet {
 		_, _ = fmt.Fprintf(stdout, "- Starting forked container %s ...\n", fork.Name)
 	}
-	startOpts := opts.startOptions()
+	startOpts := opts.startOptions(sourceInfo.MemoryLimit)
 	fork.Display = startOpts.Display
 	fork.Tailscale = startOpts.Tailscale
 	fork.USB = startOpts.USB
@@ -3817,6 +3828,20 @@ func (c *Container) createContainer(ctx context.Context, stdout, stderr io.Write
 	if err != nil {
 		return err
 	}
+	if opts.MaxMemory > 0 {
+		for _, arg := range opts.ExtraRunArgs {
+			name, _, _ := strings.Cut(arg, "=")
+			if name == "--" || name == "--memory" || name == "--cgroup-conf" || name == "--cgroups" || strings.HasPrefix(name, "-m") {
+				return fmt.Errorf("extra runtime flag %q conflicts with the enforced container memory limit", name)
+			}
+		}
+		if !info.MemoryLimit {
+			return errors.New("runtime cannot enforce container memory limits; enable the memory cgroup controller")
+		}
+		if opts.MaxMemory < 6*1024*1024 {
+			return fmt.Errorf("memory limit must be at least 6 MiB: %d bytes", opts.MaxMemory)
+		}
+	}
 	user := resolveUserIdentity(c.Runtime.Name(), runtime.GOOS, info, os.Getuid(), os.Getgid())
 	if opts.Sudo && user.keepID {
 		return errors.New("sudo is not supported with rootless podman; use docker instead")
@@ -3991,6 +4016,11 @@ func (c *Container) createContainer(ctx context.Context, stdout, stderr io.Write
 		runArgs = append(runArgs, "--label", l)
 	}
 	runArgs = append(runArgs, opts.ExtraRunArgs...)
+	// Keep the cap last: runtimes accept clustered shorthand such as -im0,
+	// which cannot be identified by checking an argument's first flag alone.
+	if opts.MaxMemory > 0 {
+		runArgs = append(runArgs, "--memory", strconv.FormatUint(opts.MaxMemory, 10))
+	}
 	runArgs = append(runArgs, imageName)
 
 	if opts.Quiet {

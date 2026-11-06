@@ -2,7 +2,7 @@
 // source code is governed by the Apache v2 license that can be found in the
 // LICENSE file.
 
-// Package main implements the md CLI for isolated Docker development containers.
+// Package main implements the md CLI for isolated development containers and resource limits.
 package main
 
 import (
@@ -593,6 +593,8 @@ func (a *app) cmdStart(ctx context.Context, args []string) error {
 	noCaches := fs.Bool("no-caches", false, "Disable all default caches")
 	github := fs.Bool("github", false, "Inject GitHub token into container")
 	cpus := fs.Int("cpus", md.DefaultMaxCPUs, "Max CPU cores for the container (-1=runtime CPUs minus 2, 0=no limit)")
+	var memory memoryLimit
+	fs.Var(&memory, "memory", "Memory limit: bytes, size (4GiB), or integer runtime RAM percentage (0-100%); 0=no limit")
 	dockerFlags := &shellSplitSlice{}
 	fs.Var(dockerFlags, "docker-flag", "Extra flag passed verbatim to docker/podman run; may be repeated")
 	fs.Usage = func() { printSubcommandUsage(fs) }
@@ -681,6 +683,10 @@ func (a *app) cmdStart(ctx context.Context, args []string) error {
 		return fmt.Errorf("container %s is already running. SSH in with: ssh %s", ct.Name, ct.Name)
 	default:
 		// Container does not exist, proceed with normal launch.
+		opts.MaxMemory, err = memory.resolve(ctx, ct.Runtime)
+		if err != nil {
+			return err
+		}
 		if err := ensureStartBranches(ctx, ct.Logger, ct.Repos); err != nil {
 			return err
 		}
@@ -771,6 +777,8 @@ func (a *app) cmdRun(ctx context.Context, args []string) error {
 	fs.Var(envSpecs, "env", "Set environment in container: NAME copies host, NAME=value sets, NAME= unsets; may be repeated")
 	applyPatch := fs.Bool("apply-patch", false, "Pull changes from the temporary container back to the host after the command")
 	cpus := fs.Int("cpus", md.DefaultMaxCPUs, "Max CPU cores for the container (-1=runtime CPUs minus 2, 0=no limit)")
+	var memory memoryLimit
+	fs.Var(&memory, "memory", "Memory limit: bytes, size (4GiB), or integer runtime RAM percentage (0-100%); 0=no limit")
 	dockerFlags := &shellSplitSlice{}
 	fs.Var(dockerFlags, "docker-flag", "Extra flag passed verbatim to docker/podman run; may be repeated")
 	fs.Usage = func() { printSubcommandUsage(fs) }
@@ -783,6 +791,10 @@ func (a *app) cmdRun(ctx context.Context, args []string) error {
 		return errors.New("no command specified")
 	}
 	ct, err := a.newContainer(ctx, cf, extraRepos.values, nil)
+	if err != nil {
+		return err
+	}
+	maxMemory, err := memory.resolve(ctx, ct.Runtime)
 	if err != nil {
 		return err
 	}
@@ -827,6 +839,7 @@ func (a *app) cmdRun(ctx context.Context, args []string) error {
 		Quiet:                 true,
 		ExtraEnv:              extraEnv,
 		MaxCPUs:               *cpus,
+		MaxMemory:             maxMemory,
 		ExtraRunArgs:          dockerFlags.withDefaultOOMScoreAdj(),
 	}
 	exitCode, err := runTemporaryContainer(ctx, ct, os.Stdout, os.Stderr, extra, &opts, *applyPatch)
@@ -1458,6 +1471,8 @@ func (a *app) cmdFork(ctx context.Context, args []string) error {
 	noSSH := fs.Bool("no-ssh", false, "Don't SSH into the forked container after starting")
 	github := fs.Bool("github", false, "Inject GitHub token into container")
 	cpus := fs.Int("cpus", md.DefaultMaxCPUs, "Max CPU cores for the container (-1=runtime CPUs minus 2, 0=no limit)")
+	var memory memoryLimit
+	fs.Var(&memory, "memory", "Memory limit: bytes, size (4GiB), or integer runtime RAM percentage (0-100%); default: inherit source limit; 0=no limit")
 	dockerFlags := &shellSplitSlice{}
 	fs.Var(dockerFlags, "docker-flag", "Extra flag passed verbatim to docker/podman run; may be repeated")
 	extraRepos := &stringSlice{}
@@ -1494,6 +1509,14 @@ func (a *app) cmdFork(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
+	}
+	var maxMemory *uint64
+	if memory.raw != "" {
+		limit, err := memory.resolve(ctx, sourceCt.Runtime)
+		if err != nil {
+			return err
+		}
+		maxMemory = &limit
 	}
 	githubToken, err := resolveGithubToken(ctx, sourceCt.Client, *github)
 	if err != nil {
@@ -1549,6 +1572,7 @@ func (a *app) cmdFork(ctx context.Context, args []string) error {
 		ExtraEnv:     extraEnv,
 		Mounts:       mounts,
 		MaxCPUs:      *cpus,
+		MaxMemory:    maxMemory,
 		ExtraRunArgs: dockerFlags.withDefaultOOMScoreAdj(),
 	}
 	fork, err := sourceCt.Fork(ctx, os.Stdout, os.Stderr, &opts)

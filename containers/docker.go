@@ -29,7 +29,7 @@ type docker struct {
 	base
 }
 
-// Info queries the Docker server's CPU capacity and isolation environment.
+// Info queries the Docker server's resource capacity and isolation environment.
 func (d *docker) Info(ctx context.Context) (Info, error) {
 	out, err := d.Run(ctx, "", "info", "--format", "{{json .}}")
 	if err != nil {
@@ -43,7 +43,7 @@ func (d *docker) Info(ctx context.Context) (Info, error) {
 		return Info{}, fmt.Errorf("invalid runtime CPU count: %d", raw.NCPU)
 	}
 	return Info{
-		CPUs: raw.NCPU, DockerDesktop: raw.OperatingSystem == "Docker Desktop",
+		CPUs: raw.NCPU, MemTotal: raw.MemTotal, MemoryLimit: raw.MemoryLimit, DockerDesktop: raw.OperatingSystem == "Docker Desktop",
 		Rootless: slices.Contains(raw.SecurityOptions, "name=rootless"),
 	}, nil
 }
@@ -62,6 +62,8 @@ func (d *docker) UntagImage(ctx context.Context, image string) error {
 
 type dockerInfoJSON struct {
 	NCPU            int      `json:"NCPU"`
+	MemTotal        uint64   `json:"MemTotal"`
+	MemoryLimit     bool     `json:"MemoryLimit"`
 	OperatingSystem string   `json:"OperatingSystem"`
 	SecurityOptions []string `json:"SecurityOptions"`
 }

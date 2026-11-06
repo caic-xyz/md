@@ -291,11 +291,13 @@ func TestInfo(t *testing.T) {
 		want                  Info
 		err                   string
 	}{
-		{name: "docker_native", runtime: "docker", output: `{"NCPU":14,"OperatingSystem":"Debian GNU/Linux"}`, want: Info{CPUs: 14}},
+		{name: "docker_native", runtime: "docker", output: `{"NCPU":14,"MemTotal":17179869184,"MemoryLimit":true,"OperatingSystem":"Debian GNU/Linux"}`, want: Info{CPUs: 14, MemTotal: 17179869184, MemoryLimit: true}},
 		{name: "docker_desktop", runtime: "docker", output: `{"NCPU":14,"OperatingSystem":"Docker Desktop","SecurityOptions":["name=seccomp,profile=builtin"]}`, want: Info{CPUs: 14, DockerDesktop: true}},
 		{name: "docker_rootless", runtime: "docker", output: `{"NCPU":1,"SecurityOptions":["name=rootless","name=seccomp"]}`, want: Info{CPUs: 1, Rootless: true}},
 		{name: "podman_rootless", runtime: "podman", output: `{"host":{"cpus":8,"security":{"rootless":true}}}`, want: Info{CPUs: 8, Rootless: true}},
-		{name: "podman_rootful", runtime: "podman", output: `{"host":{"cpus":4,"security":{"rootless":false}}}`, want: Info{CPUs: 4}},
+		{name: "podman_rootful", runtime: "podman", output: `{"host":{"cpus":4,"memTotal":8589934592,"cgroupControllers":["memory","pids"],"cgroupVersion":"v2","security":{"rootless":false}}}`, want: Info{CPUs: 4, MemTotal: 8589934592, MemoryLimit: true}},
+		{name: "podman_rootless_v1", runtime: "podman", output: `{"host":{"cpus":4,"cgroupControllers":["memory"],"cgroupVersion":"v1","security":{"rootless":true}}}`, want: Info{CPUs: 4, Rootless: true}},
+		{name: "podman_rootless_v2", runtime: "podman", output: `{"host":{"cpus":4,"cgroupControllers":["memory"],"cgroupVersion":"v2","security":{"rootless":true}}}`, want: Info{CPUs: 4, Rootless: true, MemoryLimit: true}},
 		{name: "missing_cpus", runtime: "docker", output: `{}`, err: "invalid runtime CPU count"},
 		{name: "negative_cpus", runtime: "podman", output: `{"host":{"cpus":-1}}`, err: "invalid runtime CPU count"},
 		{name: "invalid_json", runtime: "docker", output: `invalid`, err: "parsing runtime server info"},

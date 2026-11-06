@@ -1089,15 +1089,19 @@ func (r *launchPruneRuntime) Run(ctx context.Context, dir string, args ...string
 	if args[0] == "images" {
 		close(r.pruning)
 	}
-	if args[0] == "inspect" && len(args) == 4 && r.source != nil && args[3] == r.source.Name {
-		return "", nil
-	}
 	if args[0] == "commit" {
 		r.imageName = args[len(args)-1]
 		r.missing = false
 		return r.imageID, nil
 	}
 	return r.imageDecisionRuntime.Run(ctx, dir, args...)
+}
+
+func (r *launchPruneRuntime) InspectInfo(ctx context.Context, name string) (*containers.InspectInfo, error) {
+	if r.source != nil && name == r.source.Name {
+		return &containers.InspectInfo{}, nil
+	}
+	return r.imageDecisionRuntime.InspectInfo(ctx, name)
 }
 
 func (r *launchPruneRuntime) InspectContainer(ctx context.Context, name string) (*containers.Container, error) {
@@ -1268,7 +1272,7 @@ func (r *imageDecisionRuntime) List(context.Context) ([]containers.Container, er
 }
 
 func (r *imageDecisionRuntime) Info(context.Context) (containers.Info, error) {
-	return containers.Info{CPUs: 14}, r.infoErr
+	return containers.Info{CPUs: 14, MemTotal: 16 << 30, MemoryLimit: true}, r.infoErr
 }
 
 func (r *imageDecisionRuntime) InspectContainer(context.Context, string) (*containers.Container, error) {
@@ -1568,7 +1572,7 @@ func runFakeRuntime(args []string, logPath string, localBase bool, containerStat
 	if len(args) > 0 && args[0] == "info" {
 		out := os.Getenv(fakeRuntimeInfoEnv)
 		if out == "" {
-			out = `{"NCPU":14}`
+			out = `{"NCPU":14,"MemTotal":17179869184,"MemoryLimit":true}`
 		}
 		_, _ = fmt.Fprintln(os.Stdout, out)
 		return 0

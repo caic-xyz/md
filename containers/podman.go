@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strconv"
 )
 
@@ -28,7 +29,7 @@ type podman struct {
 	base
 }
 
-// Info queries the Podman server's CPU capacity and isolation environment.
+// Info queries the Podman server's resource capacity and isolation environment.
 func (p *podman) Info(ctx context.Context) (Info, error) {
 	out, err := p.Run(ctx, "", "info", "--format", "{{json .}}")
 	if err != nil {
@@ -41,7 +42,10 @@ func (p *podman) Info(ctx context.Context) (Info, error) {
 	if raw.Host.CPUs < 1 {
 		return Info{}, fmt.Errorf("invalid runtime CPU count: %d", raw.Host.CPUs)
 	}
-	return Info{CPUs: raw.Host.CPUs, Rootless: raw.Host.Security.Rootless}, nil
+	return Info{
+		CPUs: raw.Host.CPUs, MemTotal: raw.Host.MemTotal, Rootless: raw.Host.Security.Rootless,
+		MemoryLimit: slices.Contains(raw.Host.CgroupControllers, "memory") && (!raw.Host.Security.Rootless || raw.Host.CgroupVersion == "v2"),
+	}, nil
 }
 
 // RemoveContainer immediately kills and removes a container and its anonymous volumes.
@@ -61,8 +65,11 @@ type podmanInfoJSON struct {
 }
 
 type podmanHostInfoJSON struct {
-	CPUs     int                    `json:"cpus"`
-	Security podmanSecurityInfoJSON `json:"security"`
+	CPUs              int                    `json:"cpus"`
+	CgroupControllers []string               `json:"cgroupControllers"`
+	CgroupVersion     string                 `json:"cgroupVersion"`
+	MemTotal          uint64                 `json:"memTotal"`
+	Security          podmanSecurityInfoJSON `json:"security"`
 }
 
 type podmanSecurityInfoJSON struct {

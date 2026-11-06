@@ -339,7 +339,7 @@ type Runtime interface {
 	Run(ctx context.Context, dir string, args ...string) (string, error)
 	// RunOut executes a runtime command with stdout and stderr connected to writers.
 	RunOut(ctx context.Context, dir string, stdout, stderr io.Writer, args ...string) error
-	// Info queries the runtime server CPU capacity and isolation environment.
+	// Info queries the runtime server resource capacity and isolation environment.
 	Info(ctx context.Context) (Info, error)
 
 	// RemoveContainer immediately kills and removes a container and its anonymous volumes.
@@ -379,6 +379,8 @@ type Runtime interface {
 // Info describes the runtime server independently of the client machine.
 type Info struct {
 	CPUs          int
+	MemTotal      uint64 // Physical RAM in bytes on the runtime server.
+	MemoryLimit   bool   // The runtime can enforce a container memory limit.
 	DockerDesktop bool
 	Rootless      bool
 }

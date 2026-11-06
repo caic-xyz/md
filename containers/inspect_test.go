@@ -27,7 +27,7 @@ func TestParseInspectInfo(t *testing.T) {
 				"Os":"linux",
 				"Config":{"Image":"ghcr.io/caic/base:latest","Labels":{"md.cache_spec":"` + cacheLabel + `"}},
 				"State":{"Status":"running"},
-				"HostConfig":{"NanoCpus":2500000000,"CpuQuota":0,"CpuPeriod":0,"CpusetCpus":"0-3"},
+				"HostConfig":{"Memory":4294967296,"NanoCpus":2500000000,"CpuQuota":0,"CpuPeriod":0,"CpusetCpus":"0-3"},
 				"Mounts":[{"Source":"/host/rw","Destination":"/mnt/rw","RW":true},{"Source":"/host/ro","Destination":"/mnt/ro","RW":false}]
 			}
 		]`
@@ -46,6 +46,9 @@ func TestParseInspectInfo(t *testing.T) {
 		}
 		if !slices.Equal(got.CPUSet, []int{0, 1, 2, 3}) {
 			t.Fatalf("CPU constraints = %+v", got)
+		}
+		if got.MemoryLimit != 4<<30 {
+			t.Fatalf("MemoryLimit = %d, want 4 GiB", got.MemoryLimit)
 		}
 		if got.CPULimit != 2.5 {
 			t.Errorf("CPULimit = %g, want 2.5", got.CPULimit)
@@ -67,7 +70,7 @@ func TestParseInspectInfo(t *testing.T) {
 				"Platform":"linux/arm64",
 				"Config":{"Image":"base:v2","Labels":{}},
 				"State":{"Status":"exited"},
-				"HostConfig":{"NanoCpus":0,"CpuQuota":150000,"CpuPeriod":100000},
+				"HostConfig":{"Memory":8589934592,"NanoCpus":0,"CpuQuota":150000,"CpuPeriod":100000},
 				"Mounts":[{"Source":"/src","Destination":"/workspace"}]
 			}
 		]`
@@ -80,6 +83,9 @@ func TestParseInspectInfo(t *testing.T) {
 		}
 		if got.OS != "linux" || got.Architecture != "arm64" {
 			t.Errorf("OS/Architecture = %q/%q, want linux/arm64", got.OS, got.Architecture)
+		}
+		if got.MemoryLimit != 8<<30 {
+			t.Fatalf("MemoryLimit = %d, want 8 GiB", got.MemoryLimit)
 		}
 		if got.CPULimit != 1.5 {
 			t.Errorf("CPULimit = %g, want 1.5", got.CPULimit)

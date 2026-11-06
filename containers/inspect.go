@@ -46,6 +46,7 @@ type InspectInfo struct {
 	Architecture string
 	CPULimit     float64 // Explicit quota in CPU units; zero means unrestricted.
 	CPUSet       []int   // Sorted configured logical CPU IDs; empty means inherited.
+	MemoryLimit  uint64  // Memory limit in bytes; zero means unrestricted.
 	Mounts       []Mount
 	Labels       map[string]string
 }
@@ -129,6 +130,7 @@ func parseInspectInfo(runtimeName, requestedName string, data []byte) (*InspectI
 		Architecture: architecture,
 		CPULimit:     inspectCPULimit(raw.HostConfig),
 		CPUSet:       cpus,
+		MemoryLimit:  raw.HostConfig.Memory,
 		Mounts:       mounts,
 		Labels:       maps.Clone(raw.Config.Labels),
 	}, nil
@@ -288,6 +290,7 @@ type inspectConfigJSON struct {
 }
 
 type inspectHostJSON struct {
+	Memory     uint64 `json:"Memory"`
 	CpusetCpus string `json:"CpusetCpus"`
 	NanoCpus   int64  `json:"NanoCpus"`
 	CPUQuota   int64  `json:"CpuQuota"`

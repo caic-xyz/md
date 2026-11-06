@@ -36,15 +36,17 @@ import (
 type cpuLimitRuntime struct {
 	containers.Runtime
 
-	cpus   int
-	cpuErr error
-	args   []string
+	cpus              int
+	memTotal          uint64
+	memoryUnsupported bool
+	cpuErr            error
+	args              []string
 }
 
 func (r *cpuLimitRuntime) Name() string { return "docker" }
 
 func (r *cpuLimitRuntime) Info(context.Context) (containers.Info, error) {
-	return containers.Info{CPUs: r.cpus}, r.cpuErr
+	return containers.Info{CPUs: r.cpus, MemTotal: r.memTotal, MemoryLimit: !r.memoryUnsupported}, r.cpuErr
 }
 
 func (r *cpuLimitRuntime) RunOut(_ context.Context, _ string, _, _ io.Writer, args ...string) error {
@@ -69,7 +71,7 @@ func TestLaunchContainerCPULimit(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			r := &cpuLimitRuntime{cpus: tc.cpus}
+			r := &cpuLimitRuntime{cpus: tc.cpus, memTotal: 16 << 30}
 			c := &Container{Client: &Client{Runtime: r}, Name: "md-test"}
 			if err := c.createContainer(t.Context(), io.Discard, io.Discard, &StartOpts{MaxCPUs: tc.requested}, "test-image"); err == nil {
 				t.Fatal("expected recording runtime to stop launch")
@@ -83,6 +85,73 @@ func TestLaunchContainerCPULimit(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestLaunchContainerMemoryLimit(t *testing.T) {
+	t.Parallel()
+	t.Run("unlimited", func(t *testing.T) {
+		t.Parallel()
+		for _, extra := range [][]string{nil, {"--memory=4g"}, {"--cgroups=disabled"}} {
+			r := &cpuLimitRuntime{cpus: 8, memoryUnsupported: true}
+			c := &Container{Client: &Client{Runtime: r}, Name: "md-test"}
+			err := c.createContainer(t.Context(), io.Discard, io.Discard, &StartOpts{ExtraRunArgs: extra}, "test-image")
+			if err == nil || len(r.args) == 0 || slices.Contains(r.args, "--memory") {
+				t.Fatalf("unlimited launch with unknown memory: err = %v, args = %v", err, r.args)
+			}
+			for _, arg := range extra {
+				if !slices.Contains(r.args, arg) {
+					t.Fatalf("extra arg %q lost: %v", arg, r.args)
+				}
+			}
+		}
+	})
+	t.Run("valid", func(t *testing.T) {
+		t.Parallel()
+		r := &cpuLimitRuntime{cpus: 8}
+		c := &Container{Client: &Client{Runtime: r}, Name: "md-test"}
+		err := c.createContainer(t.Context(), io.Discard, io.Discard, &StartOpts{MaxMemory: 12 << 30}, "test-image")
+		if err == nil {
+			t.Fatal("expected recording runtime to stop launch")
+		}
+		i := slices.Index(r.args, "--memory")
+		if i < 0 || i+1 >= len(r.args) || r.args[i+1] != "12884901888" {
+			t.Fatalf("launch args = %v; want 12 GiB memory limit", r.args)
+		}
+	})
+	t.Run("clustered_shorthand", func(t *testing.T) {
+		t.Parallel()
+		r := &cpuLimitRuntime{cpus: 8, memTotal: 16 << 30}
+		c := &Container{Client: &Client{Runtime: r}, Name: "md-test"}
+		err := c.createContainer(t.Context(), io.Discard, io.Discard, &StartOpts{MaxMemory: 12 << 30, ExtraRunArgs: []string{"-im0"}}, "test-image")
+		if err == nil || !slices.Contains(r.args, "-im0") || len(r.args) < 3 || !slices.Equal(r.args[len(r.args)-3:], []string{"--memory", "12884901888", "test-image"}) {
+			t.Fatalf("clustered shorthand: err = %v, launch args = %v", err, r.args)
+		}
+	})
+	t.Run("error", func(t *testing.T) {
+		t.Parallel()
+		for _, extra := range [][]string{{"--memory", "0"}, {"--memory=64g"}, {"-m0"}, {"-m", "0"}, {"--cgroups=disabled"}, {"--cgroups", "disabled"}, {"--cgroup-conf=memory.max=max"}, {"--cgroup-conf", "memory.max=max"}, {"--"}} {
+			r := &cpuLimitRuntime{cpus: 8, memTotal: 16 << 30}
+			c := &Container{Client: &Client{Runtime: r}, Name: "md-test"}
+			err := c.createContainer(t.Context(), io.Discard, io.Discard, &StartOpts{MaxMemory: 12 << 30, ExtraRunArgs: extra}, "test-image")
+			if err == nil || !strings.Contains(err.Error(), "conflicts") || len(r.args) != 0 {
+				t.Fatalf("extra args %v: err = %v, launch args = %v", extra, err, r.args)
+			}
+		}
+		r := &cpuLimitRuntime{cpus: 8, memTotal: 16 << 30, memoryUnsupported: true}
+		c := &Container{Client: &Client{Runtime: r}, Name: "md-test"}
+		err := c.createContainer(t.Context(), io.Discard, io.Discard, &StartOpts{MaxMemory: 12 << 30}, "test-image")
+		if err == nil || !strings.Contains(err.Error(), "cannot enforce") || len(r.args) != 0 {
+			t.Fatalf("unsupported cgroups: err = %v, launch args = %v", err, r.args)
+		}
+		for _, limit := range []uint64{1, 1024, 6*1024*1024 - 1} {
+			r := &cpuLimitRuntime{cpus: 8}
+			c := &Container{Client: &Client{Runtime: r}, Name: "md-test"}
+			err := c.createContainer(t.Context(), io.Discard, io.Discard, &StartOpts{MaxMemory: limit}, "test-image")
+			if err == nil || !strings.Contains(err.Error(), "at least 6 MiB") || len(r.args) != 0 {
+				t.Fatalf("limit %d: err = %v, launch args = %v", limit, err, r.args)
+			}
+		}
+	})
 }
 
 func runTestGit(t *testing.T, ctx context.Context, wd string, args ...string) string {
@@ -4188,9 +4257,28 @@ func TestFork(t *testing.T) {
 		}
 	})
 
+	t.Run("memory_inheritance", func(t *testing.T) {
+		t.Parallel()
+		for _, source := range []uint64{0, 4 << 30} {
+			opts := &ForkOpts{}
+			if got := opts.startOptions(source).MaxMemory; got != source {
+				t.Fatalf("inherited memory = %d, want %d", got, source)
+			}
+			for _, limit := range []uint64{0, 8 << 30} {
+				opts.MaxMemory = &limit
+				if got := opts.startOptions(source).MaxMemory; got != limit {
+					t.Fatalf("overridden memory = %d, want %d", got, limit)
+				}
+			}
+		}
+	})
+
 	t.Run("valid_options_do_not_inherit_privileges", func(t *testing.T) {
 		t.Parallel()
-		got := (&ForkOpts{}).startOptions()
+		got := (&ForkOpts{}).startOptions(0)
+		if got.MaxMemory != 0 {
+			t.Fatalf("default fork memory cap = %d", got.MaxMemory)
+		}
 		if got.Display || got.Tailscale || got.USB || got.Sudo {
 			t.Fatalf("fork options inherited disabled features: display=%v tailscale=%v usb=%v sudo=%v", got.Display, got.Tailscale, got.USB, got.Sudo)
 		}
@@ -4200,7 +4288,11 @@ func TestFork(t *testing.T) {
 			}
 		}
 
-		got = (&ForkOpts{Display: true, Tailscale: true, USB: true, Sudo: true}).startOptions()
+		limit := uint64(12 << 30)
+		got = (&ForkOpts{Display: true, Tailscale: true, USB: true, Sudo: true, MaxMemory: &limit}).startOptions(4 << 30)
+		if got.MaxMemory != 12<<30 {
+			t.Fatalf("fork memory cap = %d, want 12 GiB", got.MaxMemory)
+		}
 		if !got.Display || !got.Tailscale || !got.USB || !got.Sudo {
 			t.Fatalf("fork options did not enable requested features: display=%v tailscale=%v usb=%v sudo=%v", got.Display, got.Tailscale, got.USB, got.Sudo)
 		}
