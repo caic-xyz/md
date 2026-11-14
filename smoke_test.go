@@ -354,7 +354,7 @@ func newSmokeContainer(t *testing.T, ctx context.Context, c *Client, name string
 // contract identity when md passes no MD_HOST_UID/MD_HOST_GID, which is what md
 // does when it runs as root, and rootless Podman maps the host user onto that
 // same identity.
-func smokeContainerUser(t *testing.T, c *Client) (int, int) {
+func smokeContainerUser(t *testing.T, c *Client) (uid, gid int) {
 	user, err := c.userIdentity(t.Context())
 	if err != nil {
 		t.Fatal(err)
@@ -367,7 +367,7 @@ func smokeContainerUser(t *testing.T, c *Client) (int, int) {
 // nonzero with the capability and the requesting option on stderr, and md would
 // otherwise wait out its two-minute SSH timeout for a container that is already
 // gone.
-func waitForSmokeContainerExit(t *testing.T, ctx context.Context, c *Client, name string) (int, string) {
+func waitForSmokeContainerExit(t *testing.T, ctx context.Context, c *Client, name string) (code int, logs string) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Minute)
 	for {
@@ -387,17 +387,17 @@ func waitForSmokeContainerExit(t *testing.T, ctx context.Context, c *Client, nam
 	if err != nil {
 		t.Fatalf("inspect exit code of %s: %v", name, err)
 	}
-	code, err := strconv.Atoi(strings.TrimSpace(out))
+	code, err = strconv.Atoi(strings.TrimSpace(out))
 	if err != nil {
 		t.Fatalf("parsing exit code %q of %s: %v", out, name, err)
 	}
 	// Both streams are needed: start.sh logs to stdout and writes capability
 	// errors to stderr.
-	var logs strings.Builder
-	if err := c.Runtime.RunOut(ctx, "", &logs, &logs, "logs", name); err != nil {
+	var b strings.Builder
+	if err := c.Runtime.RunOut(ctx, "", &b, &b, "logs", name); err != nil {
 		t.Fatalf("logs of %s: %v", name, err)
 	}
-	return code, logs.String()
+	return code, b.String()
 }
 
 func launchSmokeRepoContainer(t *testing.T, ctx context.Context, c *Client, baseImage string, caches []CacheMount, repo *Repo) *Container {
@@ -434,8 +434,8 @@ func launchSmokeRepoContainer(t *testing.T, ctx context.Context, c *Client, base
 	return ct
 }
 
-func createSmokeGitRepo(t *testing.T, defaultBranch, workBranch string, unpushedWorkCommit bool) string {
-	return createSmokeGitRepoWithRemote(t, "origin", defaultBranch, workBranch, unpushedWorkCommit)
+func createSmokeGitRepo(t *testing.T) string {
+	return createSmokeGitRepoWithRemote(t, "origin", "main", "main", false)
 }
 
 func createSmokeGitRepoWithRemote(t *testing.T, remoteName, defaultBranch, workBranch string, unpushedWorkCommit bool) string {
@@ -668,12 +668,12 @@ func TestSmoke(t *testing.T) {
 					})
 
 					t.Run("list", func(t *testing.T) {
-						containers, err := client.List(t.Context())
+						list, err := client.List(t.Context())
 						if err != nil {
 							t.Fatalf("List: %v", err)
 						}
 						var found *Container
-						for _, c := range containers {
+						for _, c := range list {
 							if c.Name == ct.Name {
 								found = c
 								break
@@ -923,7 +923,7 @@ func TestSmoke(t *testing.T) {
 			})
 
 			t.Run("repo_workflow", func(t *testing.T) {
-				repo := createSmokeGitRepo(t, "main", "main", false)
+				repo := createSmokeGitRepo(t)
 				cp := "/home/user/src/smoke-" + rt + "-repo"
 				ct := launchSmokeRepoContainer(t, t.Context(), client, baseImage, sharedCaches, &Repo{
 					GitRoot:       repo,
@@ -1028,7 +1028,7 @@ func TestSmoke(t *testing.T) {
 					}
 					// Add a brand-new repo (not in the source container) at an explicit
 					// container path to exercise ForkRepo.ContainerPath.
-					extraRepo := createSmokeGitRepo(t, "main", "main", false)
+					extraRepo := createSmokeGitRepo(t)
 					extraMountedPath := "/home/user/src/smoke-" + rt + "-fork-extra"
 					fork, err := ct.Fork(t.Context(), &forkStdout, &forkStderr, &ForkOpts{
 						Repos: []ForkRepo{
@@ -1074,7 +1074,7 @@ func TestSmoke(t *testing.T) {
 					if err != nil {
 						t.Fatalf("inspect fork symlinks: %v", err)
 					}
-					if want := "user:user\nuser:user\nuser:user\nuser:user\nroot:root\ntarget\nmissing\n/tmp/fork-root-owned"; links != want {
+					if want := strings.Repeat("user:user\n", 4) + "root:root\ntarget\nmissing\n/tmp/fork-root-owned"; links != want {
 						t.Fatalf("fork symlink ownership and targets = %q, want %q", links, want)
 					}
 
@@ -1123,7 +1123,7 @@ func TestSmoke(t *testing.T) {
 			})
 
 			t.Run("run_apply_patch", func(t *testing.T) {
-				repo := createSmokeGitRepo(t, "main", "main", false)
+				repo := createSmokeGitRepo(t)
 				runSmokeMD(t, binary, client,
 					"run",
 					"-image", baseImage,
@@ -1147,7 +1147,7 @@ func TestSmoke(t *testing.T) {
 			})
 
 			t.Run("diff_rebase_in_progress", func(t *testing.T) {
-				repo := createSmokeGitRepo(t, "main", "main", false)
+				repo := createSmokeGitRepo(t)
 				cp := "/home/user/src/smoke-" + rt + "-rebase"
 				ct := launchSmokeRepoContainer(t, t.Context(), client, baseImage, sharedCaches, &Repo{
 					GitRoot:       repo,
@@ -1383,7 +1383,7 @@ func TestSmoke(t *testing.T) {
 					// md pushes a repository over SSH into a tree it initializes as
 					// `user`, so this covers a home the specialized build created for an account
 					// the base image never had.
-					repo := createSmokeGitRepo(t, "main", "main", false)
+					repo := createSmokeGitRepo(t)
 					cp := "/home/user/src/smoke-" + rt + "-debian-slim-repo"
 					ct := launchSmokeRepoContainer(t, t.Context(), client, reduced, nil, &Repo{
 						GitRoot:       repo,
