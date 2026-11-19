@@ -138,18 +138,24 @@ type ObjectStats struct {
 	PackBytes  int64
 }
 
-// Checkout provides git operations scoped to the repository at Root, logging via
-// Logger.
+// Checkout scopes Git operations to a worktree or explicit repository metadata,
+// logging via Logger.
 type Checkout struct {
-	Root   string
+	// Root scopes worktree files. With GitDir set it may name a removed
+	// worktree; leave it empty for operations on repository objects only.
+	Root string
+	// GitDir explicitly selects an absolute repository metadata directory.
+	// It overrides core.worktree without changing the repository's config.
+	// Filesystem-based checkout operations still require a usable Root.
+	GitDir string
 	Logger Logger
 
 	_ struct{}
 }
 
-// RunGit executes a git command in Root and returns captured stdout.
+// RunGit executes a scoped Git command and returns captured stdout.
 func (c *Checkout) RunGit(ctx context.Context, args ...string) (string, error) {
-	cmd := c.cmd(ctx, args)
+	cmd := c.Command(ctx, args...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
@@ -174,7 +180,7 @@ func (c *Checkout) CurrentBranch(ctx context.Context) (string, error) {
 // RefExists reports whether the fully-qualified ref (e.g. "refs/heads/foo")
 // exists in Root.
 func (c *Checkout) RefExists(ctx context.Context, ref string) (bool, error) {
-	cmd := c.cmd(ctx, []string{"show-ref", "--verify", "--quiet", ref})
+	cmd := c.Command(ctx, "show-ref", "--verify", "--quiet", ref)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -245,7 +251,7 @@ func (c *Checkout) MergeBase(ctx context.Context, baseRef string) string {
 // Fetch fetches the latest refs from origin.
 func (c *Checkout) Fetch(ctx context.Context) error {
 	c.Logger.Log(ctx, slog.LevelInfo, "git", "msg", "git fetch", "dir", c.Root)
-	cmd := c.cmd(ctx, []string{"fetch", "origin"})
+	cmd := c.Command(ctx, "fetch", "origin")
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -262,7 +268,7 @@ func (c *Checkout) CreateBranch(ctx context.Context, name, startPoint string, tr
 	if track {
 		trackArg = "--track"
 	}
-	cmd := c.cmd(ctx, []string{"branch", trackArg, name, startPoint})
+	cmd := c.Command(ctx, "branch", trackArg, name, startPoint)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -271,10 +277,15 @@ func (c *Checkout) CreateBranch(ctx context.Context, name, startPoint string, tr
 	return nil
 }
 
-// CheckoutBranch switches to an existing branch.
+// CheckoutBranch switches to an existing branch in an existing worktree.
 func (c *Checkout) CheckoutBranch(ctx context.Context, name string) error {
+	if c.GitDir != "" {
+		if err := c.validateWorktreeRoot(); err != nil {
+			return err
+		}
+	}
 	c.Logger.Log(ctx, slog.LevelInfo, "git", "msg", "git checkout", "branch", name)
-	cmd := c.cmd(ctx, []string{"checkout", name})
+	cmd := c.Command(ctx, "checkout", name)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -305,7 +316,7 @@ func (c *Checkout) PushRef(ctx context.Context, remote, sourceRef, destinationBr
 		args = append(args, "--force")
 	}
 	args = append(args, "--", remote, sourceRef+":refs/heads/"+destinationBranch)
-	cmd := c.cmd(ctx, args)
+	cmd := c.Command(ctx, args...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -330,7 +341,7 @@ func (c *Checkout) SquashOnto(ctx context.Context, sourceRef, targetBranch, mess
 	// 2. Create the squash commit: sourceRef's tree, parented on origin/<targetBranch>.
 	target := "origin/" + targetBranch
 	commitTreeArgs := []string{"commit-tree", "-p", target, "-m", message, sourceRef + "^{tree}"}
-	cmd := c.cmd(ctx, commitTreeArgs)
+	cmd := c.Command(ctx, commitTreeArgs...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
@@ -352,13 +363,8 @@ func (c *Checkout) RevParse(ctx context.Context, ref string) (string, error) {
 // in refs/heads/ or refs/remotes/origin/. Container remote-tracking refs
 // (refs/remotes/<container>/*) are excluded by construction.
 func (c *Checkout) IsReachable(ctx context.Context, commit string) (bool, error) {
-	cmd := c.cmd(ctx, []string{
-		"for-each-ref",
-		"--contains", commit,
-		"--format=%(refname)",
-		"refs/heads/",
-		"refs/remotes/origin/",
-	})
+	cmd := c.Command(ctx, "for-each-ref", "--contains", commit,
+		"--format=%(refname)", "refs/heads/", "refs/remotes/origin/")
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
@@ -415,15 +421,25 @@ func (c *Checkout) ListBranches(ctx context.Context, remote string) ([][2]string
 }
 
 // ListSubmodules returns the submodules declared in .gitmodules for Root.
-// Returns nil if no .gitmodules file exists or it has no entries.
+// Returns nil if no .gitmodules file exists or it has no entries. An explicit
+// GitDir scope requires an existing Root to inspect checkout files.
 func (c *Checkout) ListSubmodules(ctx context.Context) ([]Submodule, error) {
-	if _, err := os.Stat(filepath.Join(c.Root, ".gitmodules")); err != nil {
+	if c.GitDir != "" {
+		if err := c.validateWorktreeRoot(); err != nil {
+			return nil, err
+		}
+	}
+	file, err := filepath.Abs(filepath.Join(c.Root, ".gitmodules"))
+	if err != nil {
+		return nil, err
+	}
+	if _, err := os.Stat(file); err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
 		return nil, err
 	}
-	out, err := c.RunGit(ctx, "config", "--file", ".gitmodules", "--list")
+	out, err := c.RunGit(ctx, "config", "--file", filepath.ToSlash(file), "--list")
 	if err != nil {
 		return nil, err
 	}
@@ -515,13 +531,47 @@ func (c *Checkout) ObjectStats(ctx context.Context) (ObjectStats, error) {
 	return stats, nil
 }
 
-// cmd creates an exec.Cmd for git with LANG=C set so that output is always in
-// English regardless of the system locale.
-func (c *Checkout) cmd(ctx context.Context, args []string) *exec.Cmd {
+// Command creates a scoped Git command with English output. Callers may
+// configure its I/O before running it, including streaming large output.
+//
+// With GitDir set, the command starts in that directory and explicitly selects
+// its repository metadata and Root worktree, bypassing stale core.worktree
+// configuration. An empty Root uses GitDir as the command's worktree scope for
+// object-only operations. Root and GitDir must be absolute in this mode.
+func (c *Checkout) Command(ctx context.Context, args ...string) *exec.Cmd {
+	dir := c.Root
+	if c.GitDir != "" {
+		dir = c.GitDir
+		worktree := c.Root
+		if worktree == "" {
+			worktree = c.GitDir
+		}
+		args = append([]string{"--git-dir=" + filepath.ToSlash(c.GitDir), "--work-tree=" + filepath.ToSlash(worktree)}, args...)
+	}
 	cmd := exec.CommandContext(ctx, "git", args...) //nolint:gosec // args are from trusted callers
-	cmd.Dir = c.Root
+	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "LANG=C")
 	return cmd
+}
+
+// validateWorktreeRoot validates only operations that need checkout files. Object and
+// ref commands can use an absent worktree or an explicit metadata-only scope.
+func (c *Checkout) validateWorktreeRoot() error {
+	root := c.Root
+	if root == "" {
+		if c.GitDir != "" {
+			return errors.New("a worktree Root is required for this operation")
+		}
+		root = "."
+	}
+	st, err := os.Stat(root)
+	if err != nil {
+		return fmt.Errorf("worktree Root %q: %w", root, err)
+	}
+	if !st.IsDir() {
+		return fmt.Errorf("worktree Root %q is not a directory", root)
+	}
+	return nil
 }
 
 func (c *Checkout) findModuleDirs(ctx context.Context, base, dir string, paths *[]string) error {

@@ -7,6 +7,7 @@
 package git
 
 import (
+	"bytes"
 	"crypto/rand"
 	"errors"
 	"log/slog"
@@ -44,6 +45,14 @@ type testLogWriter struct {
 func (w testLogWriter) Write(p []byte) (int, error) {
 	w.t.Log(strings.TrimSuffix(string(p), "\n"))
 	return len(p), nil
+}
+
+func canonicalTempDir(t *testing.T) string {
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
 }
 
 func TestDiscoverCheckouts(t *testing.T) {
@@ -198,10 +207,113 @@ func TestRemoteToHTTPS(t *testing.T) {
 
 func TestCheckout(t *testing.T) {
 	t.Parallel()
+	t.Run("Command", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		root := canonicalTempDir(t)
+		g := &Checkout{Root: root, Logger: testLogger(t)}
+		run := func(c *Checkout, args ...string) string {
+			out, err := c.RunGit(ctx, args...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return out
+		}
+		run(g, "init", "-q", "--initial-branch=main")
+		run(g, "config", "user.name", "Test")
+		run(g, "config", "user.email", "test@example.invalid")
+		if err := os.WriteFile(filepath.Join(root, "tracked.txt"), []byte("stored content\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		run(g, "add", ".")
+		run(g, "commit", "-qm", "initial")
+		tip := run(g, "rev-parse", "HEAD")
+		if got := run(g, "rev-parse", "--show-toplevel"); got != filepath.ToSlash(root) {
+			t.Fatalf("ordinary checkout root = %q", got)
+		}
+		parent := &Checkout{Root: canonicalTempDir(t), Logger: testLogger(t)}
+		run(parent, "init", "-q", "--initial-branch=main")
+		run(parent, "-c", "protocol.file.allow=always", "submodule", "add", "-q", root, "sub")
+		scopedParent := &Checkout{Root: parent.Root, GitDir: filepath.Join(parent.Root, ".git"), Logger: testLogger(t)}
+		modules, err := scopedParent.ListSubmodules(ctx)
+		if err != nil || len(modules) != 1 || modules[0].Path != "sub" {
+			t.Fatalf("scoped checkout modules = %+v, %v", modules, err)
+		}
+		moduleRoot := filepath.Join(parent.Root, "sub")
+		module := &Checkout{Root: moduleRoot, Logger: testLogger(t)}
+		moduleDir := run(module, "rev-parse", "--absolute-git-dir")
+		module.GitDir = moduleDir
+		if err := module.CreateBranch(ctx, "scoped", "HEAD", false); err != nil {
+			t.Fatal(err)
+		}
+		if err := module.CheckoutBranch(ctx, "scoped"); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := module.CurrentBranch(ctx); err != nil || got != "scoped" {
+			t.Fatalf("scoped checkout branch = %q, %v", got, err)
+		}
+		if err := os.RemoveAll(moduleRoot); err != nil {
+			t.Fatal(err)
+		}
+		bare := filepath.Join(canonicalTempDir(t), "bare.git")
+		run(g, "clone", "-q", "--bare", root, bare)
+		bareCheckout := &Checkout{Root: bare, GitDir: bare, Logger: testLogger(t)}
+		run(bareCheckout, "update-ref", "refs/remotes/origin/main", tip)
+		run(bareCheckout, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+		for _, tc := range []struct{ name, root, gitDir string }{
+			{"removed_module", moduleRoot, moduleDir},
+			{"object_only_module", "", moduleDir},
+			{"bare", "", bare},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				checkout := &Checkout{Root: tc.root, GitDir: tc.gitDir, Logger: testLogger(t)}
+				if _, err := checkout.ListSubmodules(t.Context()); err == nil || !strings.Contains(err.Error(), "worktree") {
+					t.Fatalf("object-only ListSubmodules = %v", err)
+				}
+				if err := checkout.CheckoutBranch(t.Context(), "main"); err == nil || !strings.Contains(err.Error(), "worktree") {
+					t.Fatalf("object-only CheckoutBranch = %v", err)
+				}
+				if got, err := checkout.RevParse(t.Context(), "HEAD"); err != nil || got != tip {
+					t.Fatalf("retained HEAD = %q, %v", got, err)
+				}
+				var content strings.Builder
+				cmd := checkout.Command(t.Context(), "show", "HEAD:tracked.txt")
+				cmd.Stdout = &content
+				if err := cmd.Run(); err != nil || content.String() != "stored content\n" {
+					t.Fatalf("streamed object = %q, %v", content.String(), err)
+				}
+				if got, err := checkout.DefaultRemote(t.Context()); err != nil || got != "origin" {
+					t.Fatalf("default remote = %q, %v", got, err)
+				}
+				if got, err := checkout.DefaultBranch(t.Context(), "origin"); err != nil || got != "main" {
+					t.Fatalf("default branch = %q, %v", got, err)
+				}
+				before, err := os.ReadFile(filepath.Join(tc.gitDir, "config"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				worktree := filepath.Join(canonicalTempDir(t), "review")
+				if _, err := checkout.RunGit(t.Context(), "worktree", "add", "--detach", worktree, tip); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := checkout.RunGit(t.Context(), "worktree", "remove", worktree); err != nil {
+					t.Fatal(err)
+				}
+				after, err := os.ReadFile(filepath.Join(tc.gitDir, "config"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !bytes.Equal(before, after) {
+					t.Fatal("explicit metadata scope changed repository config")
+				}
+			})
+		}
+	})
 	t.Run("ListSubmodules", func(t *testing.T) {
 		t.Parallel()
 		ctx := t.Context()
-		dir := t.TempDir()
+		dir := canonicalTempDir(t)
 
 		run := func(d string, args ...string) {
 			t.Helper()
