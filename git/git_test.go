@@ -205,6 +205,112 @@ func TestRemoteToHTTPS(t *testing.T) {
 	}
 }
 
+func TestObjectStore(t *testing.T) {
+	ctx := t.Context()
+	root := filepath.Join(canonicalTempDir(t), "checkout")
+	if err := os.Mkdir(root, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(canonicalTempDir(t), "retained metadata")
+	c := &Checkout{Root: root}
+	run := func(args ...string) string {
+		out, err := c.RunGit(ctx, args...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	run("init", "-q", "--initial-branch=main", "--separate-git-dir="+filepath.ToSlash(dir))
+	run("config", "user.name", "Test")
+	run("config", "user.email", "test@example.invalid")
+	if err := os.WriteFile(filepath.Join(root, "tracked.txt"), []byte("stored content\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "tracked.txt")
+	run("commit", "-qm", "initial")
+	want := run("rev-parse", "HEAD")
+	run("remote", "add", "upstream", "https://example.invalid/test.git")
+	run("update-ref", "refs/remotes/upstream/trunk", want)
+	run("symbolic-ref", "refs/remotes/upstream/HEAD", "refs/remotes/upstream/trunk")
+	relativeRoot, err := filepath.Rel(dir, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run("config", "core.worktree", filepath.ToSlash(relativeRoot))
+	if err := os.RemoveAll(root); err != nil {
+		t.Fatal(err)
+	}
+	store := &ObjectStore{GitDir: dir}
+	t.Setenv("GIT_WORK_TREE", filepath.ToSlash(dir))
+	t.Run("RevParse", func(t *testing.T) { //nolint:paralleltest // The test sets GIT_WORK_TREE.
+		if got, err := store.RevParse(t.Context(), "HEAD"); err != nil || got != want {
+			t.Fatalf("retained HEAD = %q, %v; want %q", got, err, want)
+		}
+	})
+	t.Run("DefaultRemote", func(t *testing.T) { //nolint:paralleltest // The test sets GIT_WORK_TREE.
+		if got, err := store.DefaultRemote(t.Context()); err != nil || got != "upstream" {
+			t.Fatalf("default remote = %q, %v; want upstream", got, err)
+		}
+	})
+	t.Run("DefaultBranch", func(t *testing.T) { //nolint:paralleltest // The test sets GIT_WORK_TREE.
+		if got, err := store.DefaultBranch(t.Context(), "upstream"); err != nil || got != "trunk" {
+			t.Fatalf("default branch = %q, %v; want trunk", got, err)
+		}
+	})
+	t.Run("Command", func(t *testing.T) { //nolint:paralleltest // The test sets GIT_WORK_TREE.
+		var content strings.Builder
+		cmd := store.Command(t.Context(), "show", "HEAD:tracked.txt")
+		cmd.Stdout = &content
+		if err := cmd.Run(); err != nil || content.String() != "stored content\n" {
+			t.Fatalf("streamed object = %q, %v", content.String(), err)
+		}
+	})
+	t.Run("RunGit", func(t *testing.T) { //nolint:paralleltest // The test sets GIT_WORK_TREE.
+		t.Run("valid", func(t *testing.T) { //nolint:paralleltest // The test sets GIT_WORK_TREE.
+			configPath := filepath.Join(dir, "config")
+			before, err := os.ReadFile(configPath) //nolint:gosec // Test-owned Git configuration.
+			if err != nil {
+				t.Fatal(err)
+			}
+			wt := filepath.Join(canonicalTempDir(t), "linked")
+			if _, err := store.RunGit(t.Context(), "worktree", "add", "--detach", filepath.ToSlash(wt), want); err != nil {
+				t.Fatal(err)
+			}
+			if content, err := os.ReadFile(filepath.Join(wt, "tracked.txt")); err != nil || string(content) != "stored content\n" { //nolint:gosec // Test-owned temp worktree.
+				t.Fatalf("linked worktree = %q, %v", content, err)
+			}
+			checkout := &Checkout{Root: wt, Logger: testLogger(t)}
+			adminDir, err := checkout.RunGit(t.Context(), "rev-parse", "--absolute-git-dir")
+			if err != nil {
+				t.Fatal(err)
+			}
+			linkedStore := &ObjectStore{GitDir: adminDir}
+			if got, err := linkedStore.RevParse(t.Context(), "refs/remotes/upstream/trunk"); err != nil || got != want {
+				t.Fatalf("linked store shared ref = %q, %v; want %q", got, err, want)
+			}
+			if _, err := store.RunGit(t.Context(), "worktree", "remove", filepath.ToSlash(wt)); err != nil {
+				t.Fatal(err)
+			}
+			after, err := os.ReadFile(configPath) //nolint:gosec // Test-owned Git configuration.
+			if err != nil || !bytes.Equal(after, before) {
+				t.Fatalf("metadata scope changed the repository config: %v", err)
+			}
+		})
+		t.Run("error", func(t *testing.T) { //nolint:paralleltest // The test sets GIT_WORK_TREE.
+			if _, err := store.RunGit(t.Context(), "checkout", "--", "tracked.txt"); err == nil || !strings.Contains(err.Error(), "must be run in a work tree") {
+				t.Fatalf("checkout in object store = %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(dir, "tracked.txt")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("checked out object in metadata: %v", err)
+			}
+			rel := &ObjectStore{GitDir: "relative.git"}
+			if _, err := rel.RunGit(t.Context(), "status"); err == nil || !strings.Contains(err.Error(), "must be absolute") {
+				t.Fatalf("relative Git directory = %v", err)
+			}
+		})
+	})
+}
+
 func TestCheckout(t *testing.T) {
 	t.Parallel()
 	t.Run("Command", func(t *testing.T) {

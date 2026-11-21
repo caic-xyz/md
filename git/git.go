@@ -142,11 +142,13 @@ type ObjectStats struct {
 // logging via Logger.
 type Checkout struct {
 	// Root scopes worktree files. With GitDir set it may name a removed
-	// worktree; leave it empty for operations on repository objects only.
+	// worktree. Use [ObjectStore] when working with repository objects alone.
 	Root string
 	// GitDir explicitly selects an absolute repository metadata directory.
 	// It overrides core.worktree without changing the repository's config.
 	// Filesystem-based checkout operations still require a usable Root.
+	//
+	// Deprecated: use [ObjectStore].
 	GitDir string
 	Logger Logger
 
@@ -155,14 +157,7 @@ type Checkout struct {
 
 // RunGit executes a scoped Git command and returns captured stdout.
 func (c *Checkout) RunGit(ctx context.Context, args ...string) (string, error) {
-	cmd := c.Command(ctx, args...)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
-	if err != nil {
-		return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, stderr.String())
-	}
-	return strings.TrimSpace(string(out)), nil
+	return runGit(c.Command(ctx, args...), args)
 }
 
 // CurrentBranch returns the current branch name for Root.
@@ -194,49 +189,19 @@ func (c *Checkout) RefExists(ctx context.Context, ref string) (bool, error) {
 
 // Remotes returns the configured remote names sorted alphabetically.
 func (c *Checkout) Remotes(ctx context.Context) ([]string, error) {
-	out, err := c.RunGit(ctx, "remote")
-	if err != nil {
-		return nil, err
-	}
-	if out == "" {
-		return nil, errors.New("no git remotes configured")
-	}
-	return strings.Split(out, "\n"), nil
+	return remotes(ctx, c.RunGit)
 }
 
 // DefaultRemote returns the default remote for Root.
 // If there is exactly one remote, it is returned. Otherwise "origin" is used.
 func (c *Checkout) DefaultRemote(ctx context.Context) (string, error) {
-	remotes, err := c.Remotes(ctx)
-	if err != nil {
-		return "", err
-	}
-	if len(remotes) == 1 {
-		return remotes[0], nil
-	}
-	if slices.Contains(remotes, "origin") {
-		return "origin", nil
-	}
-	return "", fmt.Errorf("multiple remotes and no %q", "origin")
+	return defaultRemote(ctx, c.RunGit)
 }
 
 // DefaultBranch returns the default branch name (e.g. "main" or "master")
 // for the given remote in Root.
 func (c *Checkout) DefaultBranch(ctx context.Context, remote string) (string, error) {
-	prefix := "refs/remotes/" + remote + "/"
-	// Try symbolic-ref first (works when <remote>/HEAD is set).
-	if out, err := c.RunGit(ctx, "symbolic-ref", prefix+"HEAD"); err == nil {
-		if _, name, ok := strings.Cut(out, prefix); ok && name != "" {
-			return name, nil
-		}
-	}
-	// Fall back to checking common names.
-	for _, name := range []string{"main", "master"} {
-		if _, err := c.RunGit(ctx, "rev-parse", "--verify", prefix+name); err == nil {
-			return name, nil
-		}
-	}
-	return "", errors.New("could not determine default branch")
+	return defaultBranch(ctx, c.RunGit, remote)
 }
 
 // MergeBase returns the merge-base between HEAD and baseRef, falling back to
@@ -356,7 +321,7 @@ func (c *Checkout) SquashOnto(ctx context.Context, sourceRef, targetBranch, mess
 
 // RevParse resolves a git ref to its full SHA-1 hash.
 func (c *Checkout) RevParse(ctx context.Context, ref string) (string, error) {
-	return c.RunGit(ctx, "rev-parse", "--verify", ref)
+	return revParse(ctx, c.RunGit, ref)
 }
 
 // IsReachable reports whether commit is an ancestor of (or equal to) any ref
@@ -537,7 +502,8 @@ func (c *Checkout) ObjectStats(ctx context.Context) (ObjectStats, error) {
 // With GitDir set, the command starts in that directory and explicitly selects
 // its repository metadata and Root worktree, bypassing stale core.worktree
 // configuration. An empty Root uses GitDir as the command's worktree scope for
-// object-only operations. Root and GitDir must be absolute in this mode.
+// object-only operations during migration to [ObjectStore]. Root and GitDir
+// must be absolute in this mode.
 func (c *Checkout) Command(ctx context.Context, args ...string) *exec.Cmd {
 	dir := c.Root
 	if c.GitDir != "" {
@@ -548,14 +514,11 @@ func (c *Checkout) Command(ctx context.Context, args ...string) *exec.Cmd {
 		}
 		args = append([]string{"--git-dir=" + filepath.ToSlash(c.GitDir), "--work-tree=" + filepath.ToSlash(worktree)}, args...)
 	}
-	cmd := exec.CommandContext(ctx, "git", args...) //nolint:gosec // args are from trusted callers
-	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "LANG=C")
-	return cmd
+	return gitCommand(ctx, dir, args...)
 }
 
 // validateWorktreeRoot validates only operations that need checkout files. Object and
-// ref commands can use an absent worktree or an explicit metadata-only scope.
+// ref commands can also use [ObjectStore].
 func (c *Checkout) validateWorktreeRoot() error {
 	root := c.Root
 	if root == "" {
@@ -616,4 +579,134 @@ func (c *Checkout) findModuleDirs(ctx context.Context, base, dir string, paths *
 		}
 	}
 	return nil
+}
+
+// ObjectStore scopes Git commands to an existing repository's metadata, refs,
+// and objects. It works with bare repositories and retained Git directories
+// whose checkout is missing or has moved.
+type ObjectStore struct {
+	// GitDir is the absolute path to the repository's Git directory.
+	GitDir string
+	// Env supplies the process environment. If nil, commands inherit it.
+	Env []string
+}
+
+// Command creates a Git command with English output that starts in GitDir.
+// It runs Git in bare mode without changing the repository configuration.
+// Commands such as status and checkout require a worktree and fail in this
+// mode. Commands can still act on an explicit destination, for example with
+// worktree add. Callers may configure the command's I/O before running it.
+func (s *ObjectStore) Command(ctx context.Context, args ...string) *exec.Cmd {
+	cmd := gitCommand(ctx, s.GitDir, append([]string{"--git-dir=" + filepath.ToSlash(s.GitDir), "-c", "core.bare=true"}, args...)...)
+	if !filepath.IsAbs(s.GitDir) {
+		cmd.Err = fmt.Errorf("GitDir %q must be absolute", s.GitDir)
+		return cmd
+	}
+	// An explicit GIT_COMMON_DIR makes Git ignore core.worktree, even
+	// when the configured path is relative and its directory is gone.
+	commonDir := s.GitDir
+	commonFile := filepath.Join(s.GitDir, "commondir")
+	if data, err := os.ReadFile(commonFile); err == nil { //nolint:gosec // GitDir selects the caller's repository.
+		commonDir = strings.TrimRight(string(data), "\r\n")
+		if !filepath.IsAbs(commonDir) {
+			commonDir = filepath.Join(s.GitDir, commonDir)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		cmd.Err = fmt.Errorf("read Git common directory: %w", err)
+		return cmd
+	}
+	if s.Env != nil {
+		cmd.Env = slices.Clone(s.Env)
+	}
+	cmd.Env = slices.DeleteFunc(cmd.Env, func(env string) bool {
+		key, _, _ := strings.Cut(env, "=")
+		return strings.EqualFold(key, "GIT_WORK_TREE")
+	})
+	cmd.Env = append(cmd.Env, "LANG=C", "GIT_COMMON_DIR="+filepath.ToSlash(commonDir), "GIT_IMPLICIT_WORK_TREE=0")
+	return cmd
+}
+
+// RunGit executes a Git command in the object store and returns captured stdout.
+func (s *ObjectStore) RunGit(ctx context.Context, args ...string) (string, error) {
+	return runGit(s.Command(ctx, args...), args)
+}
+
+// RevParse resolves a Git revision to its full object ID.
+func (s *ObjectStore) RevParse(ctx context.Context, ref string) (string, error) {
+	return revParse(ctx, s.RunGit, ref)
+}
+
+// DefaultRemote returns the only configured remote or selects origin if several
+// remotes are configured. It returns an error if neither rule applies.
+func (s *ObjectStore) DefaultRemote(ctx context.Context) (string, error) {
+	return defaultRemote(ctx, s.RunGit)
+}
+
+// DefaultBranch resolves the default branch from the remote-tracking HEAD, or
+// falls back to the first existing remote-tracking branch among main and master.
+func (s *ObjectStore) DefaultBranch(ctx context.Context, remote string) (string, error) {
+	return defaultBranch(ctx, s.RunGit, remote)
+}
+
+func gitCommand(ctx context.Context, dir string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "git", args...) //nolint:gosec // args are from trusted callers
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "LANG=C")
+	return cmd
+}
+
+func runGit(cmd *exec.Cmd, args []string) (string, error) {
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, stderr.String())
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+type gitRunner func(context.Context, ...string) (string, error)
+
+func remotes(ctx context.Context, run gitRunner) ([]string, error) {
+	out, err := run(ctx, "remote")
+	if err != nil {
+		return nil, err
+	}
+	if out == "" {
+		return nil, errors.New("no git remotes configured")
+	}
+	return strings.Split(out, "\n"), nil
+}
+
+func defaultRemote(ctx context.Context, run gitRunner) (string, error) {
+	names, err := remotes(ctx, run)
+	if err != nil {
+		return "", err
+	}
+	if len(names) == 1 {
+		return names[0], nil
+	}
+	if slices.Contains(names, "origin") {
+		return "origin", nil
+	}
+	return "", fmt.Errorf("multiple remotes and no %q", "origin")
+}
+
+func defaultBranch(ctx context.Context, run gitRunner, remote string) (string, error) {
+	prefix := "refs/remotes/" + remote + "/"
+	if out, err := run(ctx, "symbolic-ref", prefix+"HEAD"); err == nil {
+		if _, name, ok := strings.Cut(out, prefix); ok && name != "" {
+			return name, nil
+		}
+	}
+	for _, name := range []string{"main", "master"} {
+		if _, err := revParse(ctx, run, prefix+name); err == nil {
+			return name, nil
+		}
+	}
+	return "", errors.New("could not determine default branch")
+}
+
+func revParse(ctx context.Context, run gitRunner, ref string) (string, error) {
+	return run(ctx, "rev-parse", "--verify", ref)
 }
