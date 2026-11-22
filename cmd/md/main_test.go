@@ -9,6 +9,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -106,6 +108,10 @@ func runFakeDiffSSH(ctx context.Context, args []string) int {
 }
 
 func runFakeDiffRuntime(args []string) int {
+	if len(args) > 0 && args[0] == "ps" && os.Getenv("MD_TEST_CONTAINER_LIST") != "" {
+		_, _ = fmt.Fprintln(os.Stdout, os.Getenv("MD_TEST_CONTAINER_LIST"))
+		return 0
+	}
 	if len(args) == 2 && args[0] == "inspect" && args[1] == "md-test" {
 		_, _ = fmt.Fprintln(os.Stdout, `[{"Name":"/md-test","Id":"ctr","Image":"sha256:image","Platform":"linux","Config":{"Image":"base:latest","Labels":{}},"State":{"Status":"running"}}]`)
 		return 0
@@ -754,6 +760,65 @@ func setupCmdDiffContainer(t *testing.T, repoCount int) (ct *md.Container, logPa
 		})
 	}
 	return ct, logPath
+}
+
+func TestFindContainerAndRepoSubmodule(t *testing.T) {
+	ct, _ := setupCmdDiffContainer(t, 1)
+	host, dst := ct.Repos[0].GitRoot, ct.Repos[0].ContainerPath
+	source := t.TempDir()
+	runMainTestGit(t, source, "init", "-q", "--initial-branch=module")
+	runMainTestGit(t, source, "config", "user.name", "Test")
+	runMainTestGit(t, source, "config", "user.email", "test@test")
+	runMainTestGit(t, source, "commit", "-qm", "module", "--allow-empty")
+	for _, root := range []string{host, dst} {
+		runMainTestGit(t, root, "-c", "protocol.file.allow=always", "submodule", "add", "-q", source, "dep")
+	}
+	hm, cm := filepath.Join(host, "dep"), filepath.Join(dst, "dep")
+	runMainTestGit(t, cm, "update-ref", "refs/md/submodule-head", "HEAD")
+	runMainTestGit(t, cm, "update-ref", "refs/md/sync/HEAD", "HEAD")
+	runMainTestGit(t, cm, "update-ref", "refs/md/sync/module", "module")
+	data, err := json.Marshal(ct.Repos)
+	if err != nil {
+		t.Fatal(err)
+	}
+	list, err := json.Marshal(map[string]string{"Names": "md-test", "State": "running", "Labels": "md.repos=" + base64.StdEncoding.EncodeToString(data)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MD_TEST_CONTAINER_LIST", string(list))
+	a := &app{client: ct.Client}
+	branch := "module"
+	cf := &containerFlags{repo: &hm, branch: &branch}
+	found, idx, err := a.findContainerAndRepo(t.Context(), cf, "diff")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if found.Name != ct.Name || idx != 0 {
+		t.Fatalf("found %s repo %d", found.Name, idx)
+	}
+	idx, err = a.selectSyncRepo(t.Context(), found, idx, cf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := found.Repos[idx]; got.GitRoot != filepath.ToSlash(hm) || got.ContainerPath != filepath.ToSlash(cm) || !slices.Equal(got.Branches, []string{"module"}) {
+		t.Fatalf("selected submodule = %+v", got)
+	}
+	// A detached host checkout can select its branch explicitly.
+	runMainTestGit(t, hm, "checkout", "-q", "--detach")
+	found, idx, err = a.findContainerAndRepo(t.Context(), cf, "pull")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.selectSyncRepo(t.Context(), found, idx, cf); err != nil {
+		t.Fatal(err)
+	}
+	// Unrelated nested repositories must not select the superproject mapping.
+	unrelated := filepath.Join(host, "unrelated")
+	runMainTestGit(t, "", "init", "-q", "--initial-branch=main", unrelated)
+	cf.repo = &unrelated
+	if _, _, err := a.findContainerAndRepo(t.Context(), cf, "diff"); err == nil {
+		t.Fatal("matched unrelated nested repository")
+	}
 }
 
 func TestResolveCaches(t *testing.T) {

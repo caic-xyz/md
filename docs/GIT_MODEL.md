@@ -215,3 +215,37 @@ the note says the diff *may* include upstream commits rather than promising it.
 An interrupted rebase leaves the container's HEAD detached. `md diff` then
 recovers the branch being rebased from Git's rebase state, so it still compares
 against that branch's integration point.
+
+## Operating on a submodule
+
+Run `md diff`, `md pull`, or `md push` inside an initialized submodule, or
+select it with `-repo=/path/to/submodule`. md finds the container through the
+submodule's superprojects, including nested submodules, and uses the same
+relative checkout path inside it. Submodule names need not match their paths.
+The submodule must already have been initialized in the container.
+
+These operations use the host submodule's current local branch and upstream.
+Use `-branch=<submodule-branch>` to select another local branch, including when
+host HEAD is detached. The enclosing mapped repository's current branch selects
+the container; ambiguous containers are reported without choosing one.
+
+Provisioning transfers each available submodule's local branches, cached
+remote-tracking refs, selected tags, remotes, and branch upstream/push
+configuration. Checkout uses the superproject's gitlink and requires no remote
+network access. Nested modules and names differing from checkout paths follow
+the same rules. A checkout failure aborts provisioning.
+
+The first selected operation configures the host-side submodule transport. Each
+transferred branch has its own integration point; detached work uses the
+submodule HEAD checked out by container provisioning. Containers created by an
+older md version must be recreated to establish these integration points. A detached
+container HEAD is included in `md diff`; `md pull` attaches it to the selected
+branch before committing and integrating its work, provided that branch is an
+ancestor of HEAD. Otherwise pull refuses and asks you to preserve the detached
+work and cherry-pick or merge it onto the selected branch. A successful push or pull
+advances the submodule's integration point independently of its superproject.
+Purging the container removes its submodule transport remotes too.
+Commit the changed gitlink in the superproject separately when needed.
+
+`-all` operates on the container's explicitly mapped repositories. It does not
+recursively synchronize their submodules.

@@ -358,6 +358,10 @@ func TestCheckout(t *testing.T) {
 		if got, err := module.CurrentBranch(ctx); err != nil || got != "scoped" {
 			t.Fatalf("scoped checkout branch = %q, %v", got, err)
 		}
+		roots, err := module.Superprojects(ctx)
+		if err != nil || !slices.Equal(roots, []string{filepath.ToSlash(parent.Root)}) {
+			t.Fatalf("scoped superprojects = %v, %v", roots, err)
+		}
 		if err := os.RemoveAll(moduleRoot); err != nil {
 			t.Fatal(err)
 		}
@@ -376,6 +380,9 @@ func TestCheckout(t *testing.T) {
 				checkout := &Checkout{Root: tc.root, GitDir: tc.gitDir, Logger: testLogger(t)}
 				if _, err := checkout.ListSubmodules(t.Context()); err == nil || !strings.Contains(err.Error(), "worktree") {
 					t.Fatalf("object-only ListSubmodules = %v", err)
+				}
+				if _, err := checkout.Superprojects(t.Context()); err == nil || !strings.Contains(err.Error(), "worktree") {
+					t.Fatalf("object-only Superprojects = %v", err)
 				}
 				if err := checkout.CheckoutBranch(t.Context(), "main"); err == nil || !strings.Contains(err.Error(), "worktree") {
 					t.Fatalf("object-only CheckoutBranch = %v", err)
@@ -463,6 +470,20 @@ func TestCheckout(t *testing.T) {
 		}
 		if subs[0].Path != "lib/sub" {
 			t.Errorf("Path = %q, want %q", subs[0].Path, "lib/sub")
+		}
+
+		sub := filepath.Join(main, "lib", "sub")
+		run(sub, "-c", "protocol.file.allow=always", "submodule", "add", subBare, "nested")
+		roots, err := (&Checkout{Root: filepath.Join(sub, "nested"), Logger: testLogger(t)}).Superprojects(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Equal(roots, []string{filepath.ToSlash(sub), filepath.ToSlash(main)}) {
+			t.Fatalf("nested superprojects = %v", roots)
+		}
+		roots, err = (&Checkout{Root: main, Logger: testLogger(t)}).Superprojects(ctx)
+		if err != nil || len(roots) != 0 {
+			t.Fatalf("ordinary checkout superprojects = %v, %v", roots, err)
 		}
 
 		// Repo with no submodules returns nil.

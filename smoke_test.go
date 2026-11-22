@@ -1489,3 +1489,134 @@ func TestSmoke(t *testing.T) {
 		})
 	}
 }
+
+// TestSmokeSubmodules exercises real container SSH transport without installing
+// coding agents: the fixture supplies only md's startup and Git capabilities.
+func TestSmokeSubmodules(t *testing.T) {
+	for _, rt := range []string{"docker", "podman"} {
+		t.Run(rt, func(t *testing.T) {
+			if _, err := exec.LookPath(rt); err != nil {
+				t.Skipf("%s unavailable", rt)
+			}
+			ctx := t.Context()
+			c := newSmokeClient(t, rt)
+			dir := t.TempDir()
+			if err := extractEmbeddedTreeTo("rsc/specialized", dir); err != nil {
+				t.Fatal(err)
+			}
+			for _, file := range []struct{ src, dst string }{
+				{"ssh_host_ed25519_key", "etc/ssh/ssh_host_ed25519_key"},
+				{"ssh_host_ed25519_key.pub", "etc/ssh/ssh_host_ed25519_key.pub"},
+				{"authorized_keys", "home/user/.ssh/authorized_keys"},
+			} {
+				data, err := os.ReadFile(filepath.Join(c.keysDir, file.src))
+				if err != nil {
+					t.Fatal(err)
+				}
+				target := filepath.Join(dir, filepath.FromSlash(file.dst))
+				if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(target, data, 0o600); err != nil { //nolint:gosec // target joins a test temp dir with a fixed relative path.
+					t.Fatal(err)
+				}
+			}
+			df := smokeForeignBaseDockerfile + "COPY . /\nRUN chmod 755 /root/start.sh && mkdir -p /run/sshd\nCMD [\"/root/start.sh\"]\n"
+			if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(df), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			image := "md-smoke-submodules"
+			out, err := c.Runtime.Run(ctx, dir, "build", "-t", image, ".")
+			if err != nil {
+				t.Fatalf("build fixture: %v\n%s", err, out)
+			}
+			leaf := createSmokeGitRepo(t)
+			child := createSmokeGitRepo(t)
+			root := createSmokeGitRepo(t)
+			runSmokeGit(t, ctx, child, "-c", "protocol.file.allow=always", "submodule", "add", "--name", "nested-name", leaf, "inner/leaf")
+			runSmokeGit(t, ctx, child, "commit", "-qam", "nested module")
+			runSmokeGit(t, ctx, root, "-c", "protocol.file.allow=always", "submodule", "add", "--name", "different-name", child, "lib/dep")
+			runSmokeGit(t, ctx, root, "-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive")
+			runSmokeGit(t, ctx, root, "commit", "-qam", "module")
+			hm := filepath.Join(root, "lib", "dep")
+			runSmokeGit(t, ctx, hm, "branch", "--set-upstream-to=origin/main", "main")
+			ct, err := c.Container(Repo{GitRoot: root, Branches: []string{"main"}, ContainerPath: "/home/user/src/submodules"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			opts := &StartOpts{Quiet: true}
+			if err := ct.createContainer(ctx, os.Stdout, os.Stderr, opts, image); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { removeSmokeContainerIfPresent(t, context.WithoutCancel(ctx), c, ct.Name) })
+			if err := ct.configureLaunchedContainer(ctx, os.Stdout, os.Stderr, opts); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := ct.Connect(ctx, os.Stdout, os.Stderr, opts); err != nil {
+				t.Fatal(err)
+			}
+			subs, err := ct.discoverSubmodules(ctx, &ct.Repos[0])
+			if err != nil || len(subs) != 2 {
+				t.Fatalf("submodules: %+v, %v", subs, err)
+			}
+			for _, s := range subs {
+				if got := runSmokeContainerGit(t, ct, s.ContainerPath, "remote", "get-url", "origin"); got == "" {
+					t.Fatalf("missing origin for %s", s.path)
+				}
+			}
+			idx, err := ct.SelectSubmodule(ctx, 0, hm, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			cp := ct.Repos[idx].ContainerPath
+			script := "printf 'container work\\n' > " + shellQuote(cp+"/work.txt")
+			if _, err := ct.runCmd(ctx, "", ct.SSHCommand(nil, script)); err != nil {
+				t.Fatal(err)
+			}
+			var diff strings.Builder
+			if err := ct.Diff(ctx, &diff, os.Stderr, idx, &DiffOpts{}); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(diff.String(), "container work") {
+				t.Fatalf("missing child diff: %s", diff.String())
+			}
+			if err := ct.Pull(ctx, os.Stdout, os.Stderr, idx, &PullOpts{}); err != nil {
+				t.Fatal(err)
+			}
+			if data, err := os.ReadFile(filepath.Join(hm, "work.txt")); err != nil || string(data) != "container work\n" { //nolint:gosec // hm is a test temp dir.
+				t.Fatalf("pulled work: %q, %v", data, err)
+			}
+			assertSmokeContainerNoDiff(t, ct, idx)
+			if err := os.WriteFile(filepath.Join(hm, "work.txt"), []byte("host work\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			runSmokeGit(t, ctx, hm, "-c", "user.name=Smoke Test", "-c", "user.email=smoke@example.invalid", "commit", "-qam", "host work")
+			if _, err := ct.Push(ctx, os.Stdout, os.Stderr, idx); err != nil {
+				t.Fatal(err)
+			}
+			if got := runSmokeContainerGit(t, ct, cp, "show", "HEAD:work.txt"); got != "host work" {
+				t.Fatalf("pushed content %q", got)
+			}
+			assertSmokeContainerNoDiff(t, ct, idx)
+			// A superproject push refreshes child cached upstreams while
+			// preserving their branches and independent integration points.
+			hostTip := runSmokeGit(t, ctx, hm, "rev-parse", "HEAD")
+			runSmokeGit(t, ctx, hm, "update-ref", "refs/remotes/origin/main", hostTip)
+			runSmokeGit(t, ctx, root, "commit", "-qam", "updated child gitlink")
+			childBase := runSmokeContainerGit(t, ct, cp, "rev-parse", containerSyncRefPrefix+"main")
+			if _, err := ct.Push(ctx, os.Stdout, os.Stderr, 0); err != nil {
+				t.Fatal(err)
+			}
+			assertSmokeContainerGitRef(t, ct, cp, "refs/remotes/origin/main", hostTip)
+			assertSmokeContainerGitRef(t, ct, cp, containerSyncRefPrefix+"main", childBase)
+
+			// The module store can outlive the host checkout declaration.
+			runSmokeGit(t, ctx, root, "rm", ".gitmodules")
+			runSmokeGit(t, ctx, hm, "update-ref", "refs/remotes/origin/task", hostTip)
+			if err := ct.SyncDefaultBranch(ctx, 0); err != nil {
+				t.Fatal(err)
+			}
+			assertSmokeContainerGitRef(t, ct, cp, "refs/remotes/origin/task", hostTip)
+		})
+	}
+}

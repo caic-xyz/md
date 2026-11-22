@@ -320,18 +320,42 @@ func (a *app) findContainerAndRepo(ctx context.Context, cf *containerFlags, comm
 	if branch == "" {
 		branch, _ = g.RunGit(ctx, "branch", "--show-current")
 	}
+	var superprojects []string
+	if command == "diff" || command == "pull" || command == "push" {
+		superprojects, err = g.Superprojects(ctx)
+		if err != nil {
+			return nil, 0, err
+		}
+	}
 	cts, err := c.List(ctx)
 	if err != nil {
 		return nil, 0, err
 	}
+	roots := append([]string{g.Root}, superprojects...)
+	branches := map[string]string{g.Root: branch}
+	for _, root := range superprojects {
+		parent := &git.Checkout{Root: root, Logger: c.Logger}
+		branches[root], err = parent.RunGit(ctx, "branch", "--show-current")
+		if err != nil {
+			return nil, 0, err
+		}
+	}
 	var matched []*md.Container
 	var matchedIdx []int
 	for _, ct := range cts {
-		for i := range ct.Repos {
-			repo := &ct.Repos[i]
-			if repo.GitRoot == g.Root && len(repo.Branches) != 0 && (branch == "" || slices.Contains(repo.Branches, branch)) {
-				matched = append(matched, ct)
-				matchedIdx = append(matchedIdx, i)
+		found := false
+		for _, root := range roots {
+			matchBranch := branches[root]
+			for i := range ct.Repos {
+				repo := &ct.Repos[i]
+				if repo.GitRoot == root && len(repo.Branches) != 0 && (matchBranch == "" || slices.Contains(repo.Branches, matchBranch)) {
+					matched = append(matched, ct)
+					matchedIdx = append(matchedIdx, i)
+					found = true
+					break
+				}
+			}
+			if found {
 				break
 			}
 		}
@@ -353,8 +377,38 @@ func (a *app) findContainerAndRepo(ctx context.Context, cf *containerFlags, comm
 		for i, ct := range matched {
 			names[i] = ct.Name
 		}
+		if len(superprojects) != 0 {
+			return nil, 0, fmt.Errorf("multiple containers match submodule %s: %s; check out the desired mapped branch in its superproject", g.Root, strings.Join(names, ", "))
+		}
 		return nil, 0, fmt.Errorf("multiple containers match %s: %s; use -branch to disambiguate", g.Root, strings.Join(names, ", "))
 	}
+}
+
+// selectSyncRepo selects a submodule without changing the persisted repo mappings.
+func (a *app) selectSyncRepo(ctx context.Context, ct *md.Container, repoIdx int, cf *containerFlags) (int, error) {
+	root := ""
+	if cf.repo != nil {
+		root = *cf.repo
+	}
+	if root == "" {
+		var err error
+		root, err = os.Getwd()
+		if err != nil {
+			return 0, err
+		}
+	}
+	g, err := git.RootDir(ctx, root, ct.Logger)
+	if err != nil {
+		return 0, err
+	}
+	if g.Root == ct.Repos[repoIdx].GitRoot {
+		return repoIdx, nil
+	}
+	branch := ""
+	if cf.branch != nil {
+		branch = *cf.branch
+	}
+	return ct.SelectSubmodule(ctx, repoIdx, g.Root, branch)
 }
 
 func noMatchingContainerError(gitRoot, branch string, branchExists bool, command string, cts []*md.Container) error {
@@ -1241,6 +1295,10 @@ func (a *app) cmdPush(ctx context.Context, args []string) error {
 		mu.Unlock()
 	}
 	if !*all {
+		repoIdx, err = a.selectSyncRepo(ctx, ct, repoIdx, cf)
+		if err != nil {
+			return err
+		}
 		backup, err := ct.Push(ctx, os.Stdout, os.Stderr, repoIdx)
 		if err != nil {
 			return err
@@ -1314,6 +1372,10 @@ func (a *app) cmdPull(ctx context.Context, args []string) (retErr error) {
 		}()
 	}
 	if !*all {
+		repoIdx, err = a.selectSyncRepo(ctx, ct, repoIdx, cf)
+		if err != nil {
+			return err
+		}
 		return ct.Pull(ctx, os.Stdout, os.Stderr, repoIdx, &md.PullOpts{Provider: p, ContextTokens: *tokens, NoVerify: *noVerify})
 	}
 	eg, ctx2 := errgroup.WithContext(ctx)
@@ -1379,6 +1441,12 @@ func (a *app) cmdDiff(ctx context.Context, args []string) error {
 	ct, repoIdx, err := a.findContainerAndRepo(ctx, cf, "diff")
 	if err != nil {
 		return diffCommandError(err, exitOnDiff)
+	}
+	if !*all {
+		repoIdx, err = a.selectSyncRepo(ctx, ct, repoIdx, cf)
+		if err != nil {
+			return diffCommandError(err, exitOnDiff)
+		}
 	}
 	return diffContainerRepos(ctx, os.Stdout, os.Stderr, ct, repoIdx, *all, &md.DiffOpts{Args: gitArgs, Full: *full}, exitOnDiff)
 }

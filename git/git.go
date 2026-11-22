@@ -160,6 +160,35 @@ func (c *Checkout) RunGit(ctx context.Context, args ...string) (string, error) {
 	return runGit(c.Command(ctx, args...), args)
 }
 
+// Superprojects returns the enclosing submodule superprojects, nearest first.
+// Ordinary nested repositories are not treated as submodules. An existing
+// worktree is required.
+func (c *Checkout) Superprojects(ctx context.Context) ([]string, error) {
+	root, err := c.worktreeRoot()
+	if err != nil {
+		return nil, err
+	}
+	root, err = filepath.Abs(root)
+	if err != nil {
+		return nil, err
+	}
+	var roots []string
+	g := *c
+	g.Root = root
+	for {
+		root, err := g.RunGit(ctx, "-C", g.Root, "rev-parse", "--show-superproject-working-tree")
+		if err != nil {
+			return nil, err
+		}
+		if root == "" {
+			return roots, nil
+		}
+		roots = append(roots, root)
+		g.Root = root
+		g.GitDir = ""
+	}
+}
+
 // CurrentBranch returns the current branch name for Root.
 func (c *Checkout) CurrentBranch(ctx context.Context) (string, error) {
 	out, err := c.RunGit(ctx, "branch", "--show-current")
@@ -245,7 +274,7 @@ func (c *Checkout) CreateBranch(ctx context.Context, name, startPoint string, tr
 // CheckoutBranch switches to an existing branch in an existing worktree.
 func (c *Checkout) CheckoutBranch(ctx context.Context, name string) error {
 	if c.GitDir != "" {
-		if err := c.validateWorktreeRoot(); err != nil {
+		if _, err := c.worktreeRoot(); err != nil {
 			return err
 		}
 	}
@@ -390,7 +419,7 @@ func (c *Checkout) ListBranches(ctx context.Context, remote string) ([][2]string
 // GitDir scope requires an existing Root to inspect checkout files.
 func (c *Checkout) ListSubmodules(ctx context.Context) ([]Submodule, error) {
 	if c.GitDir != "" {
-		if err := c.validateWorktreeRoot(); err != nil {
+		if _, err := c.worktreeRoot(); err != nil {
 			return nil, err
 		}
 	}
@@ -517,24 +546,24 @@ func (c *Checkout) Command(ctx context.Context, args ...string) *exec.Cmd {
 	return gitCommand(ctx, dir, args...)
 }
 
-// validateWorktreeRoot validates only operations that need checkout files. Object and
+// worktreeRoot validates only operations that need checkout files. Object and
 // ref commands can also use [ObjectStore].
-func (c *Checkout) validateWorktreeRoot() error {
+func (c *Checkout) worktreeRoot() (string, error) {
 	root := c.Root
 	if root == "" {
 		if c.GitDir != "" {
-			return errors.New("a worktree Root is required for this operation")
+			return "", errors.New("a worktree Root is required for this operation")
 		}
 		root = "."
 	}
 	st, err := os.Stat(root)
 	if err != nil {
-		return fmt.Errorf("worktree Root %q: %w", root, err)
+		return "", fmt.Errorf("worktree Root %q: %w", root, err)
 	}
 	if !st.IsDir() {
-		return fmt.Errorf("worktree Root %q is not a directory", root)
+		return "", fmt.Errorf("worktree Root %q is not a directory", root)
 	}
-	return nil
+	return root, nil
 }
 
 func (c *Checkout) findModuleDirs(ctx context.Context, base, dir string, paths *[]string) error {

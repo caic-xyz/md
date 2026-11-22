@@ -1338,6 +1338,81 @@ func TestPlanFork(t *testing.T) {
 	})
 }
 
+func TestBackupContainerBranchesCommands(t *testing.T) {
+	t.Parallel()
+	// newRepo returns a repository whose detached HEAD is not an ancestor of
+	// the incoming destination, so resetting the mapped branch would lose it.
+	newRepo := func(t *testing.T) (string, containerBranchBase) {
+		dir := t.TempDir()
+		ctx := t.Context()
+		runTestGit(t, ctx, dir, "init", "-q", "-b", "main")
+		runTestGit(t, ctx, dir, "commit", "-q", "--allow-empty", "-m", "base")
+		runTestGit(t, ctx, dir, "update-ref", containerIncomingRefPrefix+"feature", "HEAD")
+		runTestGit(t, ctx, dir, "checkout", "-q", "--detach")
+		runTestGit(t, ctx, dir, "commit", "-q", "--allow-empty", "-m", "detached work")
+		runTestGit(t, ctx, dir, "branch", "-q", "-D", "main")
+		return dir, containerBranchBase{branch: "feature", destination: containerIncomingRefPrefix + "feature"}
+	}
+	run := func(t *testing.T, dir string, commands []string) (string, error) {
+		cmd := exec.CommandContext(t.Context(), "bash", "-c", strings.Join(commands, " && ")) //nolint:gosec // generated command is the value under test.
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		return strings.TrimSpace(string(out)), err
+	}
+	t.Run("valid", func(t *testing.T) {
+		t.Parallel()
+		t.Run("missing branch is skipped", func(t *testing.T) {
+			t.Parallel()
+			dir, base := newRepo(t)
+			out, err := run(t, dir, backupContainerBranchesCommands([]containerBranchBase{base}, "backup-1", true))
+			if err != nil || out != "backup-1" {
+				t.Fatalf("backup = %q, %v", out, err)
+			}
+			head := runTestGit(t, t.Context(), dir, "rev-parse", "HEAD")
+			if got := runTestGit(t, t.Context(), dir, "for-each-ref", "--format=%(refname) %(objectname)", "refs/heads/"); got != "refs/heads/backup-1 "+head {
+				t.Fatalf("branches = %q, want only the HEAD backup", got)
+			}
+		})
+		t.Run("present branch is preserved", func(t *testing.T) {
+			t.Parallel()
+			dir, base := newRepo(t)
+			runTestGit(t, t.Context(), dir, "branch", "-q", "feature")
+			out, err := run(t, dir, backupContainerBranchesCommands([]containerBranchBase{base}, "backup-1", true))
+			if err != nil || out != "backup-1" {
+				t.Fatalf("backup = %q, %v", out, err)
+			}
+			head := runTestGit(t, t.Context(), dir, "rev-parse", "HEAD")
+			if got := runTestGit(t, t.Context(), dir, "rev-parse", "refs/heads/backup-1-0-feature"); got != head {
+				t.Fatalf("branch backup = %q, want %q", got, head)
+			}
+		})
+		t.Run("contained history needs no backup", func(t *testing.T) {
+			t.Parallel()
+			dir, base := newRepo(t)
+			runTestGit(t, t.Context(), dir, "update-ref", base.destination, "HEAD")
+			out, err := run(t, dir, backupContainerBranchesCommands([]containerBranchBase{base}, "backup-1", true))
+			if err != nil || out != "" {
+				t.Fatalf("backup = %q, %v", out, err)
+			}
+			if got := runTestGit(t, t.Context(), dir, "for-each-ref", "refs/heads/"); got != "" {
+				t.Fatalf("branches = %q, want none", got)
+			}
+		})
+	})
+	t.Run("error", func(t *testing.T) {
+		t.Parallel()
+		// A mapped branch of a regular repository must exist; a missing one
+		// aborts the push rather than resetting without a backup.
+		dir, base := newRepo(t)
+		if out, err := run(t, dir, backupContainerBranchesCommands([]containerBranchBase{base}, "backup-1", false)); err == nil {
+			t.Fatalf("missing branch accepted: %q", out)
+		}
+		if got := runTestGit(t, t.Context(), dir, "for-each-ref", "refs/heads/"); got != "" {
+			t.Fatalf("branches = %q, want none", got)
+		}
+	})
+}
+
 func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with t.Setenv.
 	t.Run("launch_rejects_invalid_object_copy_threshold", func(t *testing.T) {
 		t.Parallel()
@@ -2151,6 +2226,169 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			t.Fatalf("full diff --name-only = %q, want %q", got, want)
 		}
 	})
+	t.Run("mapped_submodule_sync", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
+		ctx := t.Context()
+		ct, source, _ := setupPullTest(t)
+		host, dst := t.TempDir(), t.TempDir()
+		for _, root := range []string{host, dst} {
+			runTestGit(t, ctx, root, "init", "-q", "--initial-branch=main")
+			runTestGit(t, ctx, root, "-c", "protocol.file.allow=always", "submodule", "add", "-q", "--name", "different-name", source, "lib/dep")
+		}
+		runTestGit(t, ctx, host, "remote", "add", ct.Name, "user@"+ct.Name+":"+filepath.ToSlash(dst))
+		hm, cm := filepath.Join(host, "lib", "dep"), filepath.Join(dst, "lib", "dep")
+		runTestGit(t, ctx, hm, "config", "user.name", "Test")
+		runTestGit(t, ctx, hm, "config", "user.email", "test@test")
+		runTestGit(t, ctx, cm, "update-ref", containerSubmoduleHeadRef, "HEAD")
+		runTestGit(t, ctx, cm, "update-ref", containerSyncRefPrefix+"HEAD", "HEAD")
+		runTestGit(t, ctx, cm, "update-ref", containerSyncRefPrefix+"main", "main")
+		runTestGit(t, ctx, cm, "checkout", "-q", "--detach")
+		ct.Repos = []Repo{{GitRoot: host, ContainerPath: filepath.ToSlash(dst), Branches: []string{"main"}}}
+		idx, err := ct.SelectSubmodule(ctx, 0, hm, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeTestFile(t, filepath.Join(cm, "work.txt"), "container work\n")
+		var diff bytes.Buffer
+		if err := ct.Diff(ctx, &diff, io.Discard, idx, &DiffOpts{Args: []string{"--name-only"}}); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(diff.String(), "work.txt") {
+			t.Fatalf("missing submodule diff: %s", diff.String())
+		}
+		if got := runTestGit(t, ctx, cm, "branch", "--show-current"); got != "" {
+			t.Fatalf("diff attached detached HEAD to %q", got)
+		}
+		diff.Reset()
+		if err := ct.Diff(ctx, &diff, io.Discard, idx, &DiffOpts{Args: []string{"--name-only"}, Full: true}); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(diff.String(), "work.txt") {
+			t.Fatalf("missing full submodule diff: %s", diff.String())
+		}
+
+		if err := ct.Pull(ctx, io.Discard, io.Discard, idx, nil); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := os.ReadFile(filepath.Join(hm, "work.txt")); err != nil || string(got) != "container work\n" { //nolint:gosec // private test checkout.
+			t.Fatalf("pulled work: %q, %v", got, err)
+		}
+
+		idx, err = ct.SelectSubmodule(ctx, 0, hm, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		diff.Reset()
+		if err := ct.Diff(ctx, &diff, io.Discard, idx, &DiffOpts{Args: []string{"--name-only"}}); err != nil {
+			t.Fatal(err)
+		}
+		if diff.Len() != 0 {
+			t.Fatalf("diff after reselecting pulled submodule: %s", diff.String())
+		}
+		writeTestFile(t, filepath.Join(hm, "host.txt"), "host work\n")
+		runTestGit(t, ctx, hm, "add", ".")
+		runTestGit(t, ctx, hm, "commit", "-qm", "host work")
+		if _, err := ct.Push(ctx, io.Discard, io.Discard, idx); err != nil {
+			t.Fatal(err)
+		}
+		diff.Reset()
+		if err := ct.Diff(ctx, &diff, io.Discard, idx, &DiffOpts{Args: []string{"--name-only"}}); err != nil {
+			t.Fatal(err)
+		}
+		if diff.Len() != 0 {
+			t.Fatalf("diff after push: %s", diff.String())
+		}
+		runTestGit(t, ctx, cm, "checkout", "-q", "--detach")
+		diff.Reset()
+		if err := ct.Diff(ctx, &diff, io.Discard, idx, &DiffOpts{Args: []string{"--name-only"}}); err != nil {
+			t.Fatal(err)
+		}
+		if diff.Len() != 0 {
+			t.Fatalf("detached diff after integration: %s", diff.String())
+		}
+		// A new host branch can be pushed even when it was absent at startup.
+		runTestGit(t, ctx, hm, "switch", "-qc", "new-work")
+		runTestGit(t, ctx, hm, "branch", "--set-upstream-to=origin/main", "new-work")
+		idx, err = ct.SelectSubmodule(ctx, 0, hm, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var missingBranch bytes.Buffer
+		if err := ct.Pull(ctx, io.Discard, &missingBranch, idx, nil); err == nil || !strings.Contains(missingBranch.String(), "run md push") {
+			t.Fatalf("missing container branch pull: %v, %s", err, missingBranch.String())
+		}
+		if _, err := ct.Push(ctx, io.Discard, io.Discard, idx); err != nil {
+			t.Fatal(err)
+		}
+		if err := ct.removeSubmoduleRemotes(ctx, &ct.Repos[0]); err != nil {
+			t.Fatal(err)
+		}
+		remotes := runTestGit(t, ctx, hm, "remote")
+		if remotes != "origin" {
+			t.Fatalf("remotes after cleanup = %q", remotes)
+		}
+	})
+	t.Run("pinned_submodule_preserves_branch_history", func(t *testing.T) {
+		ctx := t.Context()
+		ct, source, _ := setupPullTest(t)
+		t.Setenv("GIT_ALLOW_PROTOCOL", "file:ssh")
+		host, dst := t.TempDir(), t.TempDir()
+		runTestGit(t, ctx, host, "init", "-q", "--initial-branch=main")
+		runTestGit(t, ctx, host, "config", "user.name", "Test")
+		runTestGit(t, ctx, host, "config", "user.email", "test@test")
+		runTestGit(t, ctx, host, "submodule", "add", "-q", source, "dep")
+		runTestGit(t, ctx, host, "commit", "-qm", "pin submodule")
+		hm, cm := filepath.Join(host, "dep"), filepath.Join(dst, "dep")
+		runTestGit(t, ctx, hm, "config", "user.name", "Test")
+		runTestGit(t, ctx, hm, "config", "user.email", "test@test")
+		writeTestFile(t, filepath.Join(hm, "published.txt"), "published host commit\n")
+		runTestGit(t, ctx, hm, "add", ".")
+		runTestGit(t, ctx, hm, "commit", "-qm", "published")
+		tip := runTestGit(t, ctx, hm, "rev-parse", "main")
+		runTestGit(t, ctx, "", "clone", "-q", host, dst)
+		if err := ct.pushSubmodules(ctx, io.Discard, io.Discard, filepath.ToSlash(dst), host, "", true); err != nil {
+			t.Fatal(err)
+		}
+		runTestGit(t, ctx, host, "remote", "add", ct.Name, "user@"+ct.Name+":"+filepath.ToSlash(dst))
+		ct.Repos = []Repo{{GitRoot: host, ContainerPath: filepath.ToSlash(dst), Branches: []string{"main"}}}
+		idx, err := ct.SelectSubmodule(ctx, 0, hm, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var initial bytes.Buffer
+		if err := ct.Diff(ctx, &initial, io.Discard, idx, &DiffOpts{Args: []string{"--name-only"}}); err != nil {
+			t.Fatal(err)
+		}
+		if initial.Len() != 0 {
+			t.Fatalf("fresh pinned submodule diff: %s", initial.String())
+		}
+		writeTestFile(t, filepath.Join(cm, "work.txt"), "detached work\n")
+		runTestGit(t, ctx, cm, "add", ".")
+		runTestGit(t, ctx, cm, "commit", "-qm", "detached work")
+		var diff bytes.Buffer
+		if err := ct.Diff(ctx, &diff, io.Discard, idx, &DiffOpts{Args: []string{"--name-only"}}); err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.TrimSpace(diff.String()); got != "work.txt" {
+			t.Fatalf("pinned diff = %q", got)
+		}
+		var stderr bytes.Buffer
+		if err := ct.Pull(ctx, io.Discard, &stderr, idx, nil); err == nil || !strings.Contains(stderr.String(), "not an ancestor") {
+			t.Fatalf("diverged detached pull = %v", err)
+		}
+		for _, root := range []string{hm, cm} {
+			if got := runTestGit(t, ctx, root, "rev-parse", "main"); got != tip {
+				t.Fatalf("branch rewritten in %s: %s != %s", root, got, tip)
+			}
+		}
+		runTestGit(t, ctx, cm, "switch", "-q", "main")
+		diff.Reset()
+		if err := ct.Diff(ctx, &diff, io.Discard, idx, &DiffOpts{Args: []string{"--name-only"}}); err != nil {
+			t.Fatal(err)
+		}
+		if diff.Len() != 0 {
+			t.Fatalf("host commits included in branch diff: %s", diff.String())
+		}
+	})
 	t.Run("fetch_without_commit_preserves_unintegrated_diff", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
 		ctx := t.Context()
 		ct, hostDir, containerDir := setupPullTest(t)
@@ -2254,9 +2492,8 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			}
 		}
 	})
-	t.Run("runGitDir_overrides_client_environment", func(t *testing.T) {
+	t.Run("objectStore_preserves_client_config_and_isolates_git_scope", func(t *testing.T) {
 		t.Parallel()
-		dir := t.TempDir()
 		gitDir := filepath.Join(t.TempDir(), "repo.git")
 		runTestGit(t, t.Context(), "", "init", "-q", "--bare", gitDir)
 		logger := testLogger(t)
@@ -2267,16 +2504,18 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 					"GIT_DIR=/missing/git-dir",
 					"GIT_WORK_TREE=/missing/work-tree",
 					"LANG=invalid",
+					"GIT_CONFIG_COUNT=1",
+					"GIT_CONFIG_KEY_0=alias.show-env",
+					`GIT_CONFIG_VALUE_0=!printf '%s|%s|%s' "$GIT_DIR" "$GIT_WORK_TREE" "$LANG"`,
 				},
 			},
 			Logger: logger,
 		}
-		out, err := ct.runGitDir(t.Context(), dir, gitDir,
-			"-c", `alias.show-env=!printf '%s\n' "$GIT_DIR" "$GIT_WORK_TREE" "$LANG"`, "show-env")
+		out, err := ct.objectStore(gitDir).RunGit(t.Context(), "show-env")
 		if err != nil {
 			t.Fatal(err)
 		}
-		if want := strings.Join([]string{gitDir, dir, "C"}, "\n"); out != want {
+		if want := filepath.ToSlash(gitDir) + "||C"; out != want {
 			t.Fatalf("environment = %q, want %q", out, want)
 		}
 	})
@@ -2349,6 +2588,8 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 				newRepo := func(name string) string {
 					dir := filepath.Join(t.TempDir(), name)
 					runTestGit(t, ctx, "", "init", "-q", "--initial-branch=main", dir)
+					runTestGit(t, ctx, dir, "config", "user.name", "Test")
+					runTestGit(t, ctx, dir, "config", "user.email", "test@example.invalid")
 					runTestGit(t, ctx, dir, "commit", "-q", "--allow-empty", "-m", "root")
 					writeTestFile(t, filepath.Join(dir, "tracked.txt"), name+" base\n")
 					runTestGit(t, ctx, dir, "add", ".")
@@ -2400,13 +2641,18 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 					runTestGit(t, ctx, host, "--git-dir="+dir, "update-ref", "--no-deref", "HEAD", repo.tip)
 					runTestGit(t, ctx, host, "--git-dir="+dir, "config", "core.bare", "false")
 					runTestGit(t, ctx, host, "--git-dir="+dir, "config", "core.worktree", filepath.Join(t.TempDir(), "missing"))
+					runTestGit(t, ctx, host, "--git-dir="+dir, "config", "branch.main.remote", "origin")
+					runTestGit(t, ctx, host, "--git-dir="+dir, "config", "branch.main.merge", "refs/heads/main")
+					runTestGit(t, ctx, host, "--git-dir="+dir, "config", "remote.origin.pushurl", "git@example.invalid:owner/publish.git")
+					runTestGit(t, ctx, host, "--git-dir="+dir, "update-ref", "refs/remotes/origin/main", "refs/heads/main")
+					runTestGit(t, ctx, host, "--git-dir="+dir, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
 				}
 				dst := filepath.Join(t.TempDir(), "container")
 				runTestGit(t, ctx, "", "clone", "-q", "--no-local", host, dst)
 				ct := &Container{Client: testClient(t), Logger: testLogger(t), Name: "md-test"}
 				var stderr bytes.Buffer
-				//nolint:paralleltest // These subtests share a repository and must run in sequence.
-				if !t.Run("valid", func(t *testing.T) {
+
+				if !t.Run("valid", func(t *testing.T) { //nolint:paralleltest // The rejection case reuses the provisioned container.
 					ctx := t.Context()
 					if err := ct.pushSubmodules(ctx, io.Discard, &stderr, filepath.ToSlash(dst), host, tc.tagRegexp, true); err != nil {
 						t.Fatalf("pushSubmodules: %v: %s", err, stderr.String())
@@ -2415,6 +2661,21 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 						dir := filepath.Join(dst, filepath.FromSlash(repo.path))
 						if got, want := runTestGit(t, ctx, dir, "rev-parse", "HEAD"), repo.tip; got != want {
 							t.Fatalf("%s HEAD = %s, want %s: %s", repo.path, got, want, stderr.String())
+						}
+						if got := runTestGit(t, ctx, dir, "rev-parse", containerSyncRefPrefix+"HEAD"); got != repo.tip {
+							t.Fatalf("%s detached baseline = %s, want %s", repo.path, got, repo.tip)
+						}
+						if got, want := runTestGit(t, ctx, dir, "rev-parse", containerSyncRefPrefix+"main"), runTestGit(t, ctx, repo.src, "rev-parse", "main"); got != want {
+							t.Fatalf("%s branch baseline = %s, want %s", repo.path, got, want)
+						}
+						if got := runTestGit(t, ctx, dir, "remote", "get-url", "origin"); got != repo.src {
+							t.Fatalf("%s origin = %q, want %q", repo.path, got, repo.src)
+						}
+						if got := runTestGit(t, ctx, dir, "remote", "get-url", "--push", "origin"); got != "https://example.invalid/owner/publish.git" {
+							t.Fatalf("%s push origin = %q", repo.path, got)
+						}
+						if got := runTestGit(t, ctx, dir, "rev-parse", "main@{upstream}"); got != runTestGit(t, ctx, dir, "rev-parse", "main") {
+							t.Fatalf("%s upstream = %q", repo.path, got)
 						}
 						refs := []string{"refs/heads/feature", "refs/heads/main"}
 						if tc.tagRegexp != "" {
@@ -2438,6 +2699,17 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 					// Repeated synchronization must work after Git sets module worktrees.
 					if err := ct.pushSubmodules(ctx, io.Discard, &stderr, filepath.ToSlash(dst), host, tc.tagRegexp, true); err != nil {
 						t.Fatalf("repeat pushSubmodules: %v: %s", err, stderr.String())
+					}
+					// Embedded clones can be staged as undeclared Gitlinks.
+					// In-place modules can still store metadata in their worktrees.
+					for _, name := range []string{"embedded", "in-place"} {
+						runTestGit(t, ctx, dst, "clone", "-q", module, name)
+					}
+					runTestGit(t, ctx, dst, "add", "embedded")
+					runTestGit(t, ctx, dst, "submodule", "add", "-q", module, "in-place")
+					modules, err := ct.discoverSubmodules(ctx, &Repo{GitRoot: host, ContainerPath: filepath.ToSlash(dst)})
+					if err != nil || len(modules) != 2 || modules[0].path != "dep" || modules[1].path != "dep/nested" {
+						t.Fatalf("discover initialized submodules: %+v, %v", modules, err)
 					}
 				}) {
 					return
@@ -2487,7 +2759,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 		runTestGit(t, ctx, hostDir, "config", "core.hooksPath", hooksDir)
 
 		ct := &Container{Client: testClient(t), Logger: testLogger(t)}
-		if err := ct.pushRefspecs(ctx, hostDir, "", remoteDir, []string{"main:main"}, false, io.Discard, io.Discard); err != nil {
+		if err := ct.pushRefspecs(ctx, hostDir, nil, remoteDir, []string{"main:main"}, false, io.Discard, io.Discard); err != nil {
 			t.Fatal(err)
 		}
 		if got := runTestGit(t, ctx, remoteDir, "rev-parse", "refs/heads/main"); got != runTestGit(t, ctx, hostDir, "rev-parse", "main") {
