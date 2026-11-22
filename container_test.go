@@ -1245,8 +1245,10 @@ func TestPlanFork(t *testing.T) {
 		runTestGit(t, ctx, yDir, "init", "-q", "--initial-branch=main")
 		runTestGit(t, ctx, yDir, "commit", "-q", "--allow-empty", "-m", "main")
 		runTestGit(t, ctx, yDir, "branch", "topic")
+		runTestGit(t, ctx, yDir, "branch", "support")
 		runTestGit(t, ctx, yDir, "remote", "add", "origin", yRemote)
 		runTestGit(t, ctx, yDir, "push", "-q", "-u", "origin", "main", "topic")
+		runTestGit(t, ctx, yDir, "branch", "--set-upstream-to=support", "topic")
 		spec := []ForkRepo{
 			{GitRoot: xDir, SourceBranches: []string{"dev"}, TagRegexp: "^v", DestPrimary: "x0"},
 			{GitRoot: "/src/b", SourceBranches: []string{"main"}, DestPrimary: "b0"},
@@ -1275,15 +1277,22 @@ func TestPlanFork(t *testing.T) {
 		if want := []string{"origin"}; !slices.Equal(plan.extraRepos[0].Remotes, want) {
 			t.Errorf("extra x remotes = %v, want %v", plan.extraRepos[0].Remotes, want)
 		}
-		base, err := plan.extraRepos[0].resolveForkExtraBranchBase(ctx, testLogger(t), "dev", "x0")
+		destinations := []Repo{{Branches: []string{"x0"}}, {Branches: []string{"y0", "topic"}}}
+		preflight, err := preflightForkRepos(ctx, testLogger(t), nil, plan.extraRepos, destinations)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if base.pushRemote != "" {
+		if base := preflight.extraBases[0][0]; base.pushRemote != "" {
 			t.Errorf("extra x push remote = %q, want empty", base.pushRemote)
 		}
 		if want := []string{"main", "topic"}; !slices.Equal(plan.extraRepos[1].Branches, want) {
 			t.Errorf("extra /src/y branches = %v, want %v", plan.extraRepos[1].Branches, want)
+		}
+		if base := preflight.extraBases[1][1]; base.upstreamRemote != "." || base.upstreamBranch != "support" {
+			t.Errorf("extra y topic tracking = %q/%q, want ./support", base.upstreamRemote, base.upstreamBranch)
+		}
+		if !slices.Contains(preflight.extraRefspecs[1], "refs/heads/support:refs/heads/support") {
+			t.Errorf("extra y refspecs = %v, want local upstream support mirrored", preflight.extraRefspecs[1])
 		}
 	})
 
@@ -3529,10 +3538,29 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 		if base.ref != "upstream/main" || base.destination != "refs/remotes/upstream/main" || base.pushRemote != "origin" {
 			t.Fatalf("remote base = %+v, want upstream/main with origin push remote", base)
 		}
-		extraBase, err := repo.resolveForkExtraBranchBase(ctx, logger, "main", "main-0")
+		source := repo
+		source.DefaultRemote = "upstream"
+		source.Remotes = nil
+		sourcePreflight, err := preflightForkRepos(ctx, logger, []Repo{source}, nil, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
+		if got, want := sourcePreflight.sourceUpstreams[0], (branchUpstreamSpec{remote: "upstream", branch: "main", pushRemote: "origin"}); got != want {
+			t.Errorf("fork source upstream = %+v, want %+v", got, want)
+		}
+		for _, refspec := range []string{
+			"refs/remotes/upstream/main:refs/remotes/upstream/main",
+			"refs/remotes/origin/main:refs/remotes/origin/main",
+		} {
+			if !slices.Contains(sourcePreflight.sourceSyncRefspec[0], refspec) {
+				t.Errorf("fork source refspecs = %v, want %q", sourcePreflight.sourceSyncRefspec[0], refspec)
+			}
+		}
+		preflight, err := preflightForkRepos(ctx, logger, nil, []Repo{repo}, []Repo{{Branches: []string{"main-0"}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		extraBase := preflight.extraBases[0][0]
 		if extraBase.branch != "main-0" || extraBase.ref != containerIncomingRefPrefix+"main-0" || extraBase.destination != containerIncomingRefPrefix+"main-0" || extraBase.upstreamRemote != "upstream" || extraBase.upstreamBranch != "main" || extraBase.pushRemote != "origin" {
 			t.Fatalf("fork extra base = %+v, want incoming main-0 with upstream/main and origin push remote", extraBase)
 		}
@@ -4534,7 +4562,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 						t.Errorf("fork push remote = %q, want %q", gotPushRemote, tt.wantPushRemote)
 					}
 					repo.Branches = []string{"source-0"}
-					if _, err := repo.containerSyncRefspecs(ctx, testLogger(t)); err != nil {
+					if _, err := repo.containerSyncRefspecs(ctx, testLogger(t), nil); err != nil {
 						t.Fatalf("syncing fork host destination branch: %v", err)
 					}
 				})
