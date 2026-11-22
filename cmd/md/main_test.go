@@ -764,19 +764,22 @@ func setupCmdDiffContainer(t *testing.T, repoCount int) (ct *md.Container, logPa
 
 func TestFindContainerAndRepoSubmodule(t *testing.T) {
 	ct, _ := setupCmdDiffContainer(t, 1)
-	host, dst := ct.Repos[0].GitRoot, ct.Repos[0].ContainerPath
+	// md start records the root Git reports, which resolves symlinks and
+	// Windows short names. Target selection reads only host checkouts, so the
+	// container path only needs to be valid.
+	g, err := git.RootDir(t.Context(), ct.Repos[0].GitRoot, ct.Logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := g.Root
+	ct.Repos = []md.Repo{{GitRoot: host, Branches: []string{"main"}, ContainerPath: "/home/user/src/host"}}
 	source := t.TempDir()
 	runMainTestGit(t, source, "init", "-q", "--initial-branch=module")
 	runMainTestGit(t, source, "config", "user.name", "Test")
 	runMainTestGit(t, source, "config", "user.email", "test@test")
 	runMainTestGit(t, source, "commit", "-qm", "module", "--allow-empty")
-	for _, root := range []string{host, dst} {
-		runMainTestGit(t, root, "-c", "protocol.file.allow=always", "submodule", "add", "-q", source, "dep")
-	}
-	hm, cm := filepath.Join(host, "dep"), filepath.Join(dst, "dep")
-	runMainTestGit(t, cm, "update-ref", "refs/md/submodule-head", "HEAD")
-	runMainTestGit(t, cm, "update-ref", "refs/md/sync/HEAD", "HEAD")
-	runMainTestGit(t, cm, "update-ref", "refs/md/sync/module", "module")
+	runMainTestGit(t, host, "-c", "protocol.file.allow=always", "submodule", "add", "-q", source, "dep")
+	hm := filepath.Join(host, "dep")
 	data, err := json.Marshal(ct.Repos)
 	if err != nil {
 		t.Fatal(err)

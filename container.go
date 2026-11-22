@@ -5838,7 +5838,8 @@ func (a *forkAttempt) rollback(ctx context.Context) error {
 //
 // Supports git@host:path, ssh://git@host/path, git://host/path, and HTTPS.
 // URL user information is removed so host credentials are not copied into the
-// container.
+// container. Other values, such as local paths, are returned unchanged: URL
+// parsing would read a Windows drive letter as a scheme and escape spaces.
 func convertGitURLToHTTPS(rawURL string) string {
 	converted := strings.TrimSpace(rawURL)
 	// Matches git@host:user/repo.git
@@ -5850,6 +5851,9 @@ func convertGitURLToHTTPS(rawURL string) string {
 	} else if m := reGitProto.FindStringSubmatch(converted); m != nil {
 		// Matches git://host/user/repo.git
 		converted = fmt.Sprintf("https://%s/%s", m[1], m[2])
+	}
+	if !strings.Contains(converted, "://") {
+		return converted
 	}
 	parsed, err := url.Parse(converted)
 	if err != nil {

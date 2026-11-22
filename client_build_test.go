@@ -1011,6 +1011,9 @@ func TestConvertGitURLToHTTPS(t *testing.T) {
 		{"git_proto", "git://github.com/user/repo.git", "https://github.com/user/repo.git"},
 		{"unknown", "unknown://foo", "unknown://foo"},
 		{"local_path", "/tmp/repo.git", "/tmp/repo.git"},
+		{"local_path_space", "/tmp/my repo#1", "/tmp/my repo#1"},
+		{"scp_like", "alice@example.com:repo.git", "alice@example.com:repo.git"},
+		{"windows_path", `C:\Users\me\repo`, `C:\Users\me\repo`},
 		{"invalid_url", "https://%zz", ""},
 		{"whitespace", "  git@github.com:user/repo.git  ", "https://github.com/user/repo.git"},
 	}

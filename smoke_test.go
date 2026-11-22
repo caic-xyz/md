@@ -1504,24 +1504,24 @@ func TestSmokeSubmodules(t *testing.T) {
 			if err := extractEmbeddedTreeTo("rsc/specialized", dir); err != nil {
 				t.Fatal(err)
 			}
-			for _, file := range []struct{ src, dst string }{
-				{"ssh_host_ed25519_key", "etc/ssh/ssh_host_ed25519_key"},
-				{"ssh_host_ed25519_key.pub", "etc/ssh/ssh_host_ed25519_key.pub"},
-				{"authorized_keys", "home/user/.ssh/authorized_keys"},
-			} {
-				data, err := os.ReadFile(filepath.Join(c.keysDir, file.src))
+			for _, name := range []string{"authorized_keys", "ssh_host_ed25519_key", "ssh_host_ed25519_key.pub"} {
+				data, err := os.ReadFile(filepath.Join(c.keysDir, name)) //nolint:gosec // name is a fixed key file name.
 				if err != nil {
 					t.Fatal(err)
 				}
-				target := filepath.Join(dir, filepath.FromSlash(file.dst))
-				if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(target, data, 0o600); err != nil { //nolint:gosec // target joins a test temp dir with a fixed relative path.
+				if err := os.WriteFile(filepath.Join(dir, name), data, 0o600); err != nil { //nolint:gosec // name is a fixed key file name.
 					t.Fatal(err)
 				}
 			}
-			df := smokeForeignBaseDockerfile + "COPY . /\nRUN chmod 755 /root/start.sh && mkdir -p /run/sshd\nCMD [\"/root/start.sh\"]\n"
+			// Mirror the per-path ownership and modes of the generated
+			// specialized Dockerfile instead of copying the context onto /.
+			df := smokeForeignBaseDockerfile + `COPY --chown=root:root --chmod=755 root/ /root/
+COPY --chown=root:root --chmod=600 ssh_host_ed25519_key /etc/ssh/ssh_host_ed25519_key
+COPY --chown=root:root --chmod=644 ssh_host_ed25519_key.pub /etc/ssh/ssh_host_ed25519_key.pub
+COPY --chmod=600 authorized_keys /home/user/.ssh/authorized_keys
+RUN mkdir -p /run/sshd
+CMD ["/root/start.sh"]
+`
 			if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(df), 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -1550,7 +1550,9 @@ func TestSmokeSubmodules(t *testing.T) {
 			}
 			t.Cleanup(func() { removeSmokeContainerIfPresent(t, context.WithoutCancel(ctx), c, ct.Name) })
 			if err := ct.configureLaunchedContainer(ctx, os.Stdout, os.Stderr, opts); err != nil {
-				t.Fatal(err)
+				var logs strings.Builder
+				logsErr := c.Runtime.RunOut(ctx, "", &logs, &logs, "logs", ct.Name)
+				t.Fatalf("%v\ncontainer logs (err=%v):\n%s", err, logsErr, logs.String())
 			}
 			if _, err := ct.Connect(ctx, os.Stdout, os.Stderr, opts); err != nil {
 				t.Fatal(err)

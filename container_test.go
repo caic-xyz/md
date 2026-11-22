@@ -154,6 +154,17 @@ func TestLaunchContainerMemoryLimit(t *testing.T) {
 	})
 }
 
+// canonicalTempDir resolves a temporary directory as Git resolves a worktree
+// root. macOS temporary directories are behind a symlink and Windows ones may
+// use 8.3 short names.
+func canonicalTempDir(t *testing.T) string {
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
 func runTestGit(t *testing.T, ctx context.Context, wd string, args ...string) string {
 	cmd := exec.CommandContext(ctx, "git", args...) //nolint:gosec // args are from test code
 	cmd.Dir = wd
@@ -2277,7 +2288,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 	t.Run("mapped_submodule_sync", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
 		ctx := t.Context()
 		ct, source, _ := setupPullTest(t)
-		host, dst := t.TempDir(), t.TempDir()
+		host, dst := canonicalTempDir(t), canonicalTempDir(t)
 		for _, root := range []string{host, dst} {
 			runTestGit(t, ctx, root, "init", "-q", "--initial-branch=main")
 			runTestGit(t, ctx, root, "-c", "protocol.file.allow=always", "submodule", "add", "-q", "--name", "different-name", source, "lib/dep")
@@ -2405,7 +2416,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 		ctx := t.Context()
 		ct, source, _ := setupPullTest(t)
 		t.Setenv("GIT_ALLOW_PROTOCOL", "file:ssh")
-		host, dst := t.TempDir(), t.TempDir()
+		host, dst := canonicalTempDir(t), canonicalTempDir(t)
 		runTestGit(t, ctx, host, "init", "-q", "--initial-branch=main")
 		runTestGit(t, ctx, host, "config", "user.name", "Test")
 		runTestGit(t, ctx, host, "config", "user.email", "test@test")
