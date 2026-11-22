@@ -249,3 +249,19 @@ Commit the changed gitlink in the superproject separately when needed.
 
 `-all` operates on the container's explicitly mapped repositories. It does not
 recursively synchronize their submodules.
+
+Library callers can inspect initialized modules with
+[`Container.DiscoverSubmodules`](../container.go). Each node's `GitlinkPath`
+is relative to its immediate superproject. For example, the node for
+`vendor/lib/deps/parser` uses `deps/parser` when its parent is `vendor/lib`.
+Use `ParentFirst` to visit the topology or `ChildrenFirst` to roll changes
+into each superproject after visiting its descendants. Both iterators yield
+paths relative to the mapped repository.
+
+[`Container.FetchRecursive`](../container.go) returns the mapped branch
+tips, initialized submodule HEADs, and the Gitlinks it verified in specific
+fetched parent commits. A submodule's HEAD can differ from the commit pinned
+by one or more fetched branches. With `FetchOpts.Commit`, md commits changes
+from the leaves up, preserving detached submodule HEADs. Callers that
+publish commits should walk the Gitlinks in the commits they publish, which
+can also include uninitialized submodules.

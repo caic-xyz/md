@@ -138,18 +138,11 @@ type ObjectStats struct {
 	PackBytes  int64
 }
 
-// Checkout scopes Git operations to a worktree or explicit repository metadata,
-// logging via Logger.
+// Checkout scopes Git operations to a worktree, logging via Logger.
+// Use [ObjectStore] when working with repository objects alone.
 type Checkout struct {
-	// Root scopes worktree files. With GitDir set it may name a removed
-	// worktree. Use [ObjectStore] when working with repository objects alone.
-	Root string
-	// GitDir explicitly selects an absolute repository metadata directory.
-	// It overrides core.worktree without changing the repository's config.
-	// Filesystem-based checkout operations still require a usable Root.
-	//
-	// Deprecated: use [ObjectStore].
-	GitDir string
+	// Root is the worktree directory. An empty Root uses the current directory.
+	Root   string
 	Logger Logger
 
 	_ struct{}
@@ -185,7 +178,6 @@ func (c *Checkout) Superprojects(ctx context.Context) ([]string, error) {
 		}
 		roots = append(roots, root)
 		g.Root = root
-		g.GitDir = ""
 	}
 }
 
@@ -273,11 +265,6 @@ func (c *Checkout) CreateBranch(ctx context.Context, name, startPoint string, tr
 
 // CheckoutBranch switches to an existing branch in an existing worktree.
 func (c *Checkout) CheckoutBranch(ctx context.Context, name string) error {
-	if c.GitDir != "" {
-		if _, err := c.worktreeRoot(); err != nil {
-			return err
-		}
-	}
 	c.Logger.Log(ctx, slog.LevelInfo, "git", "msg", "git checkout", "branch", name)
 	cmd := c.Command(ctx, "checkout", name)
 	var stderr bytes.Buffer
@@ -415,14 +402,8 @@ func (c *Checkout) ListBranches(ctx context.Context, remote string) ([][2]string
 }
 
 // ListSubmodules returns the submodules declared in .gitmodules for Root.
-// Returns nil if no .gitmodules file exists or it has no entries. An explicit
-// GitDir scope requires an existing Root to inspect checkout files.
+// Returns nil if no .gitmodules file exists or it has no entries.
 func (c *Checkout) ListSubmodules(ctx context.Context) ([]Submodule, error) {
-	if c.GitDir != "" {
-		if _, err := c.worktreeRoot(); err != nil {
-			return nil, err
-		}
-	}
 	file, err := filepath.Abs(filepath.Join(c.Root, ".gitmodules"))
 	if err != nil {
 		return nil, err
@@ -527,23 +508,8 @@ func (c *Checkout) ObjectStats(ctx context.Context) (ObjectStats, error) {
 
 // Command creates a scoped Git command with English output. Callers may
 // configure its I/O before running it, including streaming large output.
-//
-// With GitDir set, the command starts in that directory and explicitly selects
-// its repository metadata and Root worktree, bypassing stale core.worktree
-// configuration. An empty Root uses GitDir as the command's worktree scope for
-// object-only operations during migration to [ObjectStore]. Root and GitDir
-// must be absolute in this mode.
 func (c *Checkout) Command(ctx context.Context, args ...string) *exec.Cmd {
-	dir := c.Root
-	if c.GitDir != "" {
-		dir = c.GitDir
-		worktree := c.Root
-		if worktree == "" {
-			worktree = c.GitDir
-		}
-		args = append([]string{"--git-dir=" + filepath.ToSlash(c.GitDir), "--work-tree=" + filepath.ToSlash(worktree)}, args...)
-	}
-	return gitCommand(ctx, dir, args...)
+	return gitCommand(ctx, c.Root, args...)
 }
 
 // worktreeRoot validates only operations that need checkout files. Object and
@@ -551,9 +517,6 @@ func (c *Checkout) Command(ctx context.Context, args ...string) *exec.Cmd {
 func (c *Checkout) worktreeRoot() (string, error) {
 	root := c.Root
 	if root == "" {
-		if c.GitDir != "" {
-			return "", errors.New("a worktree Root is required for this operation")
-		}
 		root = "."
 	}
 	st, err := os.Stat(root)

@@ -2,7 +2,7 @@
 // source code is governed by the Apache v2 license that can be found in the
 // LICENSE file.
 
-// Tests for container types and lifecycle.
+// Tests for container types, lifecycle, and Git synchronization.
 
 package md
 
@@ -1413,6 +1413,43 @@ func TestBackupContainerBranchesCommands(t *testing.T) {
 	})
 }
 
+func TestSubmoduleTree(t *testing.T) {
+	t.Parallel()
+	leaf := &Submodule{GitlinkPath: "inner/leaf"}
+	tree := SubmoduleTree{&Submodule{GitlinkPath: "lib/dep", Children: SubmoduleTree{leaf}}}
+	t.Run("ParentFirst", func(t *testing.T) {
+		t.Parallel()
+		var got []string
+		for p := range tree.ParentFirst() {
+			got = append(got, p)
+		}
+		want := []string{"lib/dep", "lib/dep/inner/leaf"}
+		if !slices.Equal(got, want) {
+			t.Errorf("parent-first paths = %v, want %v", got, want)
+		}
+	})
+	t.Run("ChildrenFirst", func(t *testing.T) {
+		t.Parallel()
+		var got []string
+		for p := range tree.ChildrenFirst() {
+			got = append(got, p)
+		}
+		want := []string{"lib/dep/inner/leaf", "lib/dep"}
+		if !slices.Equal(got, want) {
+			t.Errorf("children-first paths = %v, want %v", got, want)
+		}
+	})
+	t.Run("Find", func(t *testing.T) {
+		t.Parallel()
+		if got, ok := tree.Find("lib/dep/inner/leaf"); !ok || got != leaf {
+			t.Errorf("Find leaf = %v, %t, want %v, true", got, ok, leaf)
+		}
+		if got, ok := tree.Find("inner/leaf"); ok || got != nil {
+			t.Errorf("Find unmapped path = %v, %t, want nil, false", got, ok)
+		}
+	})
+}
+
 func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with t.Setenv.
 	t.Run("launch_rejects_invalid_object_copy_threshold", func(t *testing.T) {
 		t.Parallel()
@@ -2574,6 +2611,133 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			t.Fatalf("SyncDefaultBranch error = %v, want source repository/container context", err)
 		}
 	})
+	t.Run("FetchRecursive", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
+		ctx := t.Context()
+		c, host, root := setupMultiBranchPullTest(t)
+		initRepo := func() string {
+			dir := t.TempDir()
+			runTestGit(t, ctx, dir, "init", "-q", "--initial-branch=main")
+			runTestGit(t, ctx, dir, "config", "user.name", "Test")
+			runTestGit(t, ctx, dir, "config", "user.email", "test@test")
+			writeTestFile(t, filepath.Join(dir, "file.txt"), "base\n")
+			runTestGit(t, ctx, dir, "add", ".")
+			runTestGit(t, ctx, dir, "commit", "-qm", "base")
+			return dir
+		}
+		addModule := func(parent, name, src, link string) {
+			runTestGit(t, ctx, parent, "-c", "protocol.file.allow=always", "submodule", "add", "-q", "--name", name, src, link)
+			runTestGit(t, ctx, parent, "commit", "-qm", "add "+link)
+		}
+		const childPath = "lib/dep"
+		const leafLink = "inner/leaf"
+		const leafPath = childPath + "/" + leafLink
+		leafSource := initRepo()
+		childSource := initRepo()
+		addModule(childSource, "named/leaf", leafSource, leafLink)
+		addModule(root, "named/dep", childSource, childPath)
+		runTestGit(t, ctx, root, "-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive")
+		child := filepath.Join(root, "lib", "dep")
+		leaf := filepath.Join(child, "inner", "leaf")
+		for _, dir := range []string{child, leaf} {
+			runTestGit(t, ctx, dir, "config", "user.name", "Test")
+			runTestGit(t, ctx, dir, "config", "user.email", "test@test")
+			runTestGit(t, ctx, dir, "switch", "-q", "--detach")
+		}
+
+		oldChild := runTestGit(t, ctx, child, "rev-parse", "HEAD")
+		oldLeaf := runTestGit(t, ctx, leaf, "rev-parse", "HEAD")
+		// These versions are neither descendant HEADs nor origin refs. The only
+		// reason to transfer them is that an immutable fetched parent pins them.
+		leafTree := runTestGit(t, ctx, leaf, "rev-parse", "HEAD^{tree}")
+		historicalLeaf := runTestGit(t, ctx, leaf, "commit-tree", leafTree, "-p", oldLeaf, "-m", "historical leaf")
+		runTestGit(t, ctx, child, "update-index", "--cacheinfo", "160000,"+historicalLeaf+","+leafLink)
+		childTree := runTestGit(t, ctx, child, "write-tree")
+		historicalChild := runTestGit(t, ctx, child, "commit-tree", childTree, "-p", oldChild, "-m", "historical child")
+		runTestGit(t, ctx, child, "reset", "-q", "HEAD", "--", leafLink)
+		runTestGit(t, ctx, root, "switch", "-q", "-c", "feature", "origin/feature")
+		runTestGit(t, ctx, root, "restore", "--source=main", "--staged", "--worktree", "--", ".gitmodules")
+		runTestGit(t, ctx, root, "update-index", "--add", "--cacheinfo", "160000,"+historicalChild+","+childPath)
+		runTestGit(t, ctx, root, "commit", "-qm", "pin original child")
+		feature := runTestGit(t, ctx, root, "rev-parse", "HEAD")
+		runTestGit(t, ctx, root, "switch", "-q", "main")
+
+		tree, err := c.DiscoverSubmodules(ctx, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(tree) != 1 || tree[0].GitlinkPath != childPath || len(tree[0].Children) != 1 || tree[0].Children[0].GitlinkPath != leafLink {
+			t.Fatalf("unexpected immediate children: %#v", tree)
+		}
+		foundLeaf, ok := tree.Find(leafPath)
+		if !ok || foundLeaf.CommitHash != oldLeaf || foundLeaf.BranchName != "" {
+			t.Fatalf("discovered leaf = %+v, want detached HEAD %s", foundLeaf, oldLeaf)
+		}
+
+		writeTestFile(t, filepath.Join(leaf, "file.txt"), "changed in container\n")
+		result, err := c.FetchRecursive(ctx, io.Discard, io.Discard, 0, &FetchOpts{Commit: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		newRoot := runTestGit(t, ctx, root, "rev-parse", "HEAD")
+		newChild := runTestGit(t, ctx, child, "rev-parse", "HEAD")
+		newLeaf := runTestGit(t, ctx, leaf, "rev-parse", "HEAD")
+		if newChild == oldChild || newLeaf == oldLeaf {
+			t.Fatalf("descendant commits did not roll up: child %s, leaf %s", newChild, newLeaf)
+		}
+		wantBranches := []FetchedBranch{{BranchName: "main", CommitHash: newRoot}, {BranchName: "feature", CommitHash: feature}}
+		if !reflect.DeepEqual(result.Branches, wantBranches) {
+			t.Errorf("branches = %+v, want %+v", result.Branches, wantBranches)
+		}
+		wantLinks := []FetchedGitlink{
+			{Path: childPath, ParentCommit: newRoot, CommitHash: newChild},
+			{Path: leafPath, ParentCommit: newChild, CommitHash: newLeaf},
+			{Path: childPath, ParentCommit: feature, CommitHash: historicalChild},
+			{Path: leafPath, ParentCommit: historicalChild, CommitHash: historicalLeaf},
+		}
+		if !reflect.DeepEqual(result.Gitlinks, wantLinks) {
+			t.Errorf("Gitlinks = %+v, want %+v", result.Gitlinks, wantLinks)
+		}
+		for _, link := range wantLinks {
+			sub, ok := result.Submodules.Find(link.Path)
+			if !ok {
+				t.Fatalf("missing fetched submodule %s", link.Path)
+			}
+			if got := runTestGit(t, ctx, host, "--git-dir="+sub.GitDir, "rev-parse", "refs/md/containers/md-test/submodule/pins/"+link.CommitHash); got != link.CommitHash {
+				t.Errorf("pin %s = %s, want %s", link.Path, got, link.CommitHash)
+			}
+			if got := runTestGit(t, ctx, sub.ContainerPath, "rev-parse", "--abbrev-ref", "HEAD"); got != "HEAD" {
+				t.Errorf("submodule %s switched off detached HEAD to %s", link.Path, got)
+			}
+		}
+		// A historical replacement at the same path can point at an object that
+		// is absent from the currently initialized repository.
+		runTestGit(t, ctx, root, "switch", "-q", "feature")
+		runTestGit(t, ctx, root, "config", "--file", ".gitmodules", "submodule.named/dep.url", childSource+"-replacement")
+		runTestGit(t, ctx, root, "add", ".gitmodules")
+		missing := strings.Repeat("1", len(oldChild))
+		runTestGit(t, ctx, root, "update-index", "--cacheinfo", "160000,"+missing+","+childPath)
+		runTestGit(t, ctx, root, "commit", "-qm", "replace child repository")
+		replacement := runTestGit(t, ctx, root, "rev-parse", "HEAD")
+		runTestGit(t, ctx, root, "switch", "-q", "main")
+		afterReplacement, err := c.FetchRecursive(ctx, io.Discard, io.Discard, 0, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(afterReplacement.Branches) != 2 || afterReplacement.Branches[1].CommitHash != replacement {
+			t.Fatalf("replacement branch was not fetched: %+v", afterReplacement.Branches)
+		}
+		if !reflect.DeepEqual(afterReplacement.Gitlinks, wantLinks[:2]) {
+			t.Errorf("Gitlinks with historical replacement = %+v, want %+v", afterReplacement.Gitlinks, wantLinks[:2])
+		}
+		if err := c.removeSubmoduleFetchRefs(ctx, host); err != nil {
+			t.Fatal(err)
+		}
+		for p, sub := range result.Submodules.ParentFirst() {
+			if got := runTestGit(t, ctx, host, "--git-dir="+sub.GitDir, "for-each-ref", "--format=%(refname)", "refs/md/containers/md-test/submodule/"); got != "" {
+				t.Errorf("submodule %s retained owned refs after cleanup: %q", p, got)
+			}
+		}
+	})
 	t.Run("pushSubmodules", func(t *testing.T) {
 		for _, tc := range []struct {
 			name      string
@@ -2652,7 +2816,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 				ct := &Container{Client: testClient(t), Logger: testLogger(t), Name: "md-test"}
 				var stderr bytes.Buffer
 
-				if !t.Run("valid", func(t *testing.T) { //nolint:paralleltest // The rejection case reuses the provisioned container.
+				if !t.Run("valid", func(t *testing.T) {
 					ctx := t.Context()
 					if err := ct.pushSubmodules(ctx, io.Discard, &stderr, filepath.ToSlash(dst), host, tc.tagRegexp, true); err != nil {
 						t.Fatalf("pushSubmodules: %v: %s", err, stderr.String())
@@ -2700,6 +2864,19 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 					if err := ct.pushSubmodules(ctx, io.Discard, &stderr, filepath.ToSlash(dst), host, tc.tagRegexp, true); err != nil {
 						t.Fatalf("repeat pushSubmodules: %v: %s", err, stderr.String())
 					}
+					upstream := filepath.Join(t.TempDir(), "origin.git")
+					runTestGit(t, ctx, "", "clone", "-q", "--bare", host, upstream)
+					runTestGit(t, ctx, host, "remote", "add", "origin", upstream)
+					runTestGit(t, ctx, host, "fetch", "-q", "origin")
+					runTestGit(t, ctx, host, "branch", "--set-upstream-to", "origin/main", "main")
+					runTestGit(t, ctx, host, "remote", "add", ct.Name, dst)
+					ct.Home = t.TempDir()
+					writeTestSSHConfig(t, ct.Home)
+					ct.Runtime = testRunningRuntime(t, ct.Logger)
+					ct.Repos = []Repo{{
+						GitRoot: host, ContainerPath: filepath.ToSlash(dst), Branches: []string{"main"},
+						DefaultRemote: "origin", DefaultBranch: "main",
+					}}
 					// Embedded clones can be staged as undeclared Gitlinks.
 					// In-place modules can still store metadata in their worktrees.
 					for _, name := range []string{"embedded", "in-place"} {
@@ -2707,9 +2884,128 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 					}
 					runTestGit(t, ctx, dst, "add", "embedded")
 					runTestGit(t, ctx, dst, "submodule", "add", "-q", module, "in-place")
-					modules, err := ct.discoverSubmodules(ctx, &Repo{GitRoot: host, ContainerPath: filepath.ToSlash(dst)})
-					if err != nil || len(modules) != 2 || modules[0].path != "dep" || modules[1].path != "dep/nested" {
-						t.Fatalf("discover initialized submodules: %+v, %v", modules, err)
+					tree, err := ct.DiscoverSubmodules(ctx, 0)
+					if err != nil || len(tree) != 1 || len(tree[0].Children) != 1 {
+						t.Fatalf("discover initialized module tree: %+v, %v", tree, err)
+					}
+					leaf, ok := tree.Find("dep/nested")
+					if !ok || leaf.BranchName != "" {
+						t.Fatalf("discover nested detached submodule: %+v", leaf)
+					}
+					child := filepath.Join(dst, "dep", "nested")
+					writeTestFile(t, filepath.Join(child, "new.txt"), "detached pending work\n")
+					snapshot, err := ct.FetchRecursive(ctx, io.Discard, &stderr, 0, nil)
+					if err != nil {
+						t.Fatal(err)
+					}
+					fetched, ok := snapshot.Submodules.Find("dep/nested")
+					if !ok || fetched.CommitHash != nestedTip {
+						t.Fatalf("fetch committed detached HEAD: %+v, %v: %s", fetched, err, stderr.String())
+					}
+					if got := runTestGit(t, ctx, child, "status", "--porcelain"); !strings.Contains(got, "new.txt") {
+						t.Fatalf("read-only fetch changed worktree: %q", got)
+					}
+					// The exact HEAD and Gitlink remain reachable, and no
+					// temporary transfer ref survives.
+					retained := runTestGit(t, ctx, host, "--git-dir="+fetched.GitDir, "for-each-ref", "--format=%(refname) %(objectname)", ct.submoduleFetchRef(""), "refs/md/fetch/")
+					if want := ct.submoduleFetchRef("head") + " " + nestedTip + "\n" + ct.submoduleFetchRef("pins/"+nestedTip) + " " + nestedTip; retained != want {
+						t.Fatalf("retained refs:\n%s\nwant:\n%s", retained, want)
+					}
+					// A container-only module must get an object store without a
+					// host checkout or an invented branch.
+					if err := os.Rename(leaf.GitDir, filepath.Join(t.TempDir(), "old-module")); err != nil {
+						t.Fatal(err)
+					}
+					t.Setenv(fakeSSHFailureMatchEnv, " config --null --list")
+					t.Setenv(fakeSSHFailureStatusEnv, "1")
+					if _, err := ct.FetchRecursive(ctx, io.Discard, &stderr, 0, nil); err == nil {
+						t.Fatal("interrupted module initialization succeeded")
+					}
+					if _, err := os.Stat(filepath.Join(leaf.GitDir, "HEAD")); !os.IsNotExist(err) {
+						t.Fatalf("partial module initialization retained: %v", err)
+					}
+					t.Setenv(fakeSSHFailureMatchEnv, "")
+					snapshot, err = ct.FetchRecursive(ctx, io.Discard, &stderr, 0, &FetchOpts{Commit: true})
+					if err != nil {
+						t.Fatalf("fetch pending detached work: %v: %s", err, stderr.String())
+					}
+					fetched, ok = snapshot.Submodules.Find("dep/nested")
+					if !ok || fetched.CommitHash == nestedTip || fetched.BranchName != "" {
+						t.Fatalf("pending work was not fetched detached: %+v", fetched)
+					}
+					if got := runTestGit(t, ctx, host, "--git-dir="+fetched.GitDir, "for-each-ref", "--format=%(refname)", "refs/heads/"); got != "" {
+						t.Fatalf("fetch invented host branch %q", got)
+					}
+					if got := runTestGit(t, ctx, host, "--git-dir="+fetched.GitDir, "remote", "get-url", "origin"); got != nested {
+						t.Fatalf("missing host publication remote: %q", got)
+					}
+					if got := runTestGit(t, ctx, host, "--git-dir="+fetched.GitDir, "symbolic-ref", "refs/remotes/origin/HEAD"); got != "refs/remotes/origin/main" {
+						t.Fatalf("missing publication default branch: %q", got)
+					}
+					if got := runTestGit(t, ctx, host, "--git-dir="+fetched.GitDir, "rev-parse", "refs/remotes/origin/main"); got != runTestGit(t, ctx, child, "rev-parse", "refs/remotes/origin/main") {
+						t.Fatalf("missing cached upstream: %q", got)
+					}
+					parent := snapshot.Submodules[0]
+					if got := runTestGit(t, ctx, host, "--git-dir="+parent.GitDir, "rev-parse", parent.CommitHash+":nested"); got != fetched.CommitHash {
+						t.Fatalf("parent did not capture fetched child: %s", got)
+					}
+					if got := runTestGit(t, ctx, host, "--git-dir="+fetched.GitDir, "show", fetched.CommitHash+":new.txt"); got != "detached pending work" {
+						t.Fatalf("fetched content = %q", got)
+					}
+					// A rewritten module HEAD need not contain the parent's pinned
+					// commit; collect both object graphs into a fresh host store.
+					pin := fetched.CommitHash
+					runTestGit(t, ctx, child, "checkout", "-q", "--orphan", "rewrite")
+					runTestGit(t, ctx, child, "rm", "-q", "-rf", ".")
+					runTestGit(t, ctx, child, "commit", "-q", "--allow-empty", "-m", "rewritten module")
+					if err := os.Rename(fetched.GitDir, filepath.Join(t.TempDir(), "fetched-module")); err != nil {
+						t.Fatal(err)
+					}
+					snapshot, err = ct.FetchRecursive(ctx, io.Discard, &stderr, 0, nil)
+					if err != nil {
+						t.Fatalf("fetch rewritten HEAD and pinned object: %v: %s", err, stderr.String())
+					}
+					fetched, ok = snapshot.Submodules.Find("dep/nested")
+					edge := FetchedGitlink{Path: "dep/nested", ParentCommit: parent.CommitHash, CommitHash: pin}
+					if !ok || !slices.Contains(snapshot.Gitlinks, edge) || fetched.CommitHash == pin {
+						t.Fatalf("rewritten module snapshots: %+v, %+v", fetched, snapshot.Gitlinks)
+					}
+					if got := runTestGit(t, ctx, host, "--git-dir="+fetched.GitDir, "show", pin+":new.txt"); got != "detached pending work" {
+						t.Fatalf("pinned object unavailable: %q", got)
+					}
+					if tc.name == "full" {
+						// The staged module's path is still a directory in the
+						// committed parent. It becomes a pin after the commit.
+						parentPath := filepath.Join(dst, "dep")
+						if err := os.Mkdir(filepath.Join(parentPath, "replacement"), 0o700); err != nil {
+							t.Fatal(err)
+						}
+						writeTestFile(t, filepath.Join(parentPath, "replacement", "old.txt"), "old directory\n")
+						runTestGit(t, ctx, parentPath, "add", ".")
+						runTestGit(t, ctx, parentPath, "commit", "-qm", "directory before module")
+						before := runTestGit(t, ctx, parentPath, "rev-parse", "HEAD")
+						runTestGit(t, ctx, parentPath, "rm", "-qr", "replacement")
+						source := newRepo("replacement-source")
+						runTestGit(t, ctx, parentPath, "submodule", "add", "-q", "--name", "new-module", source, "replacement")
+						want := runTestGit(t, ctx, source, "rev-parse", "HEAD")
+						for _, opts := range []*FetchOpts{nil, {Commit: true}} {
+							result, err := ct.FetchRecursive(ctx, io.Discard, &stderr, 0, opts)
+							if err != nil {
+								t.Fatalf("fetch directory replacement: %v: %s", err, stderr.String())
+							}
+							const replacement = "dep/replacement"
+							item, ok := result.Submodules.Find(replacement)
+							if !ok || item.CommitHash != want {
+								t.Fatalf("directory replacement snapshot: %+v", item)
+							}
+							edge := FetchedGitlink{Path: replacement, ParentCommit: result.Submodules[0].CommitHash, CommitHash: want}
+							if got := slices.Contains(result.Gitlinks, edge); got != (opts != nil) {
+								t.Fatalf("directory replacement edge retained = %t with opts %+v", got, opts)
+							}
+							if opts == nil && runTestGit(t, ctx, parentPath, "rev-parse", "HEAD") != before {
+								t.Fatal("read-only fetch committed directory replacement")
+							}
+						}
 					}
 				}) {
 					return

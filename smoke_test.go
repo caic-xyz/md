@@ -1555,13 +1555,13 @@ func TestSmokeSubmodules(t *testing.T) {
 			if _, err := ct.Connect(ctx, os.Stdout, os.Stderr, opts); err != nil {
 				t.Fatal(err)
 			}
-			subs, err := ct.discoverSubmodules(ctx, &ct.Repos[0])
-			if err != nil || len(subs) != 2 {
+			subs, err := ct.DiscoverSubmodules(ctx, 0)
+			if err != nil || len(subs) != 1 || len(subs[0].Children) != 1 {
 				t.Fatalf("submodules: %+v, %v", subs, err)
 			}
-			for _, s := range subs {
+			for p, s := range subs.ParentFirst() {
 				if got := runSmokeContainerGit(t, ct, s.ContainerPath, "remote", "get-url", "origin"); got == "" {
-					t.Fatalf("missing origin for %s", s.path)
+					t.Fatalf("missing origin for %s", p)
 				}
 			}
 			idx, err := ct.SelectSubmodule(ctx, 0, hm, "")
@@ -1580,6 +1580,21 @@ func TestSmokeSubmodules(t *testing.T) {
 			if !strings.Contains(diff.String(), "container work") {
 				t.Fatalf("missing child diff: %s", diff.String())
 			}
+			allFetched, err := ct.FetchRecursive(ctx, os.Stdout, os.Stderr, 0, &FetchOpts{Commit: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			fetched, ok := allFetched.Submodules.Find("lib/dep")
+			if !ok || fetched.BranchName != "" {
+				t.Fatalf("detached fetch attached branch: %+v", fetched)
+			}
+			if got := runSmokeGit(t, ctx, hm, "show", fetched.CommitHash+":work.txt"); got != "container work" {
+				t.Fatalf("fetched content %q", got)
+			}
+			if len(allFetched.Branches) != 1 {
+				t.Fatalf("recursive fetch branches = %+v", allFetched.Branches)
+			}
+			runSmokeGit(t, ctx, root, "merge", "--ff-only", allFetched.Branches[0].CommitHash)
 			if err := ct.Pull(ctx, os.Stdout, os.Stderr, idx, &PullOpts{}); err != nil {
 				t.Fatal(err)
 			}
@@ -1610,7 +1625,20 @@ func TestSmokeSubmodules(t *testing.T) {
 			assertSmokeContainerGitRef(t, ct, cp, "refs/remotes/origin/main", hostTip)
 			assertSmokeContainerGitRef(t, ct, cp, containerSyncRefPrefix+"main", childBase)
 
-			// The module store can outlive the host checkout declaration.
+			fetchedRepo, err := ct.FetchRecursive(ctx, os.Stdout, os.Stderr, 0, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			dependency, ok := fetchedRepo.Submodules.Find("lib/dep")
+			if !ok || dependency.CommitHash != hostTip {
+				t.Fatalf("recursive fetch dependency = %+v, want HEAD %s", dependency, hostTip)
+			}
+			if len(fetchedRepo.Gitlinks) != 2 || fetchedRepo.Gitlinks[0].CommitHash != hostTip || fetchedRepo.Gitlinks[1].Path != "lib/dep/inner/leaf" {
+				t.Fatalf("recursive fetch Gitlinks = %+v", fetchedRepo.Gitlinks)
+			}
+
+			// A fetched module can have retained metadata before the host
+			// checkout has declarations for it.
 			runSmokeGit(t, ctx, root, "rm", ".gitmodules")
 			runSmokeGit(t, ctx, hm, "update-ref", "refs/remotes/origin/task", hostTip)
 			if err := ct.SyncDefaultBranch(ctx, 0); err != nil {
