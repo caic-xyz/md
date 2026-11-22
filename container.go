@@ -1291,7 +1291,7 @@ func parseSubmoduleTree(r *Repo, hostDir, out string) (SubmoduleTree, error) {
 			ContainerPath: path.Join(r.ContainerPath, p),
 			BranchName:    fields[i+3],
 			CommitHash:    fields[i+4],
-			name:          fields[i+5],
+			name:          strings.TrimPrefix(fields[i+5], "submodule."),
 			url:           fields[i+6],
 		}
 		if parent == "" {
@@ -3448,45 +3448,32 @@ type submoduleRevision struct {
 }
 
 func readFetchedGitlinks(ctx context.Context, store *git.ObjectStore, commit string, children SubmoduleTree) (map[string]string, error) {
-	args := make([]string, 0, 7+len(children))
-	args = append(args, "--literal-pathspecs", "ls-tree", "-z", "--format=%(objectmode) %(objectname)%x09%(path)", commit, "--", ".gitmodules")
-	for _, s := range children {
-		args = append(args, s.GitlinkPath)
+	paths := make([]string, len(children))
+	for i, s := range children {
+		paths[i] = s.GitlinkPath
 	}
-	out, err := store.RunGit(ctx, args...)
+	tree, err := store.ReadGitlinkTree(ctx, commit, paths...)
 	if err != nil {
 		return nil, err
 	}
-	links := make(map[string]string)
-	var modulesBlob string
-	for record := range strings.SplitSeq(out, "\x00") {
-		mode, value, _ := strings.Cut(record, " ")
-		hash, name, _ := strings.Cut(value, "\t")
-		switch {
-		case mode == "160000":
-			links[name] = hash
-		case name == ".gitmodules" && (mode == "100644" || mode == "100755"):
-			modulesBlob = hash
-		}
-	}
-	if modulesBlob == "" {
-		clear(links)
-	}
-	if len(links) == 0 {
+	links := make(map[string]string, len(tree.Gitlinks))
+	if len(tree.Gitlinks) == 0 || tree.GitmodulesMode != "100644" && tree.GitmodulesMode != "100755" {
 		return links, nil
 	}
-	out, err = store.RunGit(ctx, "config", "--no-includes", "--null", "--blob", modulesBlob, "--list")
+	declarations, err := store.ReadSubmoduleDeclarations(ctx, tree.GitmodulesBlob)
 	if err != nil {
 		return nil, err
 	}
-	cfg := make(map[string]string)
-	for entry := range strings.SplitSeq(out, "\x00") {
-		if key, value, ok := strings.Cut(entry, "\n"); ok {
-			cfg[key] = value
-		}
+	byName := make(map[string]git.SubmoduleDeclaration, len(declarations))
+	for _, declaration := range declarations {
+		byName[declaration.Name] = declaration
+	}
+	for _, link := range tree.Gitlinks {
+		links[link.Path] = link.Commit
 	}
 	for _, s := range children {
-		if cfg[s.name+".path"] != s.GitlinkPath || cfg[s.name+".url"] != s.url {
+		declaration := byName[s.name]
+		if declaration.Path != s.GitlinkPath || declaration.URL != s.url {
 			delete(links, s.GitlinkPath)
 		}
 	}

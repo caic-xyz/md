@@ -206,6 +206,121 @@ func TestRemoteToHTTPS(t *testing.T) {
 }
 
 func TestObjectStore(t *testing.T) {
+	t.Run("ReadGitlinkTree", func(t *testing.T) {
+		ctx := t.Context()
+		root := canonicalTempDir(t)
+		checkout := &Checkout{Root: root, Logger: testLogger(t)}
+		run := func(args ...string) string {
+			out, err := checkout.RunGit(ctx, args...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return out
+		}
+		run("init", "-q", "--initial-branch=main")
+		run("config", "user.name", "Test")
+		run("config", "user.email", "test@example.invalid")
+		// Exercise paths with tabs and newlines directly in the index on Windows too.
+		run("config", "core.protectNTFS", "false")
+		run("commit", "-qm", "base", "--allow-empty")
+		pin := run("rev-parse", "HEAD")
+		const selected = "deps/literal [x]\tline\ncontinued"
+		const nested = "ordinary/inner"
+		for _, path := range []string{selected, nested} {
+			run("update-index", "--add", "--cacheinfo", "160000,"+pin+","+path)
+		}
+		const config = "[submodule \"dependency\"]\n\tpath = ordinary/inner\n"
+		modules := filepath.Join(root, ".gitmodules")
+		if err := os.WriteFile(modules, []byte(config), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		run("add", ".gitmodules")
+		run("commit", "-qm", "add Gitlinks")
+		commit := run("rev-parse", "HEAD")
+		blob := run("rev-parse", "HEAD:.gitmodules")
+		if err := os.WriteFile(modules, []byte("[uncommitted]\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		store := &ObjectStore{GitDir: run("rev-parse", "--absolute-git-dir")}
+
+		t.Run("valid", func(t *testing.T) {
+			t.Parallel()
+			got, err := store.ReadGitlinkTree(t.Context(), commit)
+			want := []Gitlink{{Path: selected, Commit: pin}, {Path: nested, Commit: pin}}
+			if err != nil || !slices.Equal(got.Gitlinks, want) || got.GitmodulesBlob != blob || got.GitmodulesMode != "100644" {
+				t.Fatalf("full Gitlink tree = %+v, %v; want links %+v and .gitmodules %s", got, err, want, blob)
+			}
+			got, err = store.ReadGitlinkTree(t.Context(), commit, selected, "ordinary")
+			if err != nil || !slices.Equal(got.Gitlinks, want[:1]) || got.GitmodulesBlob != blob {
+				t.Fatalf("selected Gitlink tree = %+v, %v; want link %+v and .gitmodules %s", got, err, want[:1], blob)
+			}
+			got, err = store.ReadGitlinkTree(t.Context(), pin)
+			if err != nil || len(got.Gitlinks) != 0 || got.GitmodulesBlob != "" || got.GitmodulesMode != "" {
+				t.Fatalf("empty Gitlink tree = %+v, %v", got, err)
+			}
+		})
+
+		t.Run("error", func(t *testing.T) {
+			t.Parallel()
+			const untrusted = "--unrecognized-confidential-revision"
+			if _, err := store.ReadGitlinkTree(t.Context(), untrusted); err == nil || strings.Contains(err.Error(), untrusted) {
+				t.Fatalf("invalid revision error = %v, want a failure without repository diagnostics", err)
+			}
+		})
+	})
+
+	t.Run("ReadSubmoduleDeclarations", func(t *testing.T) {
+		ctx := t.Context()
+		checkout := &Checkout{Root: canonicalTempDir(t), Logger: testLogger(t)}
+		if _, err := checkout.RunGit(ctx, "init", "-q"); err != nil {
+			t.Fatal(err)
+		}
+		dir, err := checkout.RunGit(ctx, "rev-parse", "--absolute-git-dir")
+		if err != nil {
+			t.Fatal(err)
+		}
+		store := &ObjectStore{GitDir: dir}
+		storeBlob := func(t *testing.T, content string) string {
+			cmd := store.Command(t.Context(), "hash-object", "-w", "--stdin")
+			cmd.Stdin = strings.NewReader(content)
+			out, err := cmd.Output()
+			if err != nil {
+				t.Fatal(err)
+			}
+			return strings.TrimSpace(string(out))
+		}
+		t.Run("valid", func(t *testing.T) {
+			t.Parallel()
+			const selected = "deps/literal [x]\tline\ncontinued"
+			const config = `[submodule "dependency.v1"]
+	path = "deps/literal [x]\tline\ncontinued"
+	url = first
+	url = " https://example.invalid/final "
+[submodule "another name"]
+	path = "deps/literal [x]\tline\ncontinued"
+[submodule "url only"]
+	url = elsewhere
+`
+
+			declarations, err := store.ReadSubmoduleDeclarations(t.Context(), storeBlob(t, config))
+			wantDeclarations := []SubmoduleDeclaration{
+				{Name: "dependency.v1", Path: selected, URL: " https://example.invalid/final "},
+				{Name: "another name", Path: selected},
+				{Name: "url only", URL: "elsewhere"},
+			}
+			if err != nil || !slices.Equal(declarations, wantDeclarations) {
+				t.Fatalf("pinned declarations = %+v, %v; want %+v", declarations, err, wantDeclarations)
+			}
+		})
+		t.Run("error", func(t *testing.T) {
+			t.Parallel()
+			blob := storeBlob(t, "[submodule \"large\"]\n\turl = "+strings.Repeat("a", 1<<20)+"\n")
+			if _, err := store.ReadSubmoduleDeclarations(t.Context(), blob); err == nil || !strings.Contains(err.Error(), "exceed 1 MiB") {
+				t.Fatalf("oversized declaration error = %v, want the declaration limit", err)
+			}
+		})
+	})
+
 	ctx := t.Context()
 	root := filepath.Join(canonicalTempDir(t), "checkout")
 	if err := os.Mkdir(root, 0o750); err != nil {

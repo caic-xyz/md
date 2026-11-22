@@ -7,10 +7,12 @@
 package git
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math"
 	"os"
@@ -19,6 +21,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // DiscoverCheckouts recursively walks root up to maxDepth levels, returning absolute paths of git
@@ -112,6 +115,30 @@ func RemoteToHTTPS(raw string) string {
 type Submodule struct {
 	Name string // submodule name (key in .gitmodules, usually equals Path)
 	Path string // relative path in the worktree
+}
+
+// Gitlink is a submodule pin recorded in a tree. Path is relative to the root
+// of the tree, and Commit is the pinned object ID in the submodule.
+type Gitlink struct {
+	Path   string
+	Commit string
+}
+
+// GitlinkTree contains the Gitlinks and root .gitmodules blob of a Git tree.
+type GitlinkTree struct {
+	Gitlinks []Gitlink
+	// GitmodulesBlob and GitmodulesMode identify the root .gitmodules object.
+	// They are empty when .gitmodules is absent or is not a blob.
+	GitmodulesBlob string
+	GitmodulesMode string
+}
+
+// SubmoduleDeclaration associates a .gitmodules section name with its path
+// and URL. A declaration can omit either value.
+type SubmoduleDeclaration struct {
+	Name string
+	Path string
+	URL  string
 }
 
 // Logger receives structured log records.
@@ -638,6 +665,128 @@ func (s *ObjectStore) DefaultRemote(ctx context.Context) (string, error) {
 // falls back to the first existing remote-tracking branch among main and master.
 func (s *ObjectStore) DefaultBranch(ctx context.Context, remote string) (string, error) {
 	return defaultBranch(ctx, s.RunGit, remote)
+}
+
+// ReadGitlinkTree reads Gitlinks and the root .gitmodules entry at revision.
+// With no paths it walks the entire tree. Otherwise it looks up only the
+// supplied literal paths and .gitmodules, without descending into directories
+// matched by those paths. Use a commit ID to read an immutable revision.
+func (s *ObjectStore) ReadGitlinkTree(ctx context.Context, revision string, paths ...string) (GitlinkTree, error) {
+	args := []string{"ls-tree", "--full-tree", "-r", "-z", "--end-of-options", revision}
+	if len(paths) != 0 {
+		args = append([]string{"--literal-pathspecs", "ls-tree", "--full-tree", "-z", "--end-of-options", revision, "--", ".gitmodules"}, paths...)
+	}
+	var result GitlinkTree
+	err := s.readGitStream(ctx, args, func(stdout io.Reader) error {
+		scanner := bufio.NewScanner(stdout)
+		scanner.Buffer(make([]byte, 4096), 1<<20)
+		scanner.Split(scanGitRecord)
+		for scanner.Scan() {
+			header, file, ok := bytes.Cut(scanner.Bytes(), []byte{'\t'})
+			mode, tail, hasMode := bytes.Cut(header, []byte{' '})
+			kind, hash, hasKind := bytes.Cut(tail, []byte{' '})
+			if !ok || !hasMode || !hasKind || len(mode) == 0 || len(kind) == 0 || len(hash) == 0 {
+				return errors.New("invalid Git tree record")
+			}
+			if bytes.Equal(mode, []byte("160000")) {
+				result.Gitlinks = append(result.Gitlinks, Gitlink{Path: string(file), Commit: string(hash)})
+			}
+			if bytes.Equal(file, []byte(".gitmodules")) && bytes.Equal(kind, []byte("blob")) {
+				result.GitmodulesBlob = string(hash)
+				result.GitmodulesMode = string(mode)
+			}
+		}
+		return scanner.Err()
+	})
+	if err != nil {
+		return GitlinkTree{}, fmt.Errorf("read Git tree: %w", err)
+	}
+	return result, nil
+}
+
+// ReadSubmoduleDeclarations reads the path and URL fields in a .gitmodules
+// blob. Declarations appear in order of their first path or URL field.
+// Repeated fields use the last value. Different names can declare the same path.
+func (s *ObjectStore) ReadSubmoduleDeclarations(ctx context.Context, blob string) ([]SubmoduleDeclaration, error) {
+	const maxDeclarations = 1 << 20
+	var data []byte
+	err := s.readGitStream(ctx, []string{"config", "--no-includes", "--null", "--blob=" + blob, "--list"}, func(stdout io.Reader) error {
+		var err error
+		data, err = io.ReadAll(io.LimitReader(stdout, maxDeclarations+1))
+		if len(data) > maxDeclarations {
+			return errors.New("pinned submodule declarations exceed 1 MiB")
+		}
+		return err
+	})
+	if err != nil {
+		return nil, fmt.Errorf("read pinned .gitmodules: %w", err)
+	}
+	byName := make(map[string]int)
+	var declarations []SubmoduleDeclaration
+	for record := range strings.SplitSeq(string(data), "\x00") {
+		key, value, ok := strings.Cut(record, "\n")
+		if !ok {
+			continue
+		}
+		relativeKey, ok := strings.CutPrefix(key, "submodule.")
+		if !ok {
+			continue
+		}
+		name, field, ok := strings.CutLast(relativeKey, ".")
+		if !ok || field != "path" && field != "url" {
+			continue
+		}
+		i, exists := byName[name]
+		if !exists {
+			i = len(declarations)
+			byName[name] = i
+			declarations = append(declarations, SubmoduleDeclaration{Name: name})
+		}
+		if field == "path" {
+			declarations[i].Path = value
+		} else {
+			declarations[i].URL = value
+		}
+	}
+	return declarations, nil
+}
+
+func scanGitRecord(data []byte, eof bool) (advance int, token []byte, err error) {
+	if i := bytes.IndexByte(data, 0); i >= 0 {
+		return i + 1, data[:i], nil
+	}
+	if eof && len(data) > 0 {
+		return 0, nil, io.ErrUnexpectedEOF
+	}
+	return 0, nil, nil
+}
+
+func (s *ObjectStore) readGitStream(ctx context.Context, args []string, consume func(io.Reader) error) error {
+	commandCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	cmd := s.Command(commandCtx, args...)
+	cmd.WaitDelay = time.Second
+	// Route repository-controlled diagnostics to the null device without a
+	// pipe a descendant could hold open.
+	cmd.Stderr = nil
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	// A Git descendant can retain the pipe after the main process is killed.
+	stop := context.AfterFunc(ctx, func() { _ = stdout.Close() })
+	defer stop()
+	if err := consume(stdout); err != nil {
+		cancel()
+		return errors.Join(err, cmd.Wait(), ctx.Err())
+	}
+	if err := cmd.Wait(); err != nil {
+		return errors.Join(err, ctx.Err())
+	}
+	return nil
 }
 
 func gitCommand(ctx context.Context, dir string, args ...string) *exec.Cmd {
