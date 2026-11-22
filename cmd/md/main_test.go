@@ -663,7 +663,7 @@ func TestCmdDiff(t *testing.T) { //nolint:paralleltest // environment selects re
 	t.Run("all_quiet_checks_every_repository", func(t *testing.T) { //nolint:paralleltest // setup changes the process environment.
 		ct, logPath := setupCmdDiffContainer(t, 2)
 		var stdout, stderr bytes.Buffer
-		err := diffContainerRepos(t.Context(), &stdout, &stderr, ct, 0, true, &md.DiffOpts{Args: []string{"--quiet"}}, true)
+		err := diffContainerRepos(t.Context(), &stdout, &stderr, ct, md.RepoTarget{}, true, &md.DiffOpts{Args: []string{"--quiet"}}, true)
 		exitErr, ok := errors.AsType[*exitCodeError](err)
 		if !ok || exitErr.code != 1 {
 			t.Fatalf("diffContainerRepos() = %v, want silent exit code 1", err)
@@ -796,12 +796,10 @@ func TestFindContainerAndRepoSubmodule(t *testing.T) {
 	if found.Name != ct.Name || idx != 0 {
 		t.Fatalf("found %s repo %d", found.Name, idx)
 	}
-	idx, err = a.selectSyncRepo(t.Context(), found, idx, cf)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := found.Repos[idx]; got.GitRoot != filepath.ToSlash(hm) || got.ContainerPath != filepath.ToSlash(cm) || !slices.Equal(got.Branches, []string{"module"}) {
-		t.Fatalf("selected submodule = %+v", got)
+	wantTarget := md.RepoTarget{Submodule: "dep", Branch: "module"}
+	target, err := selectRepoTarget(t.Context(), found, idx, cf)
+	if err != nil || target != wantTarget || len(found.Repos) != 1 {
+		t.Fatalf("target = %+v, configured mappings = %+v, err = %v", target, found.Repos, err)
 	}
 	// A detached host checkout can select its branch explicitly.
 	runMainTestGit(t, hm, "checkout", "-q", "--detach")
@@ -809,8 +807,13 @@ func TestFindContainerAndRepoSubmodule(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := a.selectSyncRepo(t.Context(), found, idx, cf); err != nil {
-		t.Fatal(err)
+	if target, err := selectRepoTarget(t.Context(), found, idx, cf); err != nil || target != wantTarget {
+		t.Fatalf("detached target = %+v, err = %v", target, err)
+	}
+	cf.repo = &host
+	branch = "main"
+	if target, err := selectRepoTarget(t.Context(), found, idx, cf); err != nil || target != (md.RepoTarget{}) {
+		t.Fatalf("mapped-root target = %+v, err = %v", target, err)
 	}
 	// Unrelated nested repositories must not select the superproject mapping.
 	unrelated := filepath.Join(host, "unrelated")

@@ -524,9 +524,9 @@ func assertSmokeContainerGitRefMissing(t *testing.T, ct *Container, repoPath, re
 	}
 }
 
-func assertSmokeContainerNoDiff(t *testing.T, ct *Container, repoIdx int) {
+func assertSmokeContainerNoDiff(t *testing.T, ct *Container, target RepoTarget) {
 	var stdout, stderr strings.Builder
-	err := ct.Diff(t.Context(), &stdout, &stderr, repoIdx, &DiffOpts{Args: []string{"--exit-code"}})
+	err := ct.Diff(t.Context(), &stdout, &stderr, target, &DiffOpts{Args: []string{"--exit-code"}})
 	if err != nil {
 		t.Fatalf("container diff since synchronization is not empty: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 	}
@@ -947,7 +947,7 @@ func TestSmoke(t *testing.T) {
 					}
 					runSmokeGit(t, t.Context(), repo, "commit", "-q", "-am", "local push")
 
-					backupBranch, err := ct.Push(t.Context(), io.Discard, io.Discard, 0)
+					backupBranch, err := ct.Push(t.Context(), io.Discard, io.Discard, RepoTarget{})
 					if err != nil {
 						t.Fatalf("Push: %v", err)
 					}
@@ -961,12 +961,12 @@ func TestSmoke(t *testing.T) {
 					if got := strings.TrimSpace(out); got != "local-push" {
 						t.Fatalf("container README.md = %q, want local-push", got)
 					}
-					assertSmokeContainerNoDiff(t, ct, 0)
+					assertSmokeContainerNoDiff(t, ct, RepoTarget{})
 
 					if _, err := ct.runCmd(t.Context(), "", ct.SSHCommand(nil, "printf 'container-pull\n' > "+shellQuote(cp+"/README.md"))); err != nil {
 						t.Fatalf("write container README.md: %v", err)
 					}
-					if err := ct.Pull(t.Context(), io.Discard, io.Discard, 0, nil); err != nil {
+					if err := ct.Pull(t.Context(), io.Discard, io.Discard, RepoTarget{}, nil); err != nil {
 						t.Fatalf("Pull: %v", err)
 					}
 					data, err := os.ReadFile(filepath.Join(repo, "README.md")) //nolint:gosec // repo is a test temp dir.
@@ -979,7 +979,7 @@ func TestSmoke(t *testing.T) {
 					if got := runSmokeGit(t, t.Context(), repo, "status", "--short"); got != "" {
 						t.Fatalf("local repo is dirty after Pull:\n%s", got)
 					}
-					assertSmokeContainerNoDiff(t, ct, 0)
+					assertSmokeContainerNoDiff(t, ct, RepoTarget{})
 				})
 
 				t.Run("fork", func(t *testing.T) {
@@ -1395,7 +1395,7 @@ func TestSmoke(t *testing.T) {
 					// transfer.
 					mainCommit := runSmokeGit(t, t.Context(), repo, "rev-parse", "refs/remotes/origin/main")
 					assertSmokeContainerGitRef(t, ct, cp, "refs/remotes/origin/main", mainCommit)
-					assertSmokeContainerNoDiff(t, ct, 0)
+					assertSmokeContainerNoDiff(t, ct, RepoTarget{})
 
 					// Everything md created for the account must belong to `user`: the
 					// base image has no `user`; the specialized build creates it before
@@ -1564,17 +1564,19 @@ func TestSmokeSubmodules(t *testing.T) {
 					t.Fatalf("missing origin for %s", p)
 				}
 			}
-			idx, err := ct.SelectSubmodule(ctx, 0, hm, "")
-			if err != nil {
-				t.Fatal(err)
+			target := RepoTarget{Submodule: "lib/dep"}
+			dep, ok := subs.Find(target.Submodule)
+			if !ok {
+				t.Fatalf("missing discovered submodule %q", target.Submodule)
 			}
-			cp := ct.Repos[idx].ContainerPath
+			assertSmokeContainerNoDiff(t, ct, RepoTarget{Submodule: "lib/dep/inner/leaf", Branch: "main"})
+			cp := dep.ContainerPath
 			script := "printf 'container work\\n' > " + shellQuote(cp+"/work.txt")
 			if _, err := ct.runCmd(ctx, "", ct.SSHCommand(nil, script)); err != nil {
 				t.Fatal(err)
 			}
 			var diff strings.Builder
-			if err := ct.Diff(ctx, &diff, os.Stderr, idx, &DiffOpts{}); err != nil {
+			if err := ct.Diff(ctx, &diff, os.Stderr, target, &DiffOpts{}); err != nil {
 				t.Fatal(err)
 			}
 			if !strings.Contains(diff.String(), "container work") {
@@ -1595,31 +1597,31 @@ func TestSmokeSubmodules(t *testing.T) {
 				t.Fatalf("recursive fetch branches = %+v", allFetched.Branches)
 			}
 			runSmokeGit(t, ctx, root, "merge", "--ff-only", allFetched.Branches[0].CommitHash)
-			if err := ct.Pull(ctx, os.Stdout, os.Stderr, idx, &PullOpts{}); err != nil {
+			if err := ct.Pull(ctx, os.Stdout, os.Stderr, target, &PullOpts{}); err != nil {
 				t.Fatal(err)
 			}
 			if data, err := os.ReadFile(filepath.Join(hm, "work.txt")); err != nil || string(data) != "container work\n" { //nolint:gosec // hm is a test temp dir.
 				t.Fatalf("pulled work: %q, %v", data, err)
 			}
-			assertSmokeContainerNoDiff(t, ct, idx)
+			assertSmokeContainerNoDiff(t, ct, target)
 			if err := os.WriteFile(filepath.Join(hm, "work.txt"), []byte("host work\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			runSmokeGit(t, ctx, hm, "-c", "user.name=Smoke Test", "-c", "user.email=smoke@example.invalid", "commit", "-qam", "host work")
-			if _, err := ct.Push(ctx, os.Stdout, os.Stderr, idx); err != nil {
+			if _, err := ct.Push(ctx, os.Stdout, os.Stderr, target); err != nil {
 				t.Fatal(err)
 			}
 			if got := runSmokeContainerGit(t, ct, cp, "show", "HEAD:work.txt"); got != "host work" {
 				t.Fatalf("pushed content %q", got)
 			}
-			assertSmokeContainerNoDiff(t, ct, idx)
+			assertSmokeContainerNoDiff(t, ct, target)
 			// A superproject push refreshes child cached upstreams while
 			// preserving their branches and independent integration points.
 			hostTip := runSmokeGit(t, ctx, hm, "rev-parse", "HEAD")
 			runSmokeGit(t, ctx, hm, "update-ref", "refs/remotes/origin/main", hostTip)
 			runSmokeGit(t, ctx, root, "commit", "-qam", "updated child gitlink")
 			childBase := runSmokeContainerGit(t, ct, cp, "rev-parse", containerSyncRefPrefix+"main")
-			if _, err := ct.Push(ctx, os.Stdout, os.Stderr, 0); err != nil {
+			if _, err := ct.Push(ctx, os.Stdout, os.Stderr, RepoTarget{}); err != nil {
 				t.Fatal(err)
 			}
 			assertSmokeContainerGitRef(t, ct, cp, "refs/remotes/origin/main", hostTip)

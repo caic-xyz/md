@@ -441,7 +441,7 @@ func setupPullTest(t *testing.T) (ct *Container, hostDir, containerDir string) {
 			DefaultBranch: "main",
 		}},
 	}
-	if err := ct.Pull(ctx, io.Discard, io.Discard, 0, nil); err != nil {
+	if err := ct.Pull(ctx, io.Discard, io.Discard, RepoTarget{}, nil); err != nil {
 		t.Fatalf("initial Pull: %v", err)
 	}
 	return ct, hostDir, containerDir
@@ -1557,7 +1557,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 				ContainerPath: filepath.ToSlash(containerDir),
 			}},
 		}
-		if err := ct.configureContainerRemotes(ctx, io.Discard, io.Discard, 0, true); err != nil {
+		if err := ct.configureContainerRemotes(ctx, io.Discard, io.Discard, &ct.Repos[0], true); err != nil {
 			t.Fatal(err)
 		}
 		if got := runTestGit(t, ctx, containerDir, "config", "--local", "user.name"); got != "Marc-Antoine Ruel" {
@@ -1623,10 +1623,10 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			name string
 			run  func() error
 		}{
-			{name: "Diff", run: func() error { return ct.Diff(ctx, io.Discard, io.Discard, 0, nil) }},
-			{name: "Pull", run: func() error { return ct.Pull(ctx, io.Discard, io.Discard, 0, nil) }},
+			{name: "Diff", run: func() error { return ct.Diff(ctx, io.Discard, io.Discard, RepoTarget{}, nil) }},
+			{name: "Pull", run: func() error { return ct.Pull(ctx, io.Discard, io.Discard, RepoTarget{}, nil) }},
 			{name: "Push", run: func() error {
-				_, err := ct.Push(ctx, io.Discard, io.Discard, 0)
+				_, err := ct.Push(ctx, io.Discard, io.Discard, RepoTarget{})
 				return err
 			}},
 		} {
@@ -1641,9 +1641,20 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 		ct, hostDir, _ := setupPullTest(t)
 		runTestGit(t, ctx, hostDir, "branch", "--unset-upstream", "main")
 
-		err := ct.Diff(ctx, io.Discard, io.Discard, 0, nil)
+		err := ct.Diff(ctx, io.Discard, io.Discard, RepoTarget{}, nil)
 		if err == nil || !strings.Contains(err.Error(), `mapped host branch "main" has no upstream`) || !strings.Contains(err.Error(), "git -C "+shellQuote(hostDir)+" branch --set-upstream-to=origin/main main") {
 			t.Fatalf("Diff error = %v, want missing host upstream repair command", err)
+		}
+	})
+	t.Run("diff_resolves_defaults_without_altering_mapping", func(t *testing.T) { //nolint:paralleltest // setupPullTest uses t.Setenv.
+		ct, _, _ := setupPullTest(t)
+		ct.Repos[0].DefaultBranch = ""
+		configured := ct.Repos[0]
+		if err := ct.Diff(t.Context(), io.Discard, io.Discard, RepoTarget{}, nil); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(ct.Repos[0], configured) {
+			t.Fatalf("configured mapping changed: got %+v, want %+v", ct.Repos[0], configured)
 		}
 	})
 	t.Run("diff_exit_status_flags_report_differences", func(t *testing.T) { //nolint:paralleltest // setupPullTest uses t.Setenv.
@@ -1666,7 +1677,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 					runTestGit(t, t.Context(), hostDir, "push", "-q", "origin", "main")
 				}
 				var stdout, stderr bytes.Buffer
-				err := ct.Diff(t.Context(), &stdout, &stderr, 0, &DiffOpts{Args: test.args})
+				err := ct.Diff(t.Context(), &stdout, &stderr, RepoTarget{}, &DiffOpts{Args: test.args})
 				if got := errors.Is(err, ErrDiffFound); got != test.wantErr {
 					t.Fatalf("Diff error is ErrDiffFound = %v, want %v: %v", got, test.wantErr, err)
 				} else if !test.wantErr && err != nil {
@@ -1688,7 +1699,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 		writeTestFile(t, filepath.Join(containerDir, "shared.txt"), "different\n")
 
 		var stdout, stderr bytes.Buffer
-		err := ct.Diff(ctx, &stdout, &stderr, 0, &DiffOpts{Args: []string{"--exit-code", "--name-only"}})
+		err := ct.Diff(ctx, &stdout, &stderr, RepoTarget{}, &DiffOpts{Args: []string{"--exit-code", "--name-only"}})
 		if !errors.Is(err, ErrDiffFound) {
 			t.Fatalf("Diff error = %v, want ErrDiffFound", err)
 		}
@@ -1823,7 +1834,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			t.Run(test.name, func(t *testing.T) { //nolint:paralleltest // setupPullTest uses t.Setenv.
 				ct, hostDir, containerDir := setupPullTest(t)
 				test.setup(t, ct, hostDir, containerDir)
-				err := ct.Diff(t.Context(), io.Discard, io.Discard, 0, nil)
+				err := ct.Diff(t.Context(), io.Discard, io.Discard, RepoTarget{}, nil)
 				wantCommand := shellQuoteArgs(append([]string{"git", "-C", hostDir}, test.commandArgs...))
 				if err == nil || !strings.Contains(err.Error(), test.wantProblem) || !strings.Contains(err.Error(), wantCommand) {
 					t.Fatalf("Diff error = %v, want problem %q and command %q", err, test.wantProblem, wantCommand)
@@ -1836,7 +1847,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 		runTestGit(t, t.Context(), hostDir, "config", "branch.feature.remote", ".")
 		runTestGit(t, t.Context(), hostDir, "config", "branch.feature.merge", "refs/heads/main")
 
-		err := ct.Diff(t.Context(), io.Discard, io.Discard, 0, nil)
+		err := ct.Diff(t.Context(), io.Discard, io.Discard, RepoTarget{}, nil)
 		wantCommand := shellQuoteArgs([]string{"git", "-C", hostDir, "branch", "--set-upstream-to=origin/main", "feature"})
 		if err == nil || !strings.Contains(err.Error(), `mapped host branch "feature" tracks primary branch "main" locally`) || !strings.Contains(err.Error(), wantCommand) {
 			t.Fatalf("Diff error = %v, want local-primary repair command", err)
@@ -1850,7 +1861,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 		runTestGit(t, t.Context(), hostDir, "config", "branch.main.remote", "md-test")
 		runTestGit(t, t.Context(), hostDir, "remote", "set-url", "md-test", "user@md-test:"+ct.Repos[0].ContainerPath)
 
-		err := ct.Diff(t.Context(), io.Discard, io.Discard, 0, nil)
+		err := ct.Diff(t.Context(), io.Discard, io.Discard, RepoTarget{}, nil)
 		wantCommand := shellQuoteArgs([]string{"git", "-C", hostDir, "branch", "--set-upstream-to=origin/main", "main"})
 		if err == nil || !strings.Contains(err.Error(), wantCommand) {
 			t.Fatalf("Diff error = %v, want resolved legacy default repair command", err)
@@ -1869,7 +1880,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 		ct.Repos[0].DefaultRemote = ""
 		ct.Repos[0].DefaultBranch = ""
 
-		err := ct.Diff(t.Context(), io.Discard, io.Discard, 0, nil)
+		err := ct.Diff(t.Context(), io.Discard, io.Discard, RepoTarget{}, nil)
 		if err == nil || !strings.Contains(err.Error(), `multiple remotes and no "origin"`) {
 			t.Fatalf("Diff error = %v, want ambiguous default diagnostic", err)
 		}
@@ -1895,7 +1906,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			Name:   "md-test",
 			Repos:  []Repo{{Branches: []string{"main"}}},
 		}
-		err = ct.Diff(t.Context(), io.Discard, io.Discard, 0, nil)
+		err = ct.Diff(t.Context(), io.Discard, io.Discard, RepoTarget{}, nil)
 		if err == nil || err.Error() != "Container md-test is stopped. Restart it with: md start" {
 			t.Fatalf("Diff error = %v, want stopped-container guidance", err)
 		}
@@ -2020,7 +2031,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			Name:   "md-test",
 			Repos:  []Repo{{Branches: []string{"main"}}},
 		}
-		err = ct.Diff(t.Context(), io.Discard, io.Discard, 0, nil)
+		err = ct.Diff(t.Context(), io.Discard, io.Discard, RepoTarget{}, nil)
 		if err == nil || !strings.Contains(err.Error(), `inspecting container "md-test"`) || !strings.Contains(err.Error(), "permission denied connecting to runtime socket") {
 			t.Fatalf("Diff error = %v, want runtime inspection diagnostic", err)
 		}
@@ -2033,7 +2044,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 		t.Setenv(fakeSSHFailureMatchEnv, "branch.main.remote")
 		t.Setenv(fakeSSHFailureTextEnv, "ssh: connect to host md-test port 22: Connection refused")
 
-		err := ct.Diff(t.Context(), io.Discard, io.Discard, 0, nil)
+		err := ct.Diff(t.Context(), io.Discard, io.Discard, RepoTarget{}, nil)
 		if err == nil || !strings.Contains(err.Error(), "Connection refused") || strings.Contains(err.Error(), "has no configured upstream") {
 			t.Fatalf("Diff error = %v, want classified SSH failure", err)
 		}
@@ -2043,7 +2054,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 		missingPath := filepath.ToSlash(filepath.Join(t.TempDir(), "missing"))
 		ct.Repos[0].ContainerPath = missingPath
 
-		err := ct.Diff(t.Context(), io.Discard, io.Discard, 0, nil)
+		err := ct.Diff(t.Context(), io.Discard, io.Discard, RepoTarget{}, nil)
 		if err == nil || !strings.Contains(err.Error(), missingPath) || strings.Contains(err.Error(), "has no configured upstream") {
 			t.Fatalf("Diff error = %v, want classified container path failure", err)
 		}
@@ -2063,7 +2074,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			t.Run(test.name, func(t *testing.T) { //nolint:paralleltest // setupPullTest uses t.Setenv.
 				ct, _, containerDir := setupPullTest(t)
 				test.setup(t, containerDir)
-				err := ct.Diff(t.Context(), io.Discard, io.Discard, 0, nil)
+				err := ct.Diff(t.Context(), io.Discard, io.Discard, RepoTarget{}, nil)
 				if err == nil || !strings.Contains(err.Error(), "run md pull or md push") {
 					t.Fatalf("Diff error = %v, want upstream repair guidance", err)
 				}
@@ -2075,7 +2086,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 		t.Setenv(fakeSSHFailureMatchEnv, "GIT_OPTIONAL_LOCKS=0")
 		t.Setenv(fakeSSHFailureTextEnv, "ssh: connection reset by peer")
 
-		err := ct.Diff(t.Context(), io.Discard, io.Discard, 0, nil)
+		err := ct.Diff(t.Context(), io.Discard, io.Discard, RepoTarget{}, nil)
 		if err == nil || !strings.Contains(err.Error(), `running diff in container "md-test" over SSH`) || !strings.Contains(err.Error(), "connection reset by peer") {
 			t.Fatalf("Diff error = %v, want final SSH diagnostic", err)
 		}
@@ -2089,7 +2100,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 		t.Setenv(fakeSSHFailureStatusEnv, "1")
 		t.Setenv(fakeSSHFailureTextEnv, "fatal: simulated remote Git failure")
 
-		err := ct.Diff(t.Context(), io.Discard, io.Discard, 0, &DiffOpts{Args: []string{"--exit-code"}})
+		err := ct.Diff(t.Context(), io.Discard, io.Discard, RepoTarget{}, &DiffOpts{Args: []string{"--exit-code"}})
 		if err == nil || errors.Is(err, ErrDiffFound) || !strings.Contains(err.Error(), `running diff in container "md-test" over SSH`) || !strings.Contains(err.Error(), "fatal: simulated remote Git failure") {
 			t.Fatalf("Diff error = %v, want wrapped remote Git diagnostic", err)
 		}
@@ -2104,7 +2115,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 		t.Setenv(fakeSSHFailureTextEnv, "warning: simulated Git warning")
 		var stderr bytes.Buffer
 
-		err := ct.Diff(t.Context(), io.Discard, &stderr, 0, &DiffOpts{Args: []string{"--quiet"}})
+		err := ct.Diff(t.Context(), io.Discard, &stderr, RepoTarget{}, &DiffOpts{Args: []string{"--quiet"}})
 		if !errors.Is(err, ErrDiffFound) {
 			t.Fatalf("Diff error = %v, want ErrDiffFound", err)
 		}
@@ -2119,14 +2130,14 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 		runTestGit(t, ctx, hostDir, "fetch", "-q", "origin", "release")
 		runTestGit(t, ctx, hostDir, "branch", "--set-upstream-to=origin/release", "main")
 
-		err := ct.Diff(ctx, io.Discard, io.Discard, 0, nil)
+		err := ct.Diff(ctx, io.Discard, io.Discard, RepoTarget{}, nil)
 		if err == nil || !strings.Contains(err.Error(), `upstream changed from "origin/main" in the container to "origin/release" on the host`) || !strings.Contains(err.Error(), "run md pull or md push") {
 			t.Fatalf("Diff error = %v, want changed upstream guidance", err)
 		}
 		if got := runTestGit(t, ctx, containerDir, "config", "--get", "branch.main.merge"); got != "refs/heads/main" {
 			t.Fatalf("container branch merge ref after Diff = %q, want unchanged refs/heads/main", got)
 		}
-		if err := ct.Pull(ctx, io.Discard, io.Discard, 0, nil); err != nil {
+		if err := ct.Pull(ctx, io.Discard, io.Discard, RepoTarget{}, nil); err != nil {
 			t.Fatalf("Pull after upstream change: %v", err)
 		}
 		if got := runTestGit(t, ctx, containerDir, "config", "--get", "branch.main.remote"); got != "origin" {
@@ -2144,7 +2155,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 		runTestGit(t, ctx, hostDir, "fetch", "-q", "origin", "release")
 		runTestGit(t, ctx, hostDir, "branch", "--set-upstream-to=origin/release", "feature")
 
-		err := ct.Diff(ctx, io.Discard, io.Discard, 0, nil)
+		err := ct.Diff(ctx, io.Discard, io.Discard, RepoTarget{}, nil)
 		if err == nil || !strings.Contains(err.Error(), `mapped branch "feature" upstream changed`) || !strings.Contains(err.Error(), "run md pull or md push") {
 			t.Fatalf("Diff error = %v, want changed extra-branch upstream guidance", err)
 		}
@@ -2202,18 +2213,18 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 		runTestGit(t, ctx, hostDir, "config", "branch.main.remote", ".")
 		runTestGit(t, ctx, hostDir, "config", "branch.main.merge", "refs/heads/migration")
 
-		if err := ct.Pull(ctx, io.Discard, io.Discard, 0, nil); err != nil {
+		if err := ct.Pull(ctx, io.Discard, io.Discard, RepoTarget{}, nil); err != nil {
 			t.Fatalf("Pull after local upstream change: %v", err)
 		}
 		var stdout bytes.Buffer
-		if err := ct.Diff(ctx, &stdout, io.Discard, 0, &DiffOpts{Args: []string{"--name-only"}, Full: true}); err != nil {
+		if err := ct.Diff(ctx, &stdout, io.Discard, RepoTarget{}, &DiffOpts{Args: []string{"--name-only"}, Full: true}); err != nil {
 			t.Fatal(err)
 		}
 		if got := strings.TrimSpace(stdout.String()); got != "shared.txt" {
 			t.Fatalf("full diff --name-only = %q, want shared.txt", got)
 		}
 		stdout.Reset()
-		if err := ct.Diff(ctx, &stdout, io.Discard, 0, &DiffOpts{Args: []string{"--name-only"}}); err != nil {
+		if err := ct.Diff(ctx, &stdout, io.Discard, RepoTarget{}, &DiffOpts{Args: []string{"--name-only"}}); err != nil {
 			t.Fatal(err)
 		}
 		if got := strings.TrimSpace(stdout.String()); got != "" {
@@ -2238,7 +2249,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 		runTestGit(t, ctx, containerDir, "commit", "-q", "-m", "turn")
 
 		var stdout bytes.Buffer
-		if err := ct.Diff(ctx, &stdout, io.Discard, 0, &DiffOpts{Args: []string{"--name-only"}}); err != nil {
+		if err := ct.Diff(ctx, &stdout, io.Discard, RepoTarget{}, &DiffOpts{Args: []string{"--name-only"}}); err != nil {
 			t.Fatal(err)
 		}
 		if got := strings.TrimSpace(stdout.String()); got != "turn.txt" {
@@ -2249,14 +2260,14 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 		runTestGit(t, ctx, containerDir, "add", ".")
 		runTestGit(t, ctx, containerDir, "commit", "-q", "--amend", "--no-edit")
 		stdout.Reset()
-		if err := ct.Diff(ctx, &stdout, io.Discard, 0, &DiffOpts{Args: []string{"--name-only"}}); err != nil {
+		if err := ct.Diff(ctx, &stdout, io.Discard, RepoTarget{}, &DiffOpts{Args: []string{"--name-only"}}); err != nil {
 			t.Fatal(err)
 		}
 		if got, want := strings.TrimSpace(stdout.String()), "amended.txt\nturn.txt"; got != want {
 			t.Fatalf("diff --name-only after amend = %q, want %q", got, want)
 		}
 		stdout.Reset()
-		if err := ct.Diff(ctx, &stdout, io.Discard, 0, &DiffOpts{Args: []string{"--name-only"}, Full: true}); err != nil {
+		if err := ct.Diff(ctx, &stdout, io.Discard, RepoTarget{}, &DiffOpts{Args: []string{"--name-only"}, Full: true}); err != nil {
 			t.Fatal(err)
 		}
 		if got, want := strings.TrimSpace(stdout.String()), "amended.txt\nshared.txt\nturn.txt"; got != want {
@@ -2280,13 +2291,32 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 		runTestGit(t, ctx, cm, "update-ref", containerSyncRefPrefix+"main", "main")
 		runTestGit(t, ctx, cm, "checkout", "-q", "--detach")
 		ct.Repos = []Repo{{GitRoot: host, ContainerPath: filepath.ToSlash(dst), Branches: []string{"main"}}}
-		idx, err := ct.SelectSubmodule(ctx, 0, hm, "")
-		if err != nil {
-			t.Fatal(err)
+		configured := slices.Clone(ct.Repos)
+		assertMappings := func() {
+			if !reflect.DeepEqual(ct.Repos, configured) {
+				t.Fatalf("configured mappings changed: got %+v, want %+v", ct.Repos, configured)
+			}
 		}
+		runTestGit(t, ctx, "", "init", "-q", filepath.Join(host, "standalone"))
+		for _, test := range []struct {
+			target RepoTarget
+			err    string
+		}{
+			{RepoTarget{Branch: "main"}, "branch override requires a submodule"},
+			{RepoTarget{Submodule: "../dep"}, "invalid submodule path"},
+			{RepoTarget{Submodule: "lib/../lib/dep"}, "invalid submodule path"},
+			{RepoTarget{Submodule: "lib"}, "not an initialized submodule worktree"},
+			{RepoTarget{Submodule: "standalone"}, "is not a submodule"},
+		} {
+			if err := ct.Diff(ctx, io.Discard, io.Discard, test.target, nil); err == nil || !strings.Contains(err.Error(), test.err) {
+				t.Errorf("Diff(%+v) = %v, want %q", test.target, err, test.err)
+			}
+			assertMappings()
+		}
+		target := RepoTarget{Submodule: "lib/dep"}
 		writeTestFile(t, filepath.Join(cm, "work.txt"), "container work\n")
 		var diff bytes.Buffer
-		if err := ct.Diff(ctx, &diff, io.Discard, idx, &DiffOpts{Args: []string{"--name-only"}}); err != nil {
+		if err := ct.Diff(ctx, &diff, io.Discard, target, &DiffOpts{Args: []string{"--name-only"}}); err != nil {
 			t.Fatal(err)
 		}
 		if !strings.Contains(diff.String(), "work.txt") {
@@ -2296,39 +2326,35 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			t.Fatalf("diff attached detached HEAD to %q", got)
 		}
 		diff.Reset()
-		if err := ct.Diff(ctx, &diff, io.Discard, idx, &DiffOpts{Args: []string{"--name-only"}, Full: true}); err != nil {
+		if err := ct.Diff(ctx, &diff, io.Discard, target, &DiffOpts{Args: []string{"--name-only"}, Full: true}); err != nil {
 			t.Fatal(err)
 		}
 		if !strings.Contains(diff.String(), "work.txt") {
 			t.Fatalf("missing full submodule diff: %s", diff.String())
 		}
 
-		if err := ct.Pull(ctx, io.Discard, io.Discard, idx, nil); err != nil {
+		if err := ct.Pull(ctx, io.Discard, io.Discard, target, nil); err != nil {
 			t.Fatal(err)
 		}
 		if got, err := os.ReadFile(filepath.Join(hm, "work.txt")); err != nil || string(got) != "container work\n" { //nolint:gosec // private test checkout.
 			t.Fatalf("pulled work: %q, %v", got, err)
 		}
 
-		idx, err = ct.SelectSubmodule(ctx, 0, hm, "")
-		if err != nil {
-			t.Fatal(err)
-		}
 		diff.Reset()
-		if err := ct.Diff(ctx, &diff, io.Discard, idx, &DiffOpts{Args: []string{"--name-only"}}); err != nil {
+		if err := ct.Diff(ctx, &diff, io.Discard, target, &DiffOpts{Args: []string{"--name-only"}}); err != nil {
 			t.Fatal(err)
 		}
 		if diff.Len() != 0 {
-			t.Fatalf("diff after reselecting pulled submodule: %s", diff.String())
+			t.Fatalf("diff after pulling submodule: %s", diff.String())
 		}
 		writeTestFile(t, filepath.Join(hm, "host.txt"), "host work\n")
 		runTestGit(t, ctx, hm, "add", ".")
 		runTestGit(t, ctx, hm, "commit", "-qm", "host work")
-		if _, err := ct.Push(ctx, io.Discard, io.Discard, idx); err != nil {
+		if _, err := ct.Push(ctx, io.Discard, io.Discard, target); err != nil {
 			t.Fatal(err)
 		}
 		diff.Reset()
-		if err := ct.Diff(ctx, &diff, io.Discard, idx, &DiffOpts{Args: []string{"--name-only"}}); err != nil {
+		if err := ct.Diff(ctx, &diff, io.Discard, target, &DiffOpts{Args: []string{"--name-only"}}); err != nil {
 			t.Fatal(err)
 		}
 		if diff.Len() != 0 {
@@ -2336,7 +2362,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 		}
 		runTestGit(t, ctx, cm, "checkout", "-q", "--detach")
 		diff.Reset()
-		if err := ct.Diff(ctx, &diff, io.Discard, idx, &DiffOpts{Args: []string{"--name-only"}}); err != nil {
+		if err := ct.Diff(ctx, &diff, io.Discard, target, &DiffOpts{Args: []string{"--name-only"}}); err != nil {
 			t.Fatal(err)
 		}
 		if diff.Len() != 0 {
@@ -2345,17 +2371,28 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 		// A new host branch can be pushed even when it was absent at startup.
 		runTestGit(t, ctx, hm, "switch", "-qc", "new-work")
 		runTestGit(t, ctx, hm, "branch", "--set-upstream-to=origin/main", "new-work")
-		idx, err = ct.SelectSubmodule(ctx, 0, hm, "")
-		if err != nil {
-			t.Fatal(err)
-		}
 		var missingBranch bytes.Buffer
-		if err := ct.Pull(ctx, io.Discard, &missingBranch, idx, nil); err == nil || !strings.Contains(missingBranch.String(), "run md push") {
+		if err := ct.Pull(ctx, io.Discard, &missingBranch, target, nil); err == nil || !strings.Contains(missingBranch.String(), "run md push") {
 			t.Fatalf("missing container branch pull: %v, %s", err, missingBranch.String())
 		}
-		if _, err := ct.Push(ctx, io.Discard, io.Discard, idx); err != nil {
+		if _, err := ct.Push(ctx, io.Discard, io.Discard, target); err != nil {
 			t.Fatal(err)
 		}
+		assertMappings()
+		runTestGit(t, ctx, hm, "switch", "-q", "--detach")
+		if err := ct.Diff(ctx, io.Discard, io.Discard, target, nil); err == nil || !strings.Contains(err.Error(), "use -branch") {
+			t.Fatalf("Diff with detached host and implicit branch = %v", err)
+		}
+		target.Branch = "new-work"
+		if err := ct.Diff(ctx, io.Discard, io.Discard, target, nil); err != nil {
+			t.Fatal(err)
+		}
+		assertMappings()
+		runTestGit(t, ctx, cm, "update-ref", "-d", containerSyncRefPrefix+"HEAD")
+		if err := ct.Diff(ctx, io.Discard, io.Discard, target, nil); err == nil || !strings.Contains(err.Error(), "submodule integration point is missing") {
+			t.Fatalf("Diff without a provisioned submodule base = %v", err)
+		}
+		assertMappings()
 		if err := ct.removeSubmoduleRemotes(ctx, &ct.Repos[0]); err != nil {
 			t.Fatal(err)
 		}
@@ -2387,12 +2424,9 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 		}
 		runTestGit(t, ctx, host, "remote", "add", ct.Name, "user@"+ct.Name+":"+filepath.ToSlash(dst))
 		ct.Repos = []Repo{{GitRoot: host, ContainerPath: filepath.ToSlash(dst), Branches: []string{"main"}}}
-		idx, err := ct.SelectSubmodule(ctx, 0, hm, "")
-		if err != nil {
-			t.Fatal(err)
-		}
+		target := RepoTarget{Submodule: "dep"}
 		var initial bytes.Buffer
-		if err := ct.Diff(ctx, &initial, io.Discard, idx, &DiffOpts{Args: []string{"--name-only"}}); err != nil {
+		if err := ct.Diff(ctx, &initial, io.Discard, target, &DiffOpts{Args: []string{"--name-only"}}); err != nil {
 			t.Fatal(err)
 		}
 		if initial.Len() != 0 {
@@ -2402,14 +2436,14 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 		runTestGit(t, ctx, cm, "add", ".")
 		runTestGit(t, ctx, cm, "commit", "-qm", "detached work")
 		var diff bytes.Buffer
-		if err := ct.Diff(ctx, &diff, io.Discard, idx, &DiffOpts{Args: []string{"--name-only"}}); err != nil {
+		if err := ct.Diff(ctx, &diff, io.Discard, target, &DiffOpts{Args: []string{"--name-only"}}); err != nil {
 			t.Fatal(err)
 		}
 		if got := strings.TrimSpace(diff.String()); got != "work.txt" {
 			t.Fatalf("pinned diff = %q", got)
 		}
 		var stderr bytes.Buffer
-		if err := ct.Pull(ctx, io.Discard, &stderr, idx, nil); err == nil || !strings.Contains(stderr.String(), "not an ancestor") {
+		if err := ct.Pull(ctx, io.Discard, &stderr, target, nil); err == nil || !strings.Contains(stderr.String(), "not an ancestor") {
 			t.Fatalf("diverged detached pull = %v", err)
 		}
 		for _, root := range []string{hm, cm} {
@@ -2419,7 +2453,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 		}
 		runTestGit(t, ctx, cm, "switch", "-q", "main")
 		diff.Reset()
-		if err := ct.Diff(ctx, &diff, io.Discard, idx, &DiffOpts{Args: []string{"--name-only"}}); err != nil {
+		if err := ct.Diff(ctx, &diff, io.Discard, target, &DiffOpts{Args: []string{"--name-only"}}); err != nil {
 			t.Fatal(err)
 		}
 		if diff.Len() != 0 {
@@ -2458,7 +2492,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 		// Fetching makes the commits durable on the host without acknowledging
 		// them as integrated into its branch.
 		var stdout bytes.Buffer
-		if err := ct.Diff(ctx, &stdout, io.Discard, 0, &DiffOpts{Args: []string{"--name-only"}}); err != nil {
+		if err := ct.Diff(ctx, &stdout, io.Discard, RepoTarget{}, &DiffOpts{Args: []string{"--name-only"}}); err != nil {
 			t.Fatal(err)
 		}
 		if got, want := strings.TrimSpace(stdout.String()), "committed.txt\npending.txt"; got != want {
@@ -2473,7 +2507,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 		runTestGit(t, ctx, hostDir, "remote", "add", "publish", publishDir)
 		runTestGit(t, ctx, hostDir, "config", "branch.main.pushRemote", "publish")
 
-		if err := ct.Pull(ctx, io.Discard, io.Discard, 0, nil); err != nil {
+		if err := ct.Pull(ctx, io.Discard, io.Discard, RepoTarget{}, nil); err != nil {
 			t.Fatalf("Pull after push remote change: %v", err)
 		}
 		if got := runTestGit(t, ctx, containerDir, "config", "--get", "branch.main.pushRemote"); got != "publish" {
@@ -3542,7 +3576,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			}
 			rebaseHead := runTestGit(t, ctx, hostDir, "rev-parse", "HEAD")
 
-			err := ct.Pull(ctx, io.Discard, io.Discard, 0, nil)
+			err := ct.Pull(ctx, io.Discard, io.Discard, RepoTarget{}, nil)
 			if err == nil || !strings.Contains(err.Error(), "rebase is already in progress") {
 				t.Fatalf("Pull error = %v, want existing rebase error", err)
 			}
@@ -3566,7 +3600,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			writeTestFile(t, filepath.Join(containerDir, "shared.txt"), "container v2\n")
 			runTestGit(t, ctx, containerDir, "commit", "-q", "--amend", "-am", "container v2")
 
-			err := ct.Pull(ctx, io.Discard, io.Discard, 0, nil)
+			err := ct.Pull(ctx, io.Discard, io.Discard, RepoTarget{}, nil)
 			if err == nil || !strings.Contains(err.Error(), "pending changes on branch main locally") {
 				t.Fatalf("Pull error = %v, want pending changes on branch main", err)
 			}
@@ -3583,7 +3617,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			runTestGit(t, ctx, containerDir, "add", ".")
 			runTestGit(t, ctx, containerDir, "commit", "-q", "-m", "container")
 
-			if err := ct.Pull(ctx, io.Discard, io.Discard, 0, nil); err != nil {
+			if err := ct.Pull(ctx, io.Discard, io.Discard, RepoTarget{}, nil); err != nil {
 				t.Fatalf("Pull with untracked host file: %v", err)
 			}
 			if got := runTestGit(t, ctx, hostDir, "show", "refs/heads/main:container.txt"); got != "container" {
@@ -3604,7 +3638,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			runTestGit(t, ctx, hostDir, "reset", "--hard", "origin/main")
 			runTestGit(t, ctx, hostDir, "branch", "md-test/main", "origin/main")
 
-			if err := ct.Pull(ctx, io.Discard, io.Discard, 0, nil); err != nil {
+			if err := ct.Pull(ctx, io.Discard, io.Discard, RepoTarget{}, nil); err != nil {
 				t.Fatalf("Pull with shadowing local branch: %v", err)
 			}
 			if got := runTestGit(t, ctx, hostDir, "rev-parse", "refs/heads/main"); got != containerTip {
@@ -3624,7 +3658,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			runTestGit(t, ctx, hostDir, "tag", "main", "refs/remotes/md-test/main")
 			runTestGit(t, ctx, hostDir, "switch", "-q", "-c", "other", "origin/main")
 
-			if err := ct.Pull(ctx, io.Discard, io.Discard, 0, nil); err != nil {
+			if err := ct.Pull(ctx, io.Discard, io.Discard, RepoTarget{}, nil); err != nil {
 				t.Fatalf("Pull with shadowing tag: %v", err)
 			}
 			if got := runTestGit(t, ctx, hostDir, "show", "refs/heads/main:host.txt"); got != "host" {
@@ -3649,7 +3683,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			originalHead := runTestGit(t, ctx, hostDir, "rev-parse", "origin/main")
 			runTestGit(t, ctx, hostDir, "switch", "-q", "--detach", originalHead)
 
-			if err := ct.Pull(ctx, io.Discard, io.Discard, 0, nil); err != nil {
+			if err := ct.Pull(ctx, io.Discard, io.Discard, RepoTarget{}, nil); err != nil {
 				t.Fatalf("Pull from detached HEAD: %v", err)
 			}
 			if got := runTestGit(t, ctx, hostDir, "branch", "--show-current"); got != "" {
@@ -3677,7 +3711,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			runTestGit(t, ctx, hostDir, "switch", "-q", "-c", "other", "origin/main")
 
 			var stderr bytes.Buffer
-			err := ct.Pull(ctx, io.Discard, &stderr, 0, nil)
+			err := ct.Pull(ctx, io.Discard, &stderr, RepoTarget{}, nil)
 			if err == nil || !strings.Contains(err.Error(), "rebasing branch main") {
 				t.Fatalf("Pull error = %v, want named rebase failure; stderr:\n%s", err, stderr.String())
 			}
@@ -3722,7 +3756,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			runTestGit(t, ctx, hostDir, "commit", "-q", "-am", "host feature")
 			runTestGit(t, ctx, hostDir, "switch", "-q", "main")
 
-			if err := ct.Pull(ctx, io.Discard, io.Discard, 0, nil); err == nil || !strings.Contains(err.Error(), "rebasing branch feature") {
+			if err := ct.Pull(ctx, io.Discard, io.Discard, RepoTarget{}, nil); err == nil || !strings.Contains(err.Error(), "rebasing branch feature") {
 				t.Fatalf("Pull error = %v, want feature rebase failure", err)
 			}
 			for _, branch := range []string{"main", "feature"} {
@@ -3737,7 +3771,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			containerTip := runTestGit(t, ctx, containerDir, "rev-parse", "main")
 			runTestGit(t, ctx, hostDir, "reset", "--hard", "origin/main")
 
-			if err := ct.Pull(ctx, io.Discard, io.Discard, 0, nil); err != nil {
+			if err := ct.Pull(ctx, io.Discard, io.Discard, RepoTarget{}, nil); err != nil {
 				t.Fatalf("Pull after host reset: %v", err)
 			}
 			if got := runTestGit(t, ctx, hostDir, "rev-parse", "main"); got != containerTip {
@@ -3751,7 +3785,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			runTestGit(t, ctx, containerDir, "add", ".")
 			runTestGit(t, ctx, containerDir, "commit", "-q", "-m", "container v2")
 
-			if err := ct.Pull(ctx, io.Discard, io.Discard, 0, nil); err != nil {
+			if err := ct.Pull(ctx, io.Discard, io.Discard, RepoTarget{}, nil); err != nil {
 				t.Fatalf("second Pull: %v", err)
 			}
 			if got := runTestGit(t, ctx, hostDir, "show", "main:container.txt"); got != "container v2" {
@@ -3764,7 +3798,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			writeTestFile(t, filepath.Join(containerDir, "shared.txt"), "container v2\n")
 			runTestGit(t, ctx, containerDir, "commit", "-q", "--amend", "-am", "container v2")
 
-			if err := ct.Pull(ctx, io.Discard, io.Discard, 0, nil); err != nil {
+			if err := ct.Pull(ctx, io.Discard, io.Discard, RepoTarget{}, nil); err != nil {
 				t.Fatalf("Pull after amend: %v", err)
 			}
 			if got := runTestGit(t, ctx, hostDir, "show", "main:shared.txt"); got != "container v2" {
@@ -3780,7 +3814,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			writeTestFile(t, filepath.Join(containerDir, "shared.txt"), "container v2\n")
 			runTestGit(t, ctx, containerDir, "commit", "-q", "--amend", "-am", "container v2")
 
-			if err := ct.Pull(ctx, io.Discard, io.Discard, 0, nil); err != nil {
+			if err := ct.Pull(ctx, io.Discard, io.Discard, RepoTarget{}, nil); err != nil {
 				t.Fatalf("Pull after amend: %v", err)
 			}
 			if got := runTestGit(t, ctx, hostDir, "show", "main:shared.txt"); got != "container v2" {
@@ -3800,7 +3834,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			writeTestFile(t, filepath.Join(containerDir, "shared.txt"), "rewritten container\n")
 			runTestGit(t, ctx, containerDir, "commit", "-q", "--amend", "-am", "rewritten container")
 
-			if err := ct.Pull(ctx, io.Discard, io.Discard, 0, nil); err != nil {
+			if err := ct.Pull(ctx, io.Discard, io.Discard, RepoTarget{}, nil); err != nil {
 				t.Fatalf("Pull with independently divergent host history: %v", err)
 			}
 			if got := runTestGit(t, ctx, hostDir, "show", "refs/heads/main:shared.txt"); got != "rewritten container" {
@@ -3854,7 +3888,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 				}},
 			}
 			var stdout, stderr bytes.Buffer
-			if err := ct.Pull(ctx, &stdout, &stderr, 0, nil); err != nil {
+			if err := ct.Pull(ctx, &stdout, &stderr, RepoTarget{}, nil); err != nil {
 				t.Fatalf("Pull: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 			}
 			if got := runTestGit(t, ctx, containerDir, "rev-parse", "main"); got != containerCommit {
@@ -3940,7 +3974,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			installRejectingHooks(t, containerDir)
 			writeTestFile(t, filepath.Join(containerDir, "container.txt"), "container\n")
 
-			err := ct.Pull(ctx, io.Discard, io.Discard, 0, nil)
+			err := ct.Pull(ctx, io.Discard, io.Discard, RepoTarget{}, nil)
 			if err == nil || !strings.Contains(err.Error(), "committing in container") {
 				t.Fatalf("Pull with rejecting hooks error = %v, want a committing error", err)
 			}
@@ -3954,7 +3988,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			installRejectingHooks(t, containerDir)
 			writeTestFile(t, filepath.Join(containerDir, "container.txt"), "container\n")
 
-			if err := ct.Pull(ctx, io.Discard, io.Discard, 0, &PullOpts{NoVerify: true}); err != nil {
+			if err := ct.Pull(ctx, io.Discard, io.Discard, RepoTarget{}, &PullOpts{NoVerify: true}); err != nil {
 				t.Fatalf("Pull with NoVerify: %v", err)
 			}
 			if got := runTestGit(t, ctx, hostDir, "show", "main:container.txt"); got != "container" {
@@ -4014,7 +4048,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 				}},
 			}
 			var stdout, stderr bytes.Buffer
-			if err := ct.Pull(ctx, &stdout, &stderr, 0, nil); err != nil {
+			if err := ct.Pull(ctx, &stdout, &stderr, RepoTarget{}, nil); err != nil {
 				t.Fatalf("Pull: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 			}
 			if got := strings.Count(log.String(), `cmd="[git fetch -q md-test`); got != 1 {
@@ -4054,7 +4088,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			runTestGit(t, ctx, containerDir, "switch", "-q", "main")
 
 			var stderr bytes.Buffer
-			err := ct.Pull(ctx, io.Discard, &stderr, 0, nil)
+			err := ct.Pull(ctx, io.Discard, &stderr, RepoTarget{}, nil)
 			if err == nil || !strings.Contains(err.Error(), "integrating branch feature") {
 				t.Fatalf("Pull error = %v, want feature integration failure; stderr:\n%s", err, stderr.String())
 			}
@@ -4131,8 +4165,8 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 				name string
 				run  func() error
 			}{
-				{name: "Diff", run: func() error { return ct.Diff(ctx, io.Discard, io.Discard, 0, nil) }},
-				{name: "Pull", run: func() error { return ct.Pull(ctx, io.Discard, io.Discard, 0, nil) }},
+				{name: "Diff", run: func() error { return ct.Diff(ctx, io.Discard, io.Discard, RepoTarget{}, nil) }},
+				{name: "Pull", run: func() error { return ct.Pull(ctx, io.Discard, io.Discard, RepoTarget{}, nil) }},
 			} {
 				err := op.run()
 				if err == nil || !strings.Contains(err.Error(), `mapped host branch "multiple_branches" no longer exists`) {
@@ -4159,7 +4193,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 							runTestGit(t, ctx, hostDir, "commit", "-q", "-am", "host advance")
 						}
 					}
-					backup, err := ct.Push(ctx, io.Discard, io.Discard, 0)
+					backup, err := ct.Push(ctx, io.Discard, io.Discard, RepoTarget{})
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -4201,7 +4235,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 						runTestGit(t, ctx, hostDir, "add", ".")
 						runTestGit(t, ctx, hostDir, "commit", "-q", "-m", "host work")
 					}
-					backup, err := ct.Push(ctx, io.Discard, io.Discard, 0)
+					backup, err := ct.Push(ctx, io.Discard, io.Discard, RepoTarget{})
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -4240,7 +4274,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 					tip := runTestGit(t, ctx, containerDir, "rev-parse", "HEAD")
 					var log bytes.Buffer
 					ct.Logger = slog.New(slog.NewJSONHandler(&log, testLoggerOptions()))
-					backup, err := ct.Push(ctx, io.Discard, io.Discard, 0)
+					backup, err := ct.Push(ctx, io.Discard, io.Discard, RepoTarget{})
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -4297,7 +4331,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			ct, _, containerDir := setupMultiBranchPullTest(t)
 			// The fixture has no local feature branch, so its ancestry cannot be checked.
 			tip := runTestGit(t, ctx, containerDir, "rev-parse", "HEAD")
-			_, err := ct.Push(ctx, io.Discard, io.Discard, 0)
+			_, err := ct.Push(ctx, io.Discard, io.Discard, RepoTarget{})
 			if err == nil || !strings.Contains(err.Error(), "backing up container state") {
 				t.Fatalf("Push error = %v, want ancestry failure", err)
 			}
@@ -4316,7 +4350,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			writeTestFile(t, filepath.Join(hostDir, "staged.txt"), "staged\n")
 			runTestGit(t, ctx, hostDir, "add", "staged.txt")
 
-			if _, err := ct.Push(ctx, io.Discard, io.Discard, 0); err == nil || !strings.Contains(err.Error(), "pending changes on branch main locally") {
+			if _, err := ct.Push(ctx, io.Discard, io.Discard, RepoTarget{}); err == nil || !strings.Contains(err.Error(), "pending changes on branch main locally") {
 				t.Fatalf("Push error = %v, want pending host changes error", err)
 			}
 			if got := runTestGit(t, ctx, containerDir, "rev-parse", "main"); got != containerTip {
@@ -4337,7 +4371,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			t.Setenv(fakeSSHFailureMatchEnv, "git switch -q -C main")
 			t.Setenv(fakeSSHFailureTextEnv, "ssh: simulated reset failure")
 
-			if _, err := ct.Push(ctx, io.Discard, io.Discard, 0); err == nil {
+			if _, err := ct.Push(ctx, io.Discard, io.Discard, RepoTarget{}); err == nil {
 				t.Fatal("Push error = nil, want reset failure")
 			}
 			if got := runTestGit(t, ctx, containerDir, "rev-parse", "main"); got != containerTip {
@@ -4356,7 +4390,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			runTestGit(t, ctx, hostDir, "commit", "-q", "-m", "host")
 			hostTip := runTestGit(t, ctx, hostDir, "rev-parse", "refs/heads/main")
 
-			if _, err := ct.Push(ctx, io.Discard, io.Discard, 0); err != nil {
+			if _, err := ct.Push(ctx, io.Discard, io.Discard, RepoTarget{}); err != nil {
 				t.Fatalf("Push with shadowing tag: %v", err)
 			}
 			if got := runTestGit(t, ctx, hostDir, "rev-parse", "refs/remotes/md-test/main"); got != hostTip {
@@ -4417,7 +4451,7 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 				}},
 			}
 			var stdout, stderr bytes.Buffer
-			backupBranch, err := ct.Push(ctx, &stdout, &stderr, 0)
+			backupBranch, err := ct.Push(ctx, &stdout, &stderr, RepoTarget{})
 			if err != nil {
 				t.Fatalf("Push: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 			}

@@ -1838,7 +1838,7 @@ func (c *Container) Revive(ctx context.Context, stdout, stderr io.Writer) error 
 		if err := c.SyncDefaultBranch(ctx, i); err != nil {
 			return fmt.Errorf("syncing remote branches after revive: %w", err)
 		}
-		if err := c.configureContainerRemotes(ctx, stdout, stderr, i, true); err != nil {
+		if err := c.configureContainerRemotes(ctx, stdout, stderr, &c.Repos[i], true); err != nil {
 			return err
 		}
 	}
@@ -1950,44 +1950,7 @@ func (c *Container) DiscoverSubmodules(ctx context.Context, repoIdx int) (Submod
 	if repoIdx < 0 || repoIdx >= len(c.Repos) {
 		return nil, fmt.Errorf("repo index %d out of range", repoIdx)
 	}
-	r := &c.Repos[repoIdx]
-	g := &git.Checkout{Root: r.GitRoot, Logger: c.Logger}
-	hostDir, err := g.RunGit(ctx, "rev-parse", "--absolute-git-dir")
-	if err != nil {
-		return nil, err
-	}
-	script := "cd " + shellQuote(r.ContainerPath) + " && bash -c " + shellQuote(`set -o pipefail
-root_dir=$(git rev-parse --absolute-git-dir) || exit
-printf '%s\000' "$root_dir"
-walk_modules() (
-	parent=$1
-	if [ ! -f .gitmodules ]; then return 0; fi
-	{ git config --no-includes --null --file .gitmodules --get-regexp '^submodule\..*\.path$' || [ "$?" -eq 1 ]; } |
-	while IFS= read -r -d '' record; do
-		key=${record%%$'\n'*}
-		name=${key%.path}
-		module=${record#*$'\n'}
-		case "/$module/" in *//*|*/../*|*/./*) continue;; esac
-		index=$(git --literal-pathspecs ls-files --format='%(objectmode) %(stage)' -- "$module") || exit
-		[ "$index" = '160000 0' ] || continue
-		[ -f "$module/.git" ] || continue
-		info=$(git -C "$module" rev-parse --absolute-git-dir --verify HEAD 2>/dev/null) || continue
-		gitdir=${info%$'\n'*}
-		head=${info##*$'\n'}
-		case "$gitdir" in "$root_dir"/modules/*) ;; *) continue;; esac
-		branch=$(git -C "$module" symbolic-ref --quiet --short HEAD || :)
-		url=
-		IFS= read -r -d '' url < <(git config --no-includes --null --file .gitmodules --get "$name.url") || :
-		printf '%s\000%s\000%s\000%s\000%s\000%s\000%s\000' "$parent" "$module" "$gitdir" "$branch" "$head" "$name" "$url"
-		(cd -- "$module" && walk_modules "${parent:+$parent/}$module") || exit
-	done
-)
-walk_modules ''`)
-	out, err := c.runCmd(ctx, "", c.SSHCommand(nil, script))
-	if err != nil {
-		return nil, fmt.Errorf("discover submodules: %w", err)
-	}
-	return parseSubmoduleTree(r, hostDir, out)
+	return c.discoverSubmodules(ctx, &c.Repos[repoIdx])
 }
 
 // FetchRecursive collects the mapped branches and initialized descendant HEADs
@@ -2016,7 +1979,7 @@ func (c *Container) FetchRecursive(ctx context.Context, stdout, stderr io.Writer
 	if err := c.fetchSubmoduleTree(ctx, stdout, stderr, tree, opts); err != nil {
 		return FetchedRepository{}, err
 	}
-	branches, err := c.fetchWithSubmoduleTree(ctx, stdout, stderr, repoIdx, opts, &tree)
+	branches, err := c.fetchWithSubmoduleTree(ctx, stdout, stderr, &c.Repos[repoIdx], opts, &tree)
 	if err != nil {
 		return FetchedRepository{}, err
 	}
@@ -2027,109 +1990,33 @@ func (c *Container) FetchRecursive(ctx context.Context, stdout, stderr io.Writer
 	return result, nil
 }
 
-// SelectSubmodule adds a transient repository mapping for an initialized host
-// submodule of Repos[repoIdx]. branch defaults to the host's current branch,
-// which must have an upstream. It returns the new mapping's index. The container
-// submodule must already exist, as provisioned by Start; no checkout is reset.
-func (c *Container) SelectSubmodule(ctx context.Context, repoIdx int, root, branch string) (int, error) {
-	if repoIdx < 0 || repoIdx >= len(c.Repos) {
-		return 0, fmt.Errorf("repo index %d out of range", repoIdx)
-	}
-	parent := &c.Repos[repoIdx]
-	g, err := git.RootDir(ctx, root, c.Logger)
-	if err != nil {
-		return 0, err
-	}
-	roots, err := g.Superprojects(ctx)
-	if err != nil {
-		return 0, err
-	}
-	if !slices.Contains(roots, parent.GitRoot) {
-		return 0, fmt.Errorf("%q is not a submodule of %q", g.Root, parent.GitRoot)
-	}
-	if branch == "" {
-		branch, err = g.CurrentBranch(ctx)
-		if err != nil {
-			return 0, fmt.Errorf("submodule %q: %w; use -branch to select a local branch with an upstream", g.Root, err)
-		}
-	}
-	rel, err := filepath.Rel(parent.GitRoot, g.Root)
-	if err != nil {
-		return 0, err
-	}
-	r := Repo{GitRoot: g.Root, ContainerPath: path.Join(parent.ContainerPath, filepath.ToSlash(rel)), Branches: []string{branch}, TagRegexp: parent.TagRegexp, submodule: true}
-	if err := r.resolveRemotes(ctx, c.Logger, c.Name); err != nil {
-		return 0, err
-	}
-	if err := r.ResolveDefaults(ctx, c.Logger); err != nil {
-		return 0, err
-	}
-	if err := r.validateMappedBranchUpstreams(ctx, c.Logger); err != nil {
-		return 0, err
-	}
-	// Check the worktree exists before making it a transport target. A missing
-	// submodule must never silently select the superproject's object store.
-	cmd := "test -e " + shellQuote(r.ContainerPath+"/.git") + " && git -C " + shellQuote(r.ContainerPath) + " rev-parse --show-toplevel" +
-		" && { git -C " + shellQuote(r.ContainerPath) + " rev-parse --verify -q " + shellQuote(containerSyncRefPrefix+"HEAD") + " >/dev/null || { echo 'submodule integration point is missing; recreate the container with the current md version' >&2; exit 1; }; }"
-	out, err := c.runCmd(ctx, "", c.SSHCommand(nil, cmd))
-	if err != nil {
-		return 0, fmt.Errorf("submodule %q is not initialized in container: %w", r.ContainerPath, err)
-	}
-	if strings.TrimSpace(out) != r.ContainerPath {
-		return 0, fmt.Errorf("container submodule root is %q, expected %q", out, r.ContainerPath)
-	}
-	wantURL := "user@" + c.Name + ":" + r.ContainerPath
-	remotes, err := g.Remotes(ctx)
-	if err != nil {
-		return 0, err
-	}
-	if slices.Contains(remotes, c.Name) {
-		got, err := g.RunGit(ctx, "remote", "get-url", c.Name)
-		if err != nil {
-			return 0, err
-		}
-		if got != wantURL {
-			return 0, fmt.Errorf("git remote %s points to %q, expected %q", c.Name, got, wantURL)
-		}
-	} else if _, err := g.RunGit(ctx, "remote", "add", c.Name, wantURL); err != nil {
-		return 0, err
-	}
-	idx := len(c.Repos)
-	c.Repos = append(c.Repos, r)
-	// Initial submodule setup transfers HEAD independently of branches. Retain
-	// that original base even if detached container work has since rewritten it.
-	syncRef := shellQuote(containerSyncRefPrefix + branch)
-	commands, err := c.containerGitConfigCommands(ctx, idx, true)
-	if err == nil {
-		cmd := "cd " + shellQuote(r.ContainerPath) +
-			" && if ! git rev-parse --verify -q " + syncRef + " >/dev/null || ! git config --get " + shellQuote("branch."+branch+".remote") + " >/dev/null; then " + strings.Join(commands, " && ") + "; fi" +
-			" && if ! git rev-parse --verify -q " + syncRef + " >/dev/null; then " +
-			"if git show-ref --verify --quiet " + shellQuote("refs/heads/"+branch) + "; then echo 'submodule branch integration point is missing; recreate the container with the current md version' >&2; exit 1; fi; " +
-			"git update-ref " + syncRef + " " + shellQuote(containerSyncRefPrefix+"HEAD") + "; fi"
-		_, err = c.runCmd(ctx, "", c.SSHCommand(nil, cmd))
-	}
-	if err != nil {
-		c.Repos = c.Repos[:idx]
-		return 0, err
-	}
-	return idx, nil
+// RepoTarget selects a configured repository or one of its initialized
+// submodules for Push, Pull, and Diff. The zero value selects the first
+// configured repository. Each operation resolves its target independently
+// and leaves [Container.Repos] unchanged.
+type RepoTarget struct {
+	// RepoIndex identifies the configured repository in Container.Repos.
+	RepoIndex int
+	// Submodule is a forward-slash path relative to the configured repository.
+	// Leave it empty to target the configured repository.
+	Submodule string
+	// Branch selects a local submodule branch with an upstream. Leave it empty
+	// to use the host submodule's current branch. Only submodule targets accept it.
+	Branch string
 }
 
-// Push force-pushes local state for Repos[repoIdx] into the container,
-// saving a backup when container commits would be lost. It returns the backup
+// Push force-pushes local state for target into the container, saving a
+// backup when container commits would be lost. It returns the backup
 // branch name, or an empty string when every update preserves container history.
-// All branches in Branches are synced.
-func (c *Container) Push(ctx context.Context, stdout, stderr io.Writer, repoIdx int) (string, error) {
-	if len(c.Repos) == 0 {
-		return "", errors.New("container has no repos")
-	}
-	if repoIdx < 0 || repoIdx >= len(c.Repos) {
-		return "", fmt.Errorf("repo index %d out of range [0, %d)", repoIdx, len(c.Repos))
-	}
-	if err := c.checkContainerState(ctx, containerMustBeRunning); err != nil {
+// A configured repository target syncs every mapped branch.
+func (c *Container) Push(ctx context.Context, stdout, stderr io.Writer, target RepoTarget) (string, error) {
+	r, err := c.resolveRepoTarget(ctx, target)
+	if err != nil {
 		return "", err
 	}
-	r := &c.Repos[repoIdx]
+	if err := c.prepareRepoTarget(ctx, r); err != nil {
+		return "", err
+	}
 	if err := r.validateMappedBranchUpstreams(ctx, c.Logger); err != nil {
 		return "", err
 	}
@@ -2174,12 +2061,12 @@ func (c *Container) Push(ctx context.Context, stdout, stderr io.Writer, repoIdx 
 		return "", fmt.Errorf("backing up container state: %w", err)
 	}
 	backupBranch = strings.TrimSpace(backupOut.String())
-	if err := c.syncSubmoduleRefs(ctx, repoIdx); err != nil {
+	if err := c.syncSubmoduleRefs(ctx, r); err != nil {
 		return "", err
 	}
 	// Configure remotes before moving the branches; the branch resets depend on the
 	// refs and upstreams set by the preceding push.
-	if err := c.configureContainerRemotes(ctx, stdout, stderr, repoIdx, true, transfer.setupCommands()...); err != nil {
+	if err := c.configureContainerRemotes(ctx, stdout, stderr, r, true, transfer.setupCommands()...); err != nil {
 		return "", err
 	}
 	if err := c.recordHostBranchSyncPoints(ctx, r); err != nil {
@@ -2214,24 +2101,21 @@ func (c *Container) Fetch(ctx context.Context, stdout, stderr io.Writer, repoIdx
 	if err := c.checkContainerState(ctx, containerMustBeRunning); err != nil {
 		return nil, err
 	}
-	return c.fetchWithSubmoduleTree(ctx, stdout, stderr, repoIdx, opts, nil)
+	return c.fetchWithSubmoduleTree(ctx, stdout, stderr, &c.Repos[repoIdx], opts, nil)
 }
 
-// Pull fetches changes from the container and integrates all mapped branches
+// Pull fetches changes from the container and integrates the target branches
 // into the local repository.
 //
 // opts controls AI commit message generation. Pass nil to use a default message.
-func (c *Container) Pull(ctx context.Context, stdout, stderr io.Writer, repoIdx int, opts *PullOpts) error {
+func (c *Container) Pull(ctx context.Context, stdout, stderr io.Writer, target RepoTarget, opts *PullOpts) error {
 	if opts == nil {
 		opts = &PullOpts{}
 	}
-	if len(c.Repos) == 0 {
-		return errors.New("container has no repos")
+	r, err := c.resolveRepoTarget(ctx, target)
+	if err != nil {
+		return err
 	}
-	if repoIdx < 0 || repoIdx >= len(c.Repos) {
-		return fmt.Errorf("repo index %d out of range [0, %d)", repoIdx, len(c.Repos))
-	}
-	r := &c.Repos[repoIdx]
 	g := &git.Checkout{Root: r.GitRoot, Logger: c.Logger}
 	rebaseActive, err := gitRebaseInProgress(ctx, g)
 	if err != nil {
@@ -2272,7 +2156,10 @@ func (c *Container) Pull(ctx context.Context, stdout, stderr io.Writer, repoIdx 
 	}
 	// Pull integrates the container's work into the host branch, so anything
 	// still pending in the container has to become a commit first.
-	fetched, err := c.Fetch(ctx, stdout, stderr, repoIdx, &FetchOpts{Provider: opts.Provider, ContextTokens: opts.ContextTokens, Commit: true, NoVerify: opts.NoVerify})
+	if err := c.prepareRepoTarget(ctx, r); err != nil {
+		return err
+	}
+	fetched, err := c.fetchWithSubmoduleTree(ctx, stdout, stderr, r, &FetchOpts{Provider: opts.Provider, ContextTokens: opts.ContextTokens, Commit: true, NoVerify: opts.NoVerify}, nil)
 	if err != nil {
 		return err
 	}
@@ -2298,8 +2185,8 @@ func (c *Container) Pull(ctx context.Context, stdout, stderr io.Writer, repoIdx 
 	return errors.Join(syncErr, restoreErr)
 }
 
-// Diff writes the checked-out container branch's changes, including untracked
-// files, after verifying every mapped branch still matches the host.
+// Diff writes the target checkout's changes, including untracked files,
+// after verifying that its mapped or selected branch upstreams match the host.
 //
 // By default it reports the changes not yet integrated into the host branch,
 // using the point established by container creation or the last successful
@@ -2308,29 +2195,30 @@ func (c *Container) Pull(ctx context.Context, stdout, stderr io.Writer, repoIdx 
 // opts may be nil, which selects the default of the zero DiffOpts.
 //
 // When stdout is a terminal, a TTY is allocated so git's pager and colors work.
-func (c *Container) Diff(ctx context.Context, stdout, stderr io.Writer, repoIdx int, opts *DiffOpts) error {
+func (c *Container) Diff(ctx context.Context, stdout, stderr io.Writer, target RepoTarget, opts *DiffOpts) error {
 	if opts == nil {
 		opts = &DiffOpts{}
 	}
-	if len(c.Repos) == 0 {
-		return errors.New("container has no repos")
-	}
-	if repoIdx < 0 || repoIdx >= len(c.Repos) {
-		return fmt.Errorf("repo index %d out of range [0, %d)", repoIdx, len(c.Repos))
-	}
-	if err := c.checkContainerState(ctx, containerMustBeRunning); err != nil {
+	repo, err := c.resolveRepoTarget(ctx, target)
+	if err != nil {
 		return err
 	}
-	repo := &c.Repos[repoIdx]
+	if err := c.prepareRepoTarget(ctx, repo); err != nil {
+		return err
+	}
 	if repo.DefaultRemote == "" || repo.DefaultBranch == "" {
+		repo.Remotes = slices.Clone(repo.Remotes)
 		if err := repo.ResolveDefaults(ctx, c.Logger); err != nil {
 			return fmt.Errorf("resolving repository defaults for %q: %w", repo.GitRoot, err)
 		}
 	}
-	if err := c.validateContainerBranchUpstreams(ctx, repoIdx); err != nil {
+	if err := c.validateContainerBranchUpstreams(ctx, repo); err != nil {
 		return err
 	}
-	if err := c.SyncDefaultBranch(ctx, repoIdx); err != nil {
+	if err := c.syncRepoRefs(ctx, repo); err != nil {
+		return err
+	}
+	if err := c.syncSubmoduleRefs(ctx, repo); err != nil {
 		return err
 	}
 	sshOpts := []string{"-q"}
@@ -2856,7 +2744,7 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 		renameCommands := make([]string, 1, len(fork.Repos[i].Branches)+2)
 		renameCommands[0] = forkPrimaryBranchSetupCommand(oldPrimary, newPrimary)
 		renameCommands = append(renameCommands, forkSyncPointCommands(oldPrimary, fork.Repos[i].Branches)...)
-		if err := fork.configureContainerRemotes(ctx, stdout, stderr, i, true, renameCommands...); err != nil {
+		if err := fork.configureContainerRemotes(ctx, stdout, stderr, &fork.Repos[i], true, renameCommands...); err != nil {
 			return nil, fmt.Errorf("renaming branch for %s: %w", r.ContainerPath, err)
 		}
 		if err := c.runCmdOut(ctx, fork.Repos[i].GitRoot, []string{"git", "fetch", "-q", fork.Name, newPrimary}, stdout, stderr); err != nil {
@@ -2890,7 +2778,7 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 		if err != nil {
 			return nil, fmt.Errorf("creating host branch for extra repo %s: %w", src.ContainerPath, err)
 		}
-		if err := fork.configureContainerRemotes(ctx, stdout, stderr, nSrc+i, false, containerBranchSetupCommands(bases)...); err != nil {
+		if err := fork.configureContainerRemotes(ctx, stdout, stderr, dst, false, containerBranchSetupCommands(bases)...); err != nil {
 			return nil, fmt.Errorf("setting up extra repo %s: %w", src.ContainerPath, err)
 		}
 		if err := c.runCmdOut(ctx, dst.GitRoot, []string{"git", "fetch", "-q", fork.Name, dst.Branches[0]}, stdout, stderr); err != nil {
@@ -3023,11 +2911,167 @@ func (c *Container) SyncDefaultBranch(ctx context.Context, repoIdx int) error {
 	if err := c.syncRepoRefs(ctx, r); err != nil {
 		return err
 	}
-	return c.syncSubmoduleRefs(ctx, repoIdx)
+	return c.syncSubmoduleRefs(ctx, r)
 }
 
-func (c *Container) syncSubmoduleRefs(ctx context.Context, repoIdx int) error {
-	r := &c.Repos[repoIdx]
+func (c *Container) resolveRepoTarget(ctx context.Context, target RepoTarget) (*Repo, error) {
+	if len(c.Repos) == 0 {
+		return nil, errors.New("container has no repos")
+	}
+	if target.RepoIndex < 0 || target.RepoIndex >= len(c.Repos) {
+		return nil, fmt.Errorf("repo index %d out of range [0, %d)", target.RepoIndex, len(c.Repos))
+	}
+	mapping := &c.Repos[target.RepoIndex]
+	if target.Submodule == "" {
+		if target.Branch != "" {
+			return nil, errors.New("a branch override requires a submodule target")
+		}
+		repo := *mapping
+		return &repo, nil
+	}
+	if !localModulePath(target.Submodule) || filepath.ToSlash(target.Submodule) != target.Submodule {
+		return nil, fmt.Errorf("invalid submodule path %q", target.Submodule)
+	}
+	root := filepath.Join(mapping.GitRoot, filepath.FromSlash(target.Submodule))
+	g, err := git.RootDir(ctx, root, c.Logger)
+	if err != nil {
+		return nil, err
+	}
+	if g.Root != filepath.ToSlash(root) {
+		return nil, fmt.Errorf("%q is not an initialized submodule worktree", root)
+	}
+	parents, err := g.Superprojects(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if !slices.Contains(parents, filepath.ToSlash(filepath.Clean(mapping.GitRoot))) {
+		return nil, fmt.Errorf("%q is not a submodule of %q", root, mapping.GitRoot)
+	}
+	branch := target.Branch
+	if branch == "" {
+		branch, err = g.CurrentBranch(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("submodule %q: %w; use -branch to select a local branch with an upstream", root, err)
+		}
+	}
+	r := &Repo{
+		GitRoot:       g.Root,
+		ContainerPath: path.Join(mapping.ContainerPath, target.Submodule),
+		Branches:      []string{branch},
+		TagRegexp:     mapping.TagRegexp,
+		submodule:     true,
+	}
+	if err := r.resolveRemotes(ctx, c.Logger, c.Name); err != nil {
+		return nil, err
+	}
+	if err := r.ResolveDefaults(ctx, c.Logger); err != nil {
+		return nil, err
+	}
+	return r, nil
+}
+
+func (c *Container) prepareRepoTarget(ctx context.Context, r *Repo) error {
+	if err := c.checkContainerState(ctx, containerMustBeRunning); err != nil {
+		return err
+	}
+	if !r.submodule {
+		return nil
+	}
+	if err := r.validateMappedBranchUpstreams(ctx, c.Logger); err != nil {
+		return err
+	}
+	// A missing child must never fall back to the superproject's object store.
+	modulePath := shellQuote(r.ContainerPath)
+	base := containerSyncRefPrefix + "HEAD"
+	cmd := "test -e " + shellQuote(r.ContainerPath+"/.git") + " && git -C " + modulePath + " rev-parse --show-toplevel" +
+		" && { git -C " + modulePath + " rev-parse --verify -q " + shellQuote(base+"^{commit}") + " >/dev/null || { echo 'submodule integration point is missing; recreate the container with the current md version' >&2; exit 1; }; }"
+	out, err := c.runCmd(ctx, "", c.SSHCommand(nil, cmd))
+	if err != nil {
+		return fmt.Errorf("submodule %q is not initialized in container: %w", r.ContainerPath, err)
+	}
+	if out != r.ContainerPath {
+		return fmt.Errorf("container submodule root is %q, expected %q", out, r.ContainerPath)
+	}
+	g := &git.Checkout{Root: r.GitRoot, Logger: c.Logger}
+	wantURL := "user@" + c.Name + ":" + r.ContainerPath
+	remotes, err := g.Remotes(ctx)
+	if err != nil {
+		return err
+	}
+	if slices.Contains(remotes, c.Name) {
+		got, err := g.RunGit(ctx, "remote", "get-url", c.Name)
+		if err != nil {
+			return err
+		}
+		if got != wantURL {
+			return fmt.Errorf("git remote %s points to %q, expected %q", c.Name, got, wantURL)
+		}
+	} else if _, err := g.RunGit(ctx, "remote", "add", c.Name, wantURL); err != nil {
+		return err
+	}
+	return c.prepareSubmoduleBranch(ctx, r)
+}
+
+func (c *Container) prepareSubmoduleBranch(ctx context.Context, r *Repo) error {
+	// Initial setup transfers HEAD independently of branches. Keep the
+	// original base even if detached container work has since rewritten it.
+	branch := r.Branches[0]
+	syncRef := shellQuote(containerSyncRefPrefix + branch)
+	syncCommit := shellQuote(containerSyncRefPrefix + branch + "^{commit}")
+	commands, err := c.containerGitConfigCommands(ctx, r, true)
+	if err != nil {
+		return err
+	}
+	cmd := "cd " + shellQuote(r.ContainerPath) +
+		" && if ! git rev-parse --verify -q " + syncCommit + " >/dev/null || ! git config --get " + shellQuote("branch."+branch+".remote") + " >/dev/null; then " + strings.Join(commands, " && ") + "; fi" +
+		" && if ! git rev-parse --verify -q " + syncCommit + " >/dev/null; then " +
+		"if git show-ref --verify --quiet " + shellQuote("refs/heads/"+branch) + "; then echo 'submodule branch integration point is missing; recreate the container with the current md version' >&2; exit 1; fi; " +
+		"git update-ref " + syncRef + " " + shellQuote(containerSyncRefPrefix+"HEAD") + "; fi"
+	_, err = c.runCmd(ctx, "", c.SSHCommand(nil, cmd))
+	return err
+}
+
+func (c *Container) discoverSubmodules(ctx context.Context, r *Repo) (SubmoduleTree, error) {
+	g := &git.Checkout{Root: r.GitRoot, Logger: c.Logger}
+	hostDir, err := g.RunGit(ctx, "rev-parse", "--absolute-git-dir")
+	if err != nil {
+		return nil, err
+	}
+	script := "cd " + shellQuote(r.ContainerPath) + " && bash -c " + shellQuote(`set -o pipefail
+root_dir=$(git rev-parse --absolute-git-dir) || exit
+printf '%s\000' "$root_dir"
+walk_modules() (
+	parent=$1
+	if [ ! -f .gitmodules ]; then return 0; fi
+	{ git config --no-includes --null --file .gitmodules --get-regexp '^submodule\..*\.path$' || [ "$?" -eq 1 ]; } |
+	while IFS= read -r -d '' record; do
+		key=${record%%$'\n'*}
+		name=${key%.path}
+		module=${record#*$'\n'}
+		case "/$module/" in *//*|*/../*|*/./*) continue;; esac
+		index=$(git --literal-pathspecs ls-files --format='%(objectmode) %(stage)' -- "$module") || exit
+		[ "$index" = '160000 0' ] || continue
+		[ -f "$module/.git" ] || continue
+		info=$(git -C "$module" rev-parse --absolute-git-dir --verify HEAD 2>/dev/null) || continue
+		gitdir=${info%$'\n'*}
+		head=${info##*$'\n'}
+		case "$gitdir" in "$root_dir"/modules/*) ;; *) continue;; esac
+		branch=$(git -C "$module" symbolic-ref --quiet --short HEAD || :)
+		url=
+		IFS= read -r -d '' url < <(git config --no-includes --null --file .gitmodules --get "$name.url") || :
+		printf '%s\000%s\000%s\000%s\000%s\000%s\000%s\000' "$parent" "$module" "$gitdir" "$branch" "$head" "$name" "$url"
+		(cd -- "$module" && walk_modules "${parent:+$parent/}$module") || exit
+	done
+)
+walk_modules ''`)
+	out, err := c.runCmd(ctx, "", c.SSHCommand(nil, script))
+	if err != nil {
+		return nil, fmt.Errorf("discover submodules: %w", err)
+	}
+	return parseSubmoduleTree(r, hostDir, out)
+}
+
+func (c *Container) syncSubmoduleRefs(ctx context.Context, r *Repo) error {
 	g := &git.Checkout{Root: r.GitRoot, Logger: c.Logger}
 	hostDir, err := g.RunGit(ctx, "rev-parse", "--absolute-git-dir")
 	if err != nil {
@@ -3040,7 +3084,7 @@ func (c *Container) syncSubmoduleRefs(ctx context.Context, repoIdx int) error {
 	} else if err != nil {
 		return err
 	}
-	tree, err := c.DiscoverSubmodules(ctx, repoIdx)
+	tree, err := c.discoverSubmodules(ctx, r)
 	if err != nil {
 		return err
 	}
@@ -3135,22 +3179,21 @@ func (c *Container) initializeSubmoduleStore(ctx context.Context, stdout, stderr
 	return os.Rename(tmp, s.GitDir)
 }
 
-func (c *Container) fetchWithSubmoduleTree(ctx context.Context, stdout, stderr io.Writer, repoIdx int, opts *FetchOpts, tree *SubmoduleTree) ([]FetchedBranch, error) {
+func (c *Container) fetchWithSubmoduleTree(ctx context.Context, stdout, stderr io.Writer, r *Repo, opts *FetchOpts, tree *SubmoduleTree) ([]FetchedBranch, error) {
 	if opts == nil {
 		opts = &FetchOpts{}
 	}
-	r := &c.Repos[repoIdx]
 	if err := c.syncRepoRefs(ctx, r); err != nil {
 		return nil, err
 	}
 	if tree == nil {
-		if err := c.syncSubmoduleRefs(ctx, repoIdx); err != nil {
+		if err := c.syncSubmoduleRefs(ctx, r); err != nil {
 			return nil, err
 		}
 	} else if err := c.syncSubmoduleTreeRefs(ctx, r, *tree); err != nil {
 		return nil, err
 	}
-	commitCommands, err := c.containerGitConfigCommands(ctx, repoIdx, true)
+	commitCommands, err := c.containerGitConfigCommands(ctx, r, true)
 	if err != nil {
 		return nil, err
 	}
@@ -3624,8 +3667,7 @@ func (c *Container) syncRepoRefs(ctx context.Context, r *Repo) error {
 	return nil
 }
 
-func (c *Container) containerBranchUpstream(ctx context.Context, repoIdx int, branch string) (branchUpstreamSpec, error) {
-	r := &c.Repos[repoIdx]
+func (c *Container) containerBranchUpstream(ctx context.Context, r *Repo, branch string) (branchUpstreamSpec, error) {
 	prefix := "branch." + branch
 	command := "cd " + shellQuote(r.ContainerPath) + " || exit $?; " +
 		"remote=$(git config --local --get " + shellQuote(prefix+".remote") + "); status=$?; " +
@@ -3653,14 +3695,13 @@ func (c *Container) containerBranchUpstream(ctx context.Context, repoIdx int, br
 	return branchUpstreamSpec{remote: fields[1], branch: upstreamBranch}, nil
 }
 
-func (c *Container) validateContainerBranchUpstreams(ctx context.Context, repoIdx int) error {
-	r := &c.Repos[repoIdx]
+func (c *Container) validateContainerBranchUpstreams(ctx context.Context, r *Repo) error {
 	for _, branch := range r.Branches {
 		hostRemote, hostBranch, err := r.requiredMappedBranchUpstream(ctx, c.Logger, branch)
 		if err != nil {
 			return err
 		}
-		containerUpstream, err := c.containerBranchUpstream(ctx, repoIdx, branch)
+		containerUpstream, err := c.containerBranchUpstream(ctx, r, branch)
 		if err != nil {
 			return err
 		}
@@ -3801,23 +3842,21 @@ func (c *Container) migrateRepoRemotes(ctx context.Context) {
 	}
 }
 
-func (c *Container) configureContainerRemotes(ctx context.Context, stdout, stderr io.Writer, repoIdx int, refreshUpstreams bool, postCommands ...string) error {
+func (c *Container) configureContainerRemotes(ctx context.Context, stdout, stderr io.Writer, r *Repo, refreshUpstreams bool, postCommands ...string) error {
 	// postCommands run after the remote config in the same remote shell. Push,
 	// Pull, and provisioning use this to express the full ordered git transition
 	// at one call site.
-	commands, err := c.containerGitConfigCommands(ctx, repoIdx, refreshUpstreams, postCommands...)
+	commands, err := c.containerGitConfigCommands(ctx, r, refreshUpstreams, postCommands...)
 	if err != nil {
 		return err
 	}
 	if err := c.runCmdOut(ctx, "", c.SSHCommand(nil, strings.Join(commands, " && ")), stdout, stderr); err != nil {
-		r := &c.Repos[repoIdx]
 		return fmt.Errorf("configuring remotes for %s: %w", r.ContainerPath, err)
 	}
 	return nil
 }
 
-func (c *Container) containerGitConfigCommands(ctx context.Context, repoIdx int, refreshUpstreams bool, postCommands ...string) ([]string, error) {
-	r := &c.Repos[repoIdx]
+func (c *Container) containerGitConfigCommands(ctx context.Context, r *Repo, refreshUpstreams bool, postCommands ...string) ([]string, error) {
 	configs, err := r.containerRemoteConfigs(ctx, c.Logger)
 	if err != nil {
 		return nil, fmt.Errorf("reading host remotes for %s: %w", r.GitRoot, err)
@@ -5168,7 +5207,7 @@ func (c *Container) provisionContainer(ctx context.Context, stdout, stderr io.Wr
 			if !opts.Quiet && httpsURL != "" {
 				_, _ = fmt.Fprintf(stdout, "- Set %s %s to %s\n", r.ContainerPath, r.DefaultRemote, httpsURL)
 			}
-			if err := c.configureContainerRemotes(egCtx, stdout, stderr, repoIdx, true, transfer.setupCommands()...); err != nil {
+			if err := c.configureContainerRemotes(egCtx, stdout, stderr, r, true, transfer.setupCommands()...); err != nil {
 				return err
 			}
 			if err := c.recordHostBranchSyncPoints(egCtx, r); err != nil {

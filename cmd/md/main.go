@@ -384,8 +384,8 @@ func (a *app) findContainerAndRepo(ctx context.Context, cf *containerFlags, comm
 	}
 }
 
-// selectSyncRepo selects a submodule without changing the persisted repo mappings.
-func (a *app) selectSyncRepo(ctx context.Context, ct *md.Container, repoIdx int, cf *containerFlags) (int, error) {
+// selectRepoTarget derives a submodule path within the selected mapping.
+func selectRepoTarget(ctx context.Context, ct *md.Container, repoIdx int, cf *containerFlags) (md.RepoTarget, error) {
 	root := ""
 	if cf.repo != nil {
 		root = *cf.repo
@@ -394,21 +394,27 @@ func (a *app) selectSyncRepo(ctx context.Context, ct *md.Container, repoIdx int,
 		var err error
 		root, err = os.Getwd()
 		if err != nil {
-			return 0, err
+			return md.RepoTarget{}, err
 		}
 	}
 	g, err := git.RootDir(ctx, root, ct.Logger)
 	if err != nil {
-		return 0, err
+		return md.RepoTarget{}, err
 	}
-	if g.Root == ct.Repos[repoIdx].GitRoot {
-		return repoIdx, nil
+	target := md.RepoTarget{RepoIndex: repoIdx}
+	mappedRoot := ct.Repos[repoIdx].GitRoot
+	if g.Root == mappedRoot {
+		return target, nil
 	}
-	branch := ""
+	rel, err := filepath.Rel(mappedRoot, g.Root)
+	if err != nil {
+		return md.RepoTarget{}, err
+	}
+	target.Submodule = filepath.ToSlash(rel)
 	if cf.branch != nil {
-		branch = *cf.branch
+		target.Branch = *cf.branch
 	}
-	return ct.SelectSubmodule(ctx, repoIdx, g.Root, branch)
+	return target, nil
 }
 
 func noMatchingContainerError(gitRoot, branch string, branchExists bool, command string, cts []*md.Container) error {
@@ -927,7 +933,7 @@ func runTemporaryContainer(ctx context.Context, c *md.Container, stdout, stderr 
 	exitCode, err := runTemporaryCommand(ctx, tmp, stdout, stderr, command)
 	if applyPatch {
 		for i := range tmp.Repos {
-			if pullErr := tmp.Pull(ctx, stdout, stderr, i, nil); pullErr != nil {
+			if pullErr := tmp.Pull(ctx, stdout, stderr, md.RepoTarget{RepoIndex: i}, nil); pullErr != nil {
 				err = errors.Join(err, fmt.Errorf("applying patch for %s: %w", tmp.Repos[i].ContainerPath, pullErr))
 				if exitCode == 0 {
 					exitCode = 1
@@ -1285,35 +1291,40 @@ func (a *app) cmdPush(ctx context.Context, args []string) error {
 		return err
 	}
 	var mu sync.Mutex
-	printBackup := func(i int, backup string) {
+	printBackup := func(target md.RepoTarget, backup string) {
 		if backup == "" {
 			return
 		}
-		repoName := filepath.Base(ct.Repos[i].ContainerPath)
+		repoPath := ct.Repos[target.RepoIndex].ContainerPath
+		if target.Submodule != "" {
+			repoPath = target.Submodule
+		}
+		repoName := filepath.Base(repoPath)
 		mu.Lock()
 		fmt.Printf("- %s: previous state saved as git branch: %s\n", repoName, backup)
 		mu.Unlock()
 	}
 	if !*all {
-		repoIdx, err = a.selectSyncRepo(ctx, ct, repoIdx, cf)
+		target, err := selectRepoTarget(ctx, ct, repoIdx, cf)
 		if err != nil {
 			return err
 		}
-		backup, err := ct.Push(ctx, os.Stdout, os.Stderr, repoIdx)
+		backup, err := ct.Push(ctx, os.Stdout, os.Stderr, target)
 		if err != nil {
 			return err
 		}
-		printBackup(repoIdx, backup)
+		printBackup(target, backup)
 		return nil
 	}
 	eg, ctx2 := errgroup.WithContext(ctx)
 	for i := range ct.Repos {
 		eg.Go(func() error {
-			backup, err := ct.Push(ctx2, os.Stdout, os.Stderr, i)
+			target := md.RepoTarget{RepoIndex: i}
+			backup, err := ct.Push(ctx2, os.Stdout, os.Stderr, target)
 			if err != nil {
 				return err
 			}
-			printBackup(i, backup)
+			printBackup(target, backup)
 			return nil
 		})
 	}
@@ -1372,16 +1383,16 @@ func (a *app) cmdPull(ctx context.Context, args []string) (retErr error) {
 		}()
 	}
 	if !*all {
-		repoIdx, err = a.selectSyncRepo(ctx, ct, repoIdx, cf)
+		target, err := selectRepoTarget(ctx, ct, repoIdx, cf)
 		if err != nil {
 			return err
 		}
-		return ct.Pull(ctx, os.Stdout, os.Stderr, repoIdx, &md.PullOpts{Provider: p, ContextTokens: *tokens, NoVerify: *noVerify})
+		return ct.Pull(ctx, os.Stdout, os.Stderr, target, &md.PullOpts{Provider: p, ContextTokens: *tokens, NoVerify: *noVerify})
 	}
 	eg, ctx2 := errgroup.WithContext(ctx)
 	for i := range ct.Repos {
 		eg.Go(func() error {
-			return ct.Pull(ctx2, os.Stdout, os.Stderr, i, &md.PullOpts{Provider: p, ContextTokens: *tokens, NoVerify: *noVerify})
+			return ct.Pull(ctx2, os.Stdout, os.Stderr, md.RepoTarget{RepoIndex: i}, &md.PullOpts{Provider: p, ContextTokens: *tokens, NoVerify: *noVerify})
 		})
 	}
 	return eg.Wait()
@@ -1442,30 +1453,31 @@ func (a *app) cmdDiff(ctx context.Context, args []string) error {
 	if err != nil {
 		return diffCommandError(err, exitOnDiff)
 	}
+	target := md.RepoTarget{RepoIndex: repoIdx}
 	if !*all {
-		repoIdx, err = a.selectSyncRepo(ctx, ct, repoIdx, cf)
+		target, err = selectRepoTarget(ctx, ct, repoIdx, cf)
 		if err != nil {
 			return diffCommandError(err, exitOnDiff)
 		}
 	}
-	return diffContainerRepos(ctx, os.Stdout, os.Stderr, ct, repoIdx, *all, &md.DiffOpts{Args: gitArgs, Full: *full}, exitOnDiff)
+	return diffContainerRepos(ctx, os.Stdout, os.Stderr, ct, target, *all, &md.DiffOpts{Args: gitArgs, Full: *full}, exitOnDiff)
 }
 
-func diffContainerRepos(ctx context.Context, stdout, stderr io.Writer, ct *md.Container, repoIdx int, all bool, opts *md.DiffOpts, exitOnDiff bool) error {
-	indices := []int{repoIdx}
+func diffContainerRepos(ctx context.Context, stdout, stderr io.Writer, ct *md.Container, target md.RepoTarget, all bool, opts *md.DiffOpts, exitOnDiff bool) error {
+	targets := []md.RepoTarget{target}
 	if all {
-		indices = make([]int, len(ct.Repos))
+		targets = make([]md.RepoTarget, len(ct.Repos))
 		for i := range ct.Repos {
-			indices[i] = i
+			targets[i].RepoIndex = i
 		}
 	}
 	quiet := slices.Contains(opts.Args, "--quiet")
 	differencesFound := false
-	for _, i := range indices {
+	for _, target := range targets {
 		if all && len(ct.Repos) > 1 && !quiet {
-			_, _ = fmt.Fprintf(stdout, "=== %s ===\n", filepath.Base(ct.Repos[i].GitRoot))
+			_, _ = fmt.Fprintf(stdout, "=== %s ===\n", filepath.Base(ct.Repos[target.RepoIndex].GitRoot))
 		}
-		if err := ct.Diff(ctx, stdout, stderr, i, opts); errors.Is(err, md.ErrDiffFound) {
+		if err := ct.Diff(ctx, stdout, stderr, target, opts); errors.Is(err, md.ErrDiffFound) {
 			differencesFound = true
 		} else if err != nil {
 			return diffCommandError(err, exitOnDiff)

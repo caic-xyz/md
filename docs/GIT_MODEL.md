@@ -250,6 +250,10 @@ Commit the changed gitlink in the superproject separately when needed.
 `-all` operates on the container's explicitly mapped repositories. It does not
 recursively synchronize their submodules.
 
+Library callers can select an initialized descendant with
+[`RepoTarget`](../container.go). Its integration point belongs to the selected
+submodule branch.
+
 Library callers can inspect initialized modules with
 [`Container.DiscoverSubmodules`](../container.go). Each node's `GitlinkPath`
 is relative to its immediate superproject. For example, the node for
