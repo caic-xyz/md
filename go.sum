@@ -442,8 +442,8 @@ github.com/maratori/testableexamples v1.0.1 h1:HfOQXs+XgfeRBJ+Wz0XfH+FHnoY9TVqL6
 github.com/maratori/testableexamples v1.0.1/go.mod h1:XE2F/nQs7B9N08JgyRmdGjYVGqxWwClLPCGSQhXQSrQ=
 github.com/maratori/testpackage v1.1.2 h1:ffDSh+AgqluCLMXhM19f/cpvQAKygKAJXFl9aUjmbqs=
 github.com/maratori/testpackage v1.1.2/go.mod h1:8F24GdVDFW5Ew43Et02jamrVMNXLUNaOynhDssITGfc=
-github.com/maruel/genai v0.11.3 h1:BDF305qvx5Mv542FUJPIPMskDI3Z2V/I0L+eAWgPXdU=
-github.com/maruel/genai v0.11.3/go.mod h1:s1k7dxL59wB8/LVPuqL4M5rfxUK6eVljdeJYWIjcgNg=
+github.com/maruel/genai v0.11.5 h1:KBtYHS7ix9YKa9vEBbVy+/BlDt0VUwtFEng7IVT/tXg=
+github.com/maruel/genai v0.11.5/go.mod h1:s1k7dxL59wB8/LVPuqL4M5rfxUK6eVljdeJYWIjcgNg=
 github.com/maruel/httpjson v0.5.3 h1:GXxDoiaMJyax0nMR0RfefzDiKd86lbMeqPIgkoFqI2I=
 github.com/maruel/httpjson v0.5.3/go.mod h1:YJmWM63IM6ykT1NKm67b5Cuhshl1JUXuxFnmnqmr5Rg=
 github.com/maruel/roundtrippers v0.5.1 h1:ztW+4P91AV2e1ifzRnw7XG593IFn7po4Z3hdxMXzACQ=
