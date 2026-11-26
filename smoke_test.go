@@ -902,7 +902,7 @@ func TestSmoke(t *testing.T) {
 					}
 
 					t.Log("reviving container (like md start on stopped container) ...")
-					if err := ct.Revive(t.Context(), io.Discard, io.Discard); err != nil {
+					if err := ct.Revive(t.Context(), io.Discard, io.Discard, &ReviveOpts{}); err != nil {
 						t.Fatalf("Revive: %v", err)
 					}
 

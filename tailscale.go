@@ -14,7 +14,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 )
@@ -26,9 +25,6 @@ type tailscaleAuthKeyResponse struct {
 // generateTailscaleAuthKey creates a one-time ephemeral pre-authorized
 // Tailscale auth key via the API.
 func generateTailscaleAuthKey(ctx context.Context, apiKey string) (string, error) {
-	if apiKey == "" {
-		return "", errors.New("no Tailscale API key provided, create an API access key at https://login.tailscale.com/admin/settings/keys")
-	}
 	body, err := json.Marshal(map[string]any{
 		"capabilities": map[string]any{
 			"devices": map[string]any{
@@ -74,40 +70,4 @@ func generateTailscaleAuthKey(ctx context.Context, apiKey string) (string, error
 		return "", errors.New("no key in response")
 	}
 	return result.Key, nil
-}
-
-// deleteTailscaleDevice deletes a Tailscale device using the API.
-func deleteTailscaleDevice(ctx context.Context, apiKey, deviceID string) error {
-	if deviceID == "" {
-		return nil
-	}
-	if apiKey == "" {
-		return errors.New("no Tailscale API key provided")
-	}
-	u, err := url.JoinPath("https://api.tailscale.com/api/v2/device", deviceID)
-	if err != nil {
-		return fmt.Errorf("building device URL: %w", err)
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, u, http.NoBody)
-	if err != nil {
-		return fmt.Errorf("creating request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("deleting device: %w", err)
-	}
-	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("deleting device: API returned %d", resp.StatusCode)
-	}
-	return nil
-}
-
-// tailscaleUpStatus is the subset of `tailscale up --json` output we care about.
-type tailscaleUpStatus struct {
-	AuthURL      string `json:"AuthURL"`
-	QR           string `json:"QR"`
-	BackendState string `json:"BackendState"`
 }

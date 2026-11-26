@@ -75,7 +75,6 @@ const (
 )
 
 const (
-	tailscaleDeviceIDPath = "/var/lib/md/tailscale_device_id"
 
 	// containerHomeDir is the container user's home directory.
 	containerHomeDir = "/home/user"
@@ -239,8 +238,6 @@ var forkSnapshotEnvKeys = [...]string{
 	"MD_HOST_UID",
 	"MD_SUDO_PASSWORD",
 	"MD_TAILSCALE",
-	"MD_TAILSCALE_EPHEMERAL",
-	"MD_TAILSCALE_RESET",
 	// TODO: Rename TAILSCALE_AUTHKEY with an MD_ prefix so fork snapshots
 	// can clear all MD_* runtime control env values generically.
 	"TAILSCALE_AUTHKEY",
@@ -1057,19 +1054,14 @@ type StartOpts struct {
 	GitObjectCopyMinBytes int64
 	// Display enables X11/VNC virtual display (port 5901).
 	Display bool
-	// Tailscale enables Tailscale networking inside the container.
+	// TailscaleAPIKey enables Tailscale networking inside the container when set. It is a Tailscale API
+	// access token: Launch mints a one-time ephemeral pre-authorized auth key with it right before creating
+	// the container, so the node leaves the tailnet on its own once the container is gone. The tailnet policy
+	// must allow "tag:md".
 	//
-	// It requires TailscaleAuthKey or a Client.TailscaleAPIKey that can mint an ephemeral pre-authorized auth
-	// key; otherwise Launch and Fork fail rather than fall back to browser authentication.
-	Tailscale bool
-	// TailscaleAuthKey is a pre-authorized Tailscale auth key.
-	//
-	// When empty and Tailscale is true, Client.TailscaleAPIKey is used to generate an authentication key.
-	//
-	// The tailnet policy must allow "tag:md".
-	//
-	// https://tailscale.com/docs/features/access-control/auth-keys
-	TailscaleAuthKey string
+	// https://tailscale.com/docs/reference/tailscale-api and
+	// https://tailscale.com/docs/features/ephemeral-nodes
+	TailscaleAPIKey string
 	// USB enables USB device passthrough (Linux only).
 	USB bool
 	// Sudo enables password-based sudo for the user account. A random
@@ -1102,10 +1094,13 @@ type StartOpts struct {
 	// Arguments that override MaxMemory are rejected when it is set.
 	ExtraRunArgs []string
 
-	// resetTailscale removes any Tailscale state inherited from a source image
-	// before tailscaled starts. It is used for forked containers created from a
-	// committed filesystem snapshot.
-	resetTailscale bool
+	// tailscaleAuthKey is the auth key prepareTailscaleAuthKey minted.
+	tailscaleAuthKey string
+}
+
+// tailscale reports whether the container joins a tailnet.
+func (opts *StartOpts) tailscale() bool {
+	return opts.TailscaleAPIKey != ""
 }
 
 // StartResult contains Tailscale information from Connect. Port information
@@ -1113,10 +1108,6 @@ type StartOpts struct {
 type StartResult struct {
 	// TailscaleFQDN is the Tailscale FQDN assigned to the container, if any.
 	TailscaleFQDN string
-	// TailscaleAuthURL is the Tailscale auth URL when no pre-auth key was provided.
-	//
-	// TODO: Always empty; see tryReadTailscaleAuthURL.
-	TailscaleAuthURL string
 }
 
 // ForkRepo describes one repository in a fork and the branches it carries.
@@ -1147,6 +1138,14 @@ type ForkRepo struct {
 	DestPrimary string
 }
 
+// ReviveOpts configures [Container.Revive].
+type ReviveOpts struct {
+	// TailscaleAPIKey mints a new auth key when the tailnet removed a
+	// Tailscale container's ephemeral node while the container was stopped.
+	// Revive fails in that case when it is empty.
+	TailscaleAPIKey string
+}
+
 // ForkOpts configures a container fork operation.
 type ForkOpts struct {
 	// Repos is the full set of repositories the fork should contain. It must
@@ -1157,8 +1156,9 @@ type ForkOpts struct {
 	Repos []ForkRepo
 	// Display enables X11/VNC virtual display on the forked container.
 	Display bool
-	// Tailscale enables Tailscale networking on the forked container.
-	Tailscale bool
+	// TailscaleAPIKey enables Tailscale networking on the forked container when set. See
+	// StartOpts.TailscaleAPIKey.
+	TailscaleAPIKey string
 	// USB enables USB device passthrough on the forked container.
 	USB bool
 	// Sudo enables root access via sudo on the forked container.
@@ -1190,22 +1190,21 @@ type ForkOpts struct {
 // startOptions converts fork options into startup options for the forked container.
 func (opts *ForkOpts) startOptions(sourceMemory uint64) *StartOpts {
 	startOpts := &StartOpts{
-		Quiet:        opts.Quiet,
-		Labels:       opts.Labels,
-		ExtraEnv:     opts.ExtraEnv,
-		Mounts:       opts.Mounts,
-		Display:      opts.Display,
-		Tailscale:    opts.Tailscale,
-		USB:          opts.USB,
-		Sudo:         opts.Sudo,
-		MaxCPUs:      opts.MaxCPUs,
-		MaxMemory:    sourceMemory,
-		ExtraRunArgs: append(opts.runtimeEnvOverrides(), opts.ExtraRunArgs...),
+		Quiet:           opts.Quiet,
+		Labels:          opts.Labels,
+		ExtraEnv:        opts.ExtraEnv,
+		Mounts:          opts.Mounts,
+		Display:         opts.Display,
+		TailscaleAPIKey: opts.TailscaleAPIKey,
+		USB:             opts.USB,
+		Sudo:            opts.Sudo,
+		MaxCPUs:         opts.MaxCPUs,
+		MaxMemory:       sourceMemory,
+		ExtraRunArgs:    append(opts.runtimeEnvOverrides(), opts.ExtraRunArgs...),
 	}
 	if opts.MaxMemory != nil {
 		startOpts.MaxMemory = *opts.MaxMemory
 	}
-	startOpts.resetTailscale = startOpts.Tailscale
 	return startOpts
 }
 
@@ -1218,11 +1217,9 @@ func (opts *ForkOpts) runtimeEnvOverrides() []string {
 	if !opts.Display {
 		args = append(args, "-e", "MD_DISPLAY=")
 	}
-	if !opts.Tailscale {
+	if opts.TailscaleAPIKey == "" {
 		args = append(args,
 			"-e", "MD_TAILSCALE=",
-			"-e", "MD_TAILSCALE_EPHEMERAL=",
-			"-e", "MD_TAILSCALE_RESET=",
 			"-e", "TAILSCALE_AUTHKEY=",
 		)
 	}
@@ -1449,8 +1446,6 @@ type Container struct {
 	// so SudoPassword() doesn't need to docker inspect. Empty for
 	// containers loaded from docker list (fall back to label).
 	sudoPassword string
-	// tailscaleEphemeral is set by Launch and consumed by Connect.
-	tailscaleEphemeral bool
 }
 
 // unmarshalContainer parses docker/podman ps JSON output, converting the
@@ -1738,7 +1733,7 @@ func (c *Container) Launch(ctx context.Context, stdout, stderr io.Writer, opts *
 			return err
 		}
 		// The auth key expires in five minutes; generate it after building.
-		if err := c.prepareTailscaleAuthKey(ctx, opts); err != nil {
+		if err := prepareTailscaleAuthKey(ctx, opts); err != nil {
 			return err
 		}
 		return c.createContainer(ctx, stdout, stderr, opts, id)
@@ -1757,10 +1752,10 @@ func (c *Container) Connect(ctx context.Context, stdout, stderr io.Writer, opts 
 	if err != nil {
 		return nil, err
 	}
-	if opts.Tailscale {
+	if opts.tailscale() {
 		c.Tailscale = true
 		c.State = "running"
-		result.TailscaleFQDN = c.TailscaleFQDN(ctx)
+		result.TailscaleFQDN = c.TailscaleNode(ctx).FQDN
 	}
 	return result, nil
 }
@@ -1770,8 +1765,9 @@ func (c *Container) Connect(ctx context.Context, stdout, stderr io.Writer, opts 
 // runs `docker start`, re-queries the SSH port (which changes on restart),
 // rewrites the SSH config, and waits for SSH to become ready. It does NOT
 // reset working branches or send .env — the container's filesystem is preserved across
-// stop/start.
-func (c *Container) Revive(ctx context.Context, stdout, stderr io.Writer) error {
+// stop/start. A Tailscale container resumes its saved login; see
+// [Container.resumeTailscale].
+func (c *Container) Revive(ctx context.Context, stdout, stderr io.Writer, opts *ReviveOpts) error {
 	for i := range c.Repos {
 		if err := c.Repos[i].validateMappedBranchUpstreams(ctx, c.Logger); err != nil {
 			return fmt.Errorf("validate mapped branches for %s: %w", c.Repos[i].GitRoot, err)
@@ -1843,6 +1839,11 @@ func (c *Container) Revive(ctx context.Context, stdout, stderr io.Writer) error 
 	if err := c.configureGlobalGitIdentity(ctx, stdout, stderr); err != nil {
 		return err
 	}
+	if c.Tailscale {
+		if err := c.resumeTailscale(ctx, stdout, stderr, opts.TailscaleAPIKey); err != nil {
+			return err
+		}
+	}
 
 	// Refresh cached remote refs and remote configuration without resetting the
 	// preserved working branches.
@@ -1902,31 +1903,6 @@ func (c *Container) Purge(ctx context.Context, stdout, stderr io.Writer) error {
 	}
 
 	var retErr error
-	// Clean up non-ephemeral Tailscale node.
-	if containerExists {
-		if !c.Tailscale {
-			tsLabel, _ := c.Runtime.Run(ctx, "", "inspect", "--format", `{{index .Config.Labels "md.tailscale"}}`, c.Name)
-			c.Tailscale = tsLabel == "1"
-		}
-		if c.Tailscale {
-			ephLabel, _ := c.Runtime.Run(ctx, "", "inspect", "--format", `{{index .Config.Labels "md.tailscale_ephemeral"}}`, c.Name)
-			if ephLabel != "1" {
-				deviceID, err := c.tailscaleDeviceID(ctx)
-				switch {
-				case err != nil:
-					retErr = errors.Join(retErr, fmt.Errorf("reading Tailscale device ID: %w", err))
-				case deviceID != "":
-					_, _ = fmt.Fprintln(stdout, "- Removing Tailscale node from tailnet...")
-					if err := deleteTailscaleDevice(ctx, c.TailscaleAPIKey, deviceID); err != nil {
-						retErr = errors.Join(retErr, fmt.Errorf("removing Tailscale node %s: %w", deviceID, err))
-					}
-				}
-			}
-		}
-	}
-	if retErr != nil {
-		return retErr
-	}
 
 	if err2 := os.Remove(sshConf); err2 != nil && !os.IsNotExist(err2) {
 		retErr = err2
@@ -2618,7 +2594,7 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 	}
 	startOpts := opts.startOptions(sourceInfo.MemoryLimit)
 	fork.Display = startOpts.Display
-	fork.Tailscale = startOpts.Tailscale
+	fork.Tailscale = startOpts.tailscale()
 	fork.USB = startOpts.USB
 	fork.Sudo = startOpts.Sudo
 	// Protect the snapshot from its creation until its container exists.
@@ -2630,7 +2606,7 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 		}
 		attempt.snapshotCreated = true
 		// Generate the short-lived key after lock contention and snapshotting.
-		if err := fork.prepareTailscaleAuthKey(ctx, startOpts); err != nil {
+		if err := prepareTailscaleAuthKey(ctx, startOpts); err != nil {
 			return err
 		}
 		return fork.createContainer(ctx, stdout, stderr, startOpts, snapshotImage)
@@ -2653,13 +2629,6 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 		return nil, err
 	}
 	attempt.snapshotCreated = false
-
-	// TODO: Unreachable; see tryReadTailscaleAuthURL.
-	if startOpts.Tailscale && startOpts.TailscaleAuthKey == "" {
-		if _, err := fork.tryReadTailscaleAuthURL(ctx, stdout); err != nil {
-			return nil, fmt.Errorf("reading Tailscale auth URL: %w", err)
-		}
-	}
 
 	// Wait for SSH and set up repos.
 	addr := fmt.Sprintf("localhost:%d", fork.SSHPort)
@@ -2900,26 +2869,37 @@ func (c *Container) SudoPassword(ctx context.Context) (string, error) {
 	return c.sudoPassword, nil
 }
 
-// TailscaleFQDN returns the Tailscale FQDN for the container, or "" if unavailable.
-func (c *Container) TailscaleFQDN(ctx context.Context) string {
+// TailscaleNode identifies a container's node in the tailnet.
+type TailscaleNode struct {
+	// ID is the node's stable ID, which the Tailscale API and admin console
+	// accept as the device ID.
+	ID string
+	// FQDN is the node's MagicDNS name.
+	FQDN string
+}
+
+// TailscaleNode reads the container's node from tailscaled. It returns the
+// zero value when the container is not running with Tailscale or tailscaled
+// does not answer.
+func (c *Container) TailscaleNode(ctx context.Context) TailscaleNode {
 	if !c.Tailscale || c.State != "running" {
-		return ""
+		return TailscaleNode{}
 	}
 	statusJSON, err := c.Runtime.Run(ctx, "", "exec", c.Name, "tailscale", "status", "--json")
 	if err != nil {
 		c.Logger.Log(ctx, slog.LevelDebug, "tailscale status failed", "err", err)
-		return ""
+		return TailscaleNode{}
 	}
 	var status tailscaleStatus
 	if err := json.Unmarshal([]byte(statusJSON), &status); err != nil {
 		c.Logger.Log(ctx, slog.LevelDebug, "tailscale status JSON parse failed", "err", err)
-		return ""
+		return TailscaleNode{}
 	}
-	fqdn := strings.TrimRight(status.Self.DNSName, ".")
-	if fqdn == "" {
+	n := TailscaleNode{ID: status.Self.ID, FQDN: strings.TrimRight(status.Self.DNSName, ".")}
+	if n.FQDN == "" {
 		c.Logger.Log(ctx, slog.LevelDebug, "tailscale FQDN empty")
 	}
-	return fqdn
+	return n
 }
 
 // SyncDefaultBranch mirrors the host's cached remote branches for Repos[repoIdx]
@@ -4155,74 +4135,17 @@ func (c *Container) recordFetchedBranchSyncPoints(ctx context.Context, r *Repo, 
 }
 
 // prepareTailscaleAuthKey mints an ephemeral pre-authorized auth key when
-// Tailscale is requested without one. It fails instead of leaving the node to
-// browser authentication.
-func (c *Container) prepareTailscaleAuthKey(ctx context.Context, opts *StartOpts) error {
-	if !opts.Tailscale || opts.TailscaleAuthKey != "" {
+// Tailscale is requested.
+func prepareTailscaleAuthKey(ctx context.Context, opts *StartOpts) error {
+	if !opts.tailscale() {
 		return nil
 	}
-	key, err := generateTailscaleAuthKey(ctx, c.TailscaleAPIKey)
+	key, err := generateTailscaleAuthKey(ctx, opts.TailscaleAPIKey)
 	if err != nil {
 		return fmt.Errorf("tailscale auth key: %w", err)
 	}
-	opts.TailscaleAuthKey = key
-	c.tailscaleEphemeral = true
+	opts.tailscaleAuthKey = key
 	return nil
-}
-
-func (c *Container) tailscaleDeviceID(ctx context.Context) (string, error) {
-	statusJSON, statusErr := c.Runtime.Run(ctx, "", "exec", c.Name, "tailscale", "status", "--json")
-	if statusErr == nil {
-		deviceID, err := tailscaleDeviceIDFromStatus(statusJSON)
-		if err == nil && deviceID != "" {
-			return deviceID, nil
-		}
-		if err != nil {
-			statusErr = err
-		}
-	}
-
-	deviceID, fileErr := c.readContainerFile(ctx, tailscaleDeviceIDPath)
-	if fileErr == nil {
-		return strings.TrimSpace(deviceID), nil
-	}
-	if errors.Is(fileErr, fs.ErrNotExist) {
-		return "", nil
-	}
-	return "", errors.Join(statusErr, fileErr)
-}
-
-func tailscaleDeviceIDFromStatus(statusJSON string) (string, error) {
-	var status tailscaleStatus
-	if err := json.Unmarshal([]byte(statusJSON), &status); err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(status.Self.ID), nil
-}
-
-func (c *Container) readContainerFile(ctx context.Context, containerPath string) (content string, err error) {
-	tmpDir, err2 := os.MkdirTemp("", "md-container-file-*")
-	if err2 != nil {
-		return "", err2
-	}
-	defer func() {
-		if err2 := os.RemoveAll(tmpDir); err2 != nil && !os.IsNotExist(err2) {
-			err = errors.Join(err, err2)
-		}
-	}()
-
-	containerDir := path.Dir(containerPath)
-	// Copy the parent directory so a missing file becomes a typed fs.ErrNotExist
-	// from os.ReadFile instead of runtime-specific command text.
-	if _, err := c.Runtime.Run(ctx, "", "cp", c.Name+":"+containerDir+"/.", tmpDir); err != nil {
-		return "", err
-	}
-	dst := filepath.Join(tmpDir, path.Base(containerPath))
-	data, err2 := os.ReadFile(dst) // #nosec G304 -- dst is a private temp file populated by docker cp.
-	if err2 != nil {
-		return "", err2
-	}
-	return string(data), nil
 }
 
 // pullBranches integrates mapped branches from the container's remote-tracking
@@ -4521,6 +4444,61 @@ func (c *Container) runCmd(ctx context.Context, dir string, args []string) (stri
 		err = commandErrorWithStderr("", err, stderr.String())
 	}
 	return strings.TrimSpace(string(out)), err
+}
+
+// tailscaleResumeTimeout bounds how long Revive waits for tailscaled to leave
+// its startup states before deciding whether the node needs a new login.
+const tailscaleResumeTimeout = 30 * time.Second
+
+// tailscaleResumePoll is the interval between tailscaled state reads.
+const tailscaleResumePoll = 250 * time.Millisecond
+
+// resumeTailscale logs a revived container in again when its node is gone.
+//
+// The launch auth key in the container's environment is single-use and
+// expires after five minutes, so start.sh resumes tailscaled's saved login on
+// a restart instead of using it. The tailnet removes an ephemeral node 30 to
+// 60 minutes after it goes offline; tailscaled then reports NeedsLogin, and
+// resumeTailscale mints a new key and runs /root/tailscale-up.sh with it. The
+// new node has a new ID. Any other state, including a tailscaled still
+// starting at the deadline, keeps the saved login.
+func (c *Container) resumeTailscale(ctx context.Context, stdout, stderr io.Writer, apiKey string) error {
+	deadline := time.Now().Add(tailscaleResumeTimeout)
+	for {
+		state := ""
+		if out, err := c.Runtime.Run(ctx, "", "exec", c.Name, "tailscale", "status", "--json"); err == nil {
+			var status tailscaleStatus
+			if err := json.Unmarshal([]byte(out), &status); err == nil {
+				state = status.BackendState
+			}
+		}
+		switch state {
+		case "NeedsLogin":
+			if apiKey == "" {
+				return errors.New("the tailnet removed the stopped container's Tailscale node; logging in again needs a Tailscale API key")
+			}
+			key, err := generateTailscaleAuthKey(ctx, apiKey)
+			if err != nil {
+				return fmt.Errorf("tailscale auth key: %w", err)
+			}
+			if err := c.Runtime.RunOut(ctx, "", stdout, stderr, "exec", "--user", "0:0", "-e", "TAILSCALE_AUTHKEY="+key, c.Name, "/root/tailscale-up.sh"); err != nil {
+				return fmt.Errorf("tailscale login: %w", err)
+			}
+			return nil
+		case "", "NoState", "Starting":
+			if !time.Now().Before(deadline) {
+				c.Logger.Log(ctx, slog.LevelWarn, "tailscale still starting after revive", "state", state)
+				return nil
+			}
+		default:
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(tailscaleResumePoll):
+		}
+	}
 }
 
 // runCmdOut executes a command, directing its stdout and stderr to the given writers.
@@ -4883,7 +4861,7 @@ func (c *Container) createContainer(ctx context.Context, stdout, stderr io.Write
 
 	// Pass through the host TUN device when Tailscale or rootless Podman
 	// (via -sudo) need to create network interfaces.
-	if opts.Tailscale || opts.Sudo {
+	if opts.tailscale() || opts.Sudo {
 		runArgs = append(runArgs, "--device=/dev/net/tun:/dev/net/tun")
 	}
 
@@ -4912,17 +4890,11 @@ func (c *Container) createContainer(ctx context.Context, stdout, stderr io.Write
 	// Ref: https://tailscale.com/blog/docker-tailscale-guide (blog post)
 	// Ref: https://github.com/containerd/containerd/issues/11078 (cgroup v2
 	//      breakage of internal mknod)
-	if opts.Tailscale {
+	if opts.tailscale() {
 		runArgs = append(runArgs,
 			"-e", "MD_TAILSCALE=1")
-		if opts.TailscaleAuthKey != "" {
-			runArgs = append(runArgs, "-e", "TAILSCALE_AUTHKEY="+opts.TailscaleAuthKey)
-		}
-		if c.tailscaleEphemeral {
-			runArgs = append(runArgs, "-e", "MD_TAILSCALE_EPHEMERAL=1")
-		}
-		if opts.resetTailscale {
-			runArgs = append(runArgs, "-e", "MD_TAILSCALE_RESET=1")
+		if opts.tailscaleAuthKey != "" {
+			runArgs = append(runArgs, "-e", "TAILSCALE_AUTHKEY="+opts.tailscaleAuthKey)
 		}
 	}
 
@@ -4978,11 +4950,8 @@ func (c *Container) createContainer(ctx context.Context, stdout, stderr io.Write
 	if opts.Display {
 		runArgs = append(runArgs, "--label", "md.display=1")
 	}
-	if opts.Tailscale {
+	if opts.tailscale() {
 		runArgs = append(runArgs, "--label", "md.tailscale=1")
-		if c.tailscaleEphemeral {
-			runArgs = append(runArgs, "--label", "md.tailscale_ephemeral=1")
-		}
 	}
 	if opts.USB {
 		runArgs = append(runArgs, "--label", "md.usb=1")
@@ -5125,48 +5094,8 @@ func waitForTCP(ctx context.Context, addr string, deadline time.Time) error {
 	}
 }
 
-// tryReadTailscaleAuthURL reads the Tailscale auth URL from the container.
-// A single docker exec runs a polling loop: jq validates the JSON file and
-// prints it compactly; if invalid or empty, sleep and retry. Go parses the
-// result with tailscaleUpStatus for validation.
-//
-// TODO: This browser authentication path is dead code. prepareTailscaleAuthKey
-// fails Launch and Fork when it cannot mint a pre-authorized auth key, so every
-// Tailscale container this md version creates carries TAILSCALE_AUTHKEY.
-// provisionContainer and Fork therefore never call this reader, and
-// StartResult.TailscaleAuthURL stays empty. Only the browser authentication
-// branch of start_tailscale in rsc/specialized/root/start.sh can still run:
-// when reviving a container that an older md created without an auth key.
-// Delete this reader, its two call sites, tailscaleUpStatus,
-// StartResult.TailscaleAuthURL, the md CLI "Tailscale auth" line, and that
-// start.sh branch with /run/md/tailscale_auth_url.json together.
-// caic reads StartResult.TailscaleAuthURL, so drop its use when bumping md.
-func (c *Container) tryReadTailscaleAuthURL(ctx context.Context, stdout io.Writer) (string, error) {
-	readCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-
-	script := `while true; do
-  if jq -ce '.' /run/md/tailscale_auth_url.json 2>/dev/null; then exit 0; fi
-  sleep 0.1
-done`
-	out, err := c.Runtime.Run(readCtx, "", "exec", c.Name, "sh", "-c", script)
-	if err != nil || out == "" {
-		return "", errors.New("timed out waiting for tailscale up --json output")
-	}
-
-	var status tailscaleUpStatus
-	if err := json.Unmarshal([]byte(out), &status); err != nil {
-		return "", fmt.Errorf("parsing tailscale up --json output: %w (%q)", err, out)
-	}
-	if status.AuthURL == "" {
-		return "", errors.New("tailscale up --json had no AuthURL field")
-	}
-	_, _ = fmt.Fprintf(stdout, "- Tailscale auth URL: %s\n", status.AuthURL)
-	return status.AuthURL, nil
-}
-
-// provisionContainer waits for SSH, pushes repos and submodules, sends .env,
-// and waits for Tailscale auth. Must be called after configureLaunchedContainer.
+// provisionContainer waits for SSH, pushes repos and submodules, and sends .env.
+// Must be called after configureLaunchedContainer.
 //
 // Mapped branches and default refs are pushed together to reduce latency.
 func (c *Container) provisionContainer(ctx context.Context, stdout, stderr io.Writer, opts *StartOpts) (*StartResult, error) {
@@ -5174,17 +5103,6 @@ func (c *Container) provisionContainer(ctx context.Context, stdout, stderr io.Wr
 	minBytes := opts.GitObjectCopyMinBytes
 	if minBytes == 0 {
 		minBytes = 512 << 20
-	}
-
-	// Try to read the Tailscale auth URL via docker exec before SSH is up,
-	// so the user can authenticate even if SSHD is slow to start.
-	// TODO: Unreachable; see tryReadTailscaleAuthURL.
-	if opts.Tailscale && opts.TailscaleAuthKey == "" {
-		authURL, err := c.tryReadTailscaleAuthURL(ctx, stdout)
-		if err != nil {
-			return nil, fmt.Errorf("reading Tailscale auth URL: %w", err)
-		}
-		result.TailscaleAuthURL = authURL
 	}
 
 	// Phase 1: wait for SSH to accept connections.
@@ -6101,7 +6019,10 @@ func cacheSpecFromLabel(label string) []CacheMount {
 
 // tailscaleStatus is the subset of `tailscale status --json` we care about.
 type tailscaleStatus struct {
-	Self struct {
+	// BackendState is the ipn.State name, such as "Starting", "Running" or
+	// "NeedsLogin".
+	BackendState string `json:"BackendState"`
+	Self         struct {
 		ID      string `json:"ID"`
 		DNSName string `json:"DNSName"`
 	} `json:"Self"`

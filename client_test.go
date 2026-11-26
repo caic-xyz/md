@@ -1010,7 +1010,6 @@ func TestContainerAuthKeyOrdering(t *testing.T) { //nolint:paralleltest // repla
 			const baseImage = "local/auth-test:v1"
 			name := userImageName(baseImage, activeCacheKey(nil, ""), PlatformLinuxAMD64.String())
 			c, original := newImageDecisionTestClient(t, name, baseImage)
-			c.TailscaleAPIKey = "test-api-key"
 			original.localBase = true
 			original.missing = true
 			original.baseDigest = original.baseID
@@ -1039,10 +1038,10 @@ func TestContainerAuthKeyOrdering(t *testing.T) { //nolint:paralleltest // repla
 				if err := os.WriteFile(filepath.Join(configDir, ct.Name+".conf"), nil, 0o600); err != nil {
 					t.Fatal(err)
 				}
-				_, err = ct.Fork(t.Context(), io.Discard, io.Discard, &ForkOpts{Tailscale: true})
+				_, err = ct.Fork(t.Context(), io.Discard, io.Discard, &ForkOpts{TailscaleAPIKey: "test-api-key"})
 				want = []string{"commit", "key", "run"}
 			} else {
-				err = ct.Launch(t.Context(), io.Discard, io.Discard, &StartOpts{BaseImage: baseImage, Platform: PlatformLinuxAMD64.String(), Tailscale: true})
+				err = ct.Launch(t.Context(), io.Discard, io.Discard, &StartOpts{BaseImage: baseImage, Platform: PlatformLinuxAMD64.String(), TailscaleAPIKey: "test-api-key"})
 			}
 			if !errors.Is(err, paused.launchErr) {
 				t.Fatalf("%s = %v, want stopped container creation", operation, err)
@@ -1610,9 +1609,6 @@ func runFakeRuntime(args []string, logPath string, localBase bool, containerStat
 	if len(args) >= 1 && args[0] == "exec" && containerState == "exited" {
 		_, _ = fmt.Fprintln(os.Stderr, "container is not running")
 		return 1
-	}
-	if len(args) == 3 && args[0] == "cp" && strings.HasSuffix(args[1], ":"+filepath.ToSlash(filepath.Dir(tailscaleDeviceIDPath))+"/.") {
-		return 0
 	}
 	if len(args) >= 1 && args[0] == "stats" {
 		_, _ = fmt.Fprintln(os.Stdout, `{"Name":"md-one","CPUPerc":"1.5%","MemUsage":"10MiB / 1GiB","MemPerc":"1%","PIDs":"3","NetIO":"2kB / 3kB","BlockIO":"4kB / 5kB"}`)

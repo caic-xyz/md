@@ -165,10 +165,7 @@ ensure_account() {
 
 # ensure_directories creates the directories md relies on, idempotently.
 ensure_directories() {
-  install -d -m 0755 /run/md /var/lib/md
-  # Pre-create the Tailscale well-known path and file so the host tooling can
-  # inotify-wait for the first write.
-  : >/run/md/tailscale_auth_url.json
+  install -d -m 0755 /run/md
   install -d -m 0755 -o "$MD_USER" -g "$MD_GROUP" "$MD_HOME"
   install -d -m 0700 -o "$MD_USER" -g "$MD_GROUP" "$MD_HOME/.ssh"
 }
@@ -351,20 +348,20 @@ EOF
   fi
 }
 
-write_tailscale_device_id() {
-  local ts_id
-  ts_id="$(tailscale status --json 2>/dev/null | jq -r '.Self.ID // empty' || true)"
-  if [ -n "$ts_id" ]; then
-    echo "$ts_id" >/var/lib/md/tailscale_device_id
-  fi
-}
-
 start_tailscale() {
   log "Starting Tailscale..."
-  if [ -n "${MD_TAILSCALE_RESET:-}" ]; then
+  # md-hostname names the container that owns the tailscaled state. A match
+  # means a restart: the launch auth key is single-use and expired, so
+  # tailscaled resumes its saved login, and md Revive logs in again if the
+  # tailnet removed the ephemeral node. A mismatch means a fork snapshot that
+  # carries its source's node identity, which must not be reused.
+  local owner_file=/var/lib/tailscale/md-hostname resume=""
+  if [ "$(cat "$owner_file" 2>/dev/null || true)" = "$(hostname)" ]; then
+    resume=1
+  else
     rm -rf /var/lib/tailscale /run/tailscale
-    rm -f /var/lib/md/tailscale_device_id
     mkdir -p /var/lib/tailscale
+    hostname >"$owner_file"
   fi
   # /dev/net/tun is passed through from the host via --device (see docker.go).
   # The tun kernel module must be loaded on the host for this to work.
@@ -376,37 +373,17 @@ start_tailscale() {
     fi
     sleep 0.1
   done
-  if [ -n "${TAILSCALE_AUTHKEY:-}" ]; then
-    tailscale up --hostname="$(hostname)" --ssh --authkey="$TAILSCALE_AUTHKEY"
-    # Allow non-root users to access tailscale CLI (must be after tailscale up)
-    tailscale set --operator="$MD_USER"
-    write_tailscale_device_id
-    # Update MOTD with Tailscale FQDN and VNC URL if display is enabled
-    local ts_fqdn
-    ts_fqdn="$(tailscale status --json | jq -r '.Self.DNSName // empty' || true)"
-    ts_fqdn="${ts_fqdn%.}"
-    if [ -n "$ts_fqdn" ]; then
-      echo "Connected to $ts_fqdn" >/etc/motd
-      if [ -n "${MD_DISPLAY:-}" ]; then
-        echo "VNC: vnc://$ts_fqdn:5901" >>/etc/motd
-      fi
-      log "Tailscale connected: $ts_fqdn"
-    fi
-  else
-    # TODO: Dead for containers the current md creates: md fails Launch and
-    # Fork without a pre-authorized auth key, so TAILSCALE_AUTHKEY is always
-    # set. Only reviving a container an older md created without one reaches
-    # this browser authentication branch. See tryReadTailscaleAuthURL in
-    # container.go for everything to delete with it.
-    # Redirect stdout+stderr to the well-known file. tailscale up --json
-    # flushes each JSON line immediately, so the file is readable as soon
-    # as inotify fires on the first write.
-    (
-      tailscale up --hostname="$(hostname)" --ssh --json >/run/md/tailscale_auth_url.json 2>&1
-      tailscale set --operator="$MD_USER"
-      write_tailscale_device_id
-    ) &
+  if [ -n "$resume" ]; then
+    log "Tailscale resuming the saved login"
+    return
   fi
+  # md always passes a pre-authorized auth key; a container an older md
+  # created for browser authentication has none and starts without Tailscale.
+  if [ -z "${TAILSCALE_AUTHKEY:-}" ]; then
+    log "WARNING: Tailscale requested without TAILSCALE_AUTHKEY, continuing without Tailscale"
+    return
+  fi
+  /root/tailscale-up.sh
 }
 
 start_sshd() {

@@ -17,6 +17,7 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -52,6 +53,116 @@ func (r *cpuLimitRuntime) Info(context.Context) (containers.Info, error) {
 func (r *cpuLimitRuntime) RunOut(_ context.Context, _ string, _, _ io.Writer, args ...string) error {
 	r.args = slices.Clone(args)
 	return errors.New("stop after recording launch")
+}
+
+// tailscaleStatusRuntime answers `tailscale status --json` with a fixed reply.
+type tailscaleStatusRuntime struct {
+	containers.Runtime
+
+	status string
+	err    error
+	args   []string
+}
+
+func (r *tailscaleStatusRuntime) Run(_ context.Context, _ string, args ...string) (string, error) {
+	r.args = slices.Clone(args)
+	return r.status, r.err
+}
+
+func TestTailscaleNode(t *testing.T) {
+	t.Parallel()
+	// Trimmed from `tailscale status --json` in a running container.
+	const status = `{"Version":"1.90.6","BackendState":"Running","Self":{"ID":"nTEST1CNTRL","HostName":"md-test","DNSName":"md-test.example.ts.net.","Online":true}}`
+	for _, tc := range []struct {
+		name      string
+		tailscale bool
+		state     string
+		status    string
+		err       error
+		want      TailscaleNode
+		wantExec  bool
+	}{
+		{name: "running", tailscale: true, state: "running", status: status, want: TailscaleNode{ID: "nTEST1CNTRL", FQDN: "md-test.example.ts.net"}, wantExec: true},
+		{name: "stopped", tailscale: true, state: "exited", status: status},
+		{name: "disabled", state: "running", status: status},
+		{name: "exec_error", tailscale: true, state: "running", err: errors.New("tailscaled not running"), wantExec: true},
+		{name: "bad_json", tailscale: true, state: "running", status: "{", wantExec: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := &tailscaleStatusRuntime{status: tc.status, err: tc.err}
+			c := &Container{Client: &Client{Runtime: r}, Logger: slog.New(slog.DiscardHandler), Name: "md-test", Tailscale: tc.tailscale, State: tc.state}
+			if got := c.TailscaleNode(t.Context()); got != tc.want {
+				t.Fatalf("TailscaleNode() = %+v; want %+v", got, tc.want)
+			}
+			if tc.wantExec != (len(r.args) > 0) {
+				t.Fatalf("runtime args = %v; want exec %t", r.args, tc.wantExec)
+			}
+		})
+	}
+}
+
+// tailscaleResumeRuntime answers `tailscale status --json` with successive
+// backend states and records the login command.
+type tailscaleResumeRuntime struct {
+	containers.Runtime
+
+	states   []string
+	loginErr error
+	login    []string
+}
+
+func (r *tailscaleResumeRuntime) Run(context.Context, string, ...string) (string, error) {
+	state := r.states[0]
+	if len(r.states) > 1 {
+		r.states = r.states[1:]
+	}
+	return `{"BackendState":"` + state + `","Self":{"ID":"nTEST1CNTRL"}}`, nil
+}
+
+func (r *tailscaleResumeRuntime) RunOut(_ context.Context, _ string, _, _ io.Writer, args ...string) error {
+	r.login = slices.Clone(args)
+	return r.loginErr
+}
+
+func TestResumeTailscale(t *testing.T) { //nolint:paralleltest // replaces the process-wide default HTTP transport.
+	originalTransport := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = originalTransport })
+	const apiKey = "tskey-api-test" //nolint:gosec // G101: fake token
+	for _, tc := range []struct {   //nolint:paralleltest // shares the process-wide default HTTP transport.
+		name     string
+		states   []string
+		apiKey   string
+		loginErr error
+		wantErr  string
+		wantKey  bool
+	}{
+		{name: "running", states: []string{"Starting", "Running"}, apiKey: apiKey},
+		{name: "node_removed", states: []string{"Starting", "NeedsLogin"}, apiKey: apiKey, wantKey: true},
+		{name: "node_removed_without_api_key", states: []string{"NeedsLogin"}, wantErr: "needs a Tailscale API key"},
+		{name: "login_fails", states: []string{"NeedsLogin"}, apiKey: apiKey, loginErr: errors.New("exit status 1"), wantErr: "tailscale login: exit status 1", wantKey: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var events []string
+			http.DefaultTransport = &authKeyTransport{events: &events}
+			r := &tailscaleResumeRuntime{states: tc.states, loginErr: tc.loginErr}
+			c := &Container{Client: &Client{Runtime: r}, Logger: slog.New(slog.DiscardHandler), Name: "md-test", Tailscale: true, State: "running"}
+			err := c.resumeTailscale(t.Context(), io.Discard, io.Discard, tc.apiKey)
+			if tc.wantErr == "" && err != nil || tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
+				t.Fatalf("resumeTailscale() = %v; want error containing %q", err, tc.wantErr)
+			}
+			if minted := slices.Contains(events, "key"); minted != tc.wantKey {
+				t.Fatalf("minted auth key = %t; want %t", minted, tc.wantKey)
+			}
+			want := []string(nil)
+			if tc.wantKey {
+				want = []string{"exec", "--user", "0:0", "-e", "TAILSCALE_AUTHKEY=test-key", "md-test", "/root/tailscale-up.sh"}
+			}
+			if !slices.Equal(r.login, want) {
+				t.Fatalf("login command = %v; want %v", r.login, want)
+			}
+		})
+	}
 }
 
 func TestLaunchContainerCPULimit(t *testing.T) {
@@ -1483,64 +1594,11 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 		t.Parallel()
 		t.Run("valid", func(t *testing.T) {
 			t.Parallel()
-			for _, opts := range []StartOpts{{}, {Tailscale: true, TailscaleAuthKey: "tskey-auth-provided"}} {
-				c := &Container{Client: &Client{}}
-				want := opts.TailscaleAuthKey
-				if err := c.prepareTailscaleAuthKey(t.Context(), &opts); err != nil {
-					t.Fatalf("prepareTailscaleAuthKey(%+v) = %v", opts, err)
-				}
-				if opts.TailscaleAuthKey != want || c.tailscaleEphemeral {
-					t.Fatalf("prepareTailscaleAuthKey changed the key to %q, ephemeral=%v", opts.TailscaleAuthKey, c.tailscaleEphemeral)
-				}
+			opts := StartOpts{}
+			if err := prepareTailscaleAuthKey(t.Context(), &opts); err != nil || opts.tailscaleAuthKey != "" {
+				t.Fatalf("prepareTailscaleAuthKey without Tailscale = %q, %v", opts.tailscaleAuthKey, err)
 			}
 		})
-		t.Run("error", func(t *testing.T) {
-			t.Parallel()
-			// Without an API key there is no pre-authorized key; md must not
-			// leave the node to browser authentication.
-			c := &Container{Client: &Client{}}
-			opts := StartOpts{Tailscale: true}
-			if err := c.prepareTailscaleAuthKey(t.Context(), &opts); err == nil {
-				t.Fatal("prepareTailscaleAuthKey without an API key succeeded")
-			}
-		})
-	})
-	t.Run("purge_stopped_tailscale_container_before_authentication", func(t *testing.T) {
-		t.Parallel()
-		executable, err := os.Executable()
-		if err != nil {
-			t.Fatal(err)
-		}
-		home := t.TempDir()
-		writeTestSSHConfig(t, home)
-		logPath := filepath.Join(t.TempDir(), "runtime.log")
-		env := []string{
-			fakeRuntimeEnv + "=1",
-			fakeRuntimeLogEnv + "=" + logPath,
-			fakeRuntimeStateEnv + "=exited",
-		}
-		logger := testLogger(t)
-		ct := &Container{
-			Client:    &Client{Home: home, Logger: logger, Runtime: testRuntime(t, executable, logger, env), env: env},
-			Logger:    logger,
-			Name:      "md-test",
-			State:     "exited",
-			Tailscale: true,
-		}
-		var stdout bytes.Buffer
-		if err := ct.Purge(t.Context(), &stdout, io.Discard); err != nil {
-			t.Fatal(err)
-		}
-		if got := stdout.String(); got != "Removed md-test\n" {
-			t.Errorf("Purge output = %q, want %q", got, "Removed md-test\n")
-		}
-		logData, err := os.ReadFile(logPath) //nolint:gosec // private test log.
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !strings.Contains(string(logData), "rm -f -v md-test") {
-			t.Errorf("runtime log missing container removal:\n%s", logData)
-		}
 	})
 	t.Run("configure_global_git_identity_uses_host_global_config", func(t *testing.T) {
 		ctx := t.Context()
@@ -4946,8 +5004,8 @@ func TestFork(t *testing.T) {
 		if got.MaxMemory != 0 {
 			t.Fatalf("default fork memory cap = %d", got.MaxMemory)
 		}
-		if got.Display || got.Tailscale || got.USB || got.Sudo {
-			t.Fatalf("fork options inherited disabled features: display=%v tailscale=%v usb=%v sudo=%v", got.Display, got.Tailscale, got.USB, got.Sudo)
+		if got.Display || got.tailscale() || got.USB || got.Sudo {
+			t.Fatalf("fork options inherited disabled features: display=%v tailscale=%v usb=%v sudo=%v", got.Display, got.tailscale(), got.USB, got.Sudo)
 		}
 		for _, want := range []string{"MD_DISPLAY=", "MD_TAILSCALE=", "TAILSCALE_AUTHKEY=", "MD_SUDO_PASSWORD="} {
 			if !slices.Contains(got.ExtraRunArgs, want) {
@@ -4956,12 +5014,12 @@ func TestFork(t *testing.T) {
 		}
 
 		limit := uint64(12 << 30)
-		got = (&ForkOpts{Display: true, Tailscale: true, USB: true, Sudo: true, MaxMemory: &limit}).startOptions(4 << 30)
+		got = (&ForkOpts{Display: true, TailscaleAPIKey: "tskey-api-k-s", USB: true, Sudo: true, MaxMemory: &limit}).startOptions(4 << 30) //nolint:gosec // G101: fake token
 		if got.MaxMemory != 12<<30 {
 			t.Fatalf("fork memory cap = %d, want 12 GiB", got.MaxMemory)
 		}
-		if !got.Display || !got.Tailscale || !got.USB || !got.Sudo {
-			t.Fatalf("fork options did not enable requested features: display=%v tailscale=%v usb=%v sudo=%v", got.Display, got.Tailscale, got.USB, got.Sudo)
+		if !got.Display || !got.tailscale() || !got.USB || !got.Sudo {
+			t.Fatalf("fork options did not enable requested features: display=%v tailscale=%v usb=%v sudo=%v", got.Display, got.tailscale(), got.USB, got.Sudo)
 		}
 		if len(got.ExtraRunArgs) != 0 {
 			t.Fatalf("enabled fork has env-clearing run args: %v", got.ExtraRunArgs)

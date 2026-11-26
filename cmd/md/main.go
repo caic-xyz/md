@@ -255,7 +255,6 @@ func (a *app) newClient() (*md.Client, error) {
 	}
 	c.ControlMaster = a.controlMasterEnabled
 	c.GithubToken = os.Getenv("GITHUB_TOKEN")
-	c.TailscaleAPIKey = os.Getenv("TAILSCALE_API_KEY")
 	a.client = c
 	return c, nil
 }
@@ -699,15 +698,18 @@ func (a *app) cmdStart(ctx context.Context, args []string) error {
 	if githubToken != "" {
 		extraEnv = append(extraEnv, "GITHUB_TOKEN="+githubToken)
 	}
+	tailscaleAPIKey, err := requireTailscaleAPIKey(*tailscale)
+	if err != nil {
+		return err
+	}
 	opts := md.StartOpts{
 		BaseImage:             baseImage,
 		Platform:              platform,
 		GitObjectCopyMinBytes: cf.gitObjectCopyMinBytes,
 		Display:               *display,
-		Tailscale:             *tailscale,
 		USB:                   *usb,
 		Sudo:                  *sudoFlag,
-		TailscaleAuthKey:      os.Getenv("TAILSCALE_AUTHKEY"),
+		TailscaleAPIKey:       tailscaleAPIKey,
 		Caches:                caches,
 		Mounts:                mounts,
 		Labels:                labels.values,
@@ -731,7 +733,11 @@ func (a *app) cmdStart(ctx context.Context, args []string) error {
 		if err := ensureStartBranches(ctx, ct.Logger, ct.Repos); err != nil {
 			return err
 		}
-		if err := ct.Revive(ctx, os.Stdout, os.Stderr); err != nil {
+		var reviveOpts md.ReviveOpts
+		if ct.Tailscale {
+			reviveOpts.TailscaleAPIKey = os.Getenv("TAILSCALE_API_KEY")
+		}
+		if err := ct.Revive(ctx, os.Stdout, os.Stderr, &reviveOpts); err != nil {
 			return fmt.Errorf("reviving %s: %w", ct.Name, err)
 		}
 		if !*quiet {
@@ -781,10 +787,6 @@ func printContainerSummary(ctx context.Context, ct *md.Container, r *md.StartRes
 	if r != nil {
 		if r.TailscaleFQDN != "" {
 			fmt.Printf("  >  Tailscale FQDN: %s\n", r.TailscaleFQDN)
-		}
-		// TODO: Never printed; see md.Container.tryReadTailscaleAuthURL.
-		if r.TailscaleAuthURL != "" {
-			fmt.Printf("  >  Tailscale auth: %s\n", r.TailscaleAuthURL)
 		}
 	}
 	if len(ct.Repos) > 0 {
@@ -992,6 +994,18 @@ func runTemporaryCommand(ctx context.Context, c *md.Container, stdout, stderr io
 	return 0, nil
 }
 
+// requireTailscaleAPIKey returns TAILSCALE_API_KEY when Tailscale is requested.
+func requireTailscaleAPIKey(requested bool) (string, error) {
+	if !requested {
+		return "", nil
+	}
+	key := os.Getenv("TAILSCALE_API_KEY")
+	if key == "" {
+		return "", errors.New("-tailscale requires TAILSCALE_API_KEY, create an API access token at https://login.tailscale.com/admin/settings/keys")
+	}
+	return key, nil
+}
+
 func purgeTemporaryContainer(ctx context.Context, c *md.Container) error {
 	if err := c.Purge(ctx, io.Discard, io.Discard); err != nil && err.Error() != c.Name+" not found" {
 		return fmt.Errorf("cleanup temporary container %s: %w", c.Name, err)
@@ -1048,20 +1062,29 @@ func shellQuoteArgs(args []string) string {
 	return strings.Join(quoted, " ")
 }
 
+// tailscaleFeature renders a Tailscale node in the md list features column.
+func tailscaleFeature(n md.TailscaleNode) string {
+	if n.ID == "" {
+		return "tailscale:" + n.FQDN
+	}
+	return "tailscale:" + n.FQDN + " (" + n.ID + ")"
+}
+
 // containerListEntry is the JSON representation of a container in `md list --json`.
 type containerListEntry struct {
-	Name      string            `json:"name"`
-	State     string            `json:"state"`
-	Uptime    string            `json:"uptime"`
-	SSHPort   int32             `json:"ssh_port"`
-	VNCPort   int32             `json:"vncPort,omitempty"`
-	Display   bool              `json:"display,omitempty"`
-	Tailscale bool              `json:"tailscale,omitempty"`
-	FQDN      string            `json:"fqdn,omitempty"`
-	Sudo      bool              `json:"sudo,omitempty"`
-	USB       bool              `json:"usb,omitempty"`
-	Repos     []md.Repo         `json:"repos,omitempty"`
-	Stats     *containers.Stats `json:"stats,omitempty"`
+	Name        string            `json:"name"`
+	State       string            `json:"state"`
+	Uptime      string            `json:"uptime"`
+	SSHPort     int32             `json:"ssh_port"`
+	VNCPort     int32             `json:"vncPort,omitempty"`
+	Display     bool              `json:"display,omitempty"`
+	Tailscale   bool              `json:"tailscale,omitempty"`
+	FQDN        string            `json:"fqdn,omitempty"`
+	TailscaleID string            `json:"tailscale_id,omitempty"`
+	Sudo        bool              `json:"sudo,omitempty"`
+	USB         bool              `json:"usb,omitempty"`
+	Repos       []md.Repo         `json:"repos,omitempty"`
+	Stats       *containers.Stats `json:"stats,omitempty"`
 }
 
 func (a *app) cmdList(ctx context.Context, args []string) error {
@@ -1116,7 +1139,9 @@ func (a *app) cmdList(ctx context.Context, args []string) error {
 				Stats:     allStats[ct.Name],
 			}
 			if ct.Tailscale {
-				entries[i].FQDN = ct.TailscaleFQDN(ctx)
+				n := ct.TailscaleNode(ctx)
+				entries[i].FQDN = n.FQDN
+				entries[i].TailscaleID = n.ID
 			}
 		}
 		enc := json.NewEncoder(os.Stdout)
@@ -1134,7 +1159,7 @@ func (a *app) cmdList(ctx context.Context, args []string) error {
 		features string
 	}
 	rows := make([]row, len(cts))
-	tsFQDNs := make([]string, len(cts)) // populated in parallel for tailscale containers
+	tsNodes := make([]md.TailscaleNode, len(cts)) // populated in parallel for tailscale containers
 	nameWidth := len("Container")
 	repoWidth := len("Repos")
 	for i, ct := range cts {
@@ -1160,22 +1185,22 @@ func (a *app) cmdList(ctx context.Context, args []string) error {
 		rows[i].features = strings.Join(feats, ",")
 	}
 
-	// Phase 2: query Tailscale FQDNs in parallel.
+	// Phase 2: query Tailscale nodes in parallel.
 	var wg sync.WaitGroup
 	for i, ct := range cts {
 		if ct.Tailscale && ct.State == "running" {
 			wg.Go(func() {
-				tsFQDNs[i] = ct.TailscaleFQDN(ctx)
+				tsNodes[i] = ct.TailscaleNode(ctx)
 			})
 		}
 	}
 	wg.Wait()
 
-	// Phase 3: rebuild feature strings with FQDNs and compute feature width.
+	// Phase 3: rebuild feature strings with Tailscale nodes and compute feature width.
 	featWidth := len("Features")
 	for i := range cts {
-		if fqdn := tsFQDNs[i]; fqdn != "" {
-			rows[i].features = "tailscale:" + fqdn
+		if n := tsNodes[i]; n.FQDN != "" {
+			rows[i].features = tailscaleFeature(n)
 		}
 		featWidth = max(featWidth, len(rows[i].features))
 	}
@@ -1642,19 +1667,23 @@ func (a *app) cmdFork(ctx context.Context, args []string) error {
 			DestPrimary:    dest,
 		})
 	}
+	tailscaleAPIKey, err := requireTailscaleAPIKey(tailscale.resolveForkCapability(sourceCt.Tailscale))
+	if err != nil {
+		return err
+	}
 	opts := md.ForkOpts{
-		Repos:        forkRepos,
-		Display:      display.resolveForkCapability(sourceCt.Display),
-		Tailscale:    tailscale.resolveForkCapability(sourceCt.Tailscale),
-		USB:          usb.resolveForkCapability(sourceCt.USB),
-		Sudo:         sudoFlag.resolveForkCapability(sourceCt.Sudo),
-		Labels:       labels.values,
-		Quiet:        *quiet,
-		ExtraEnv:     extraEnv,
-		Mounts:       mounts,
-		MaxCPUs:      *cpus,
-		MaxMemory:    maxMemory,
-		ExtraRunArgs: dockerFlags.withDefaultOOMScoreAdj(),
+		Repos:           forkRepos,
+		Display:         display.resolveForkCapability(sourceCt.Display),
+		TailscaleAPIKey: tailscaleAPIKey,
+		USB:             usb.resolveForkCapability(sourceCt.USB),
+		Sudo:            sudoFlag.resolveForkCapability(sourceCt.Sudo),
+		Labels:          labels.values,
+		Quiet:           *quiet,
+		ExtraEnv:        extraEnv,
+		Mounts:          mounts,
+		MaxCPUs:         *cpus,
+		MaxMemory:       maxMemory,
+		ExtraRunArgs:    dockerFlags.withDefaultOOMScoreAdj(),
 	}
 	fork, err := sourceCt.Fork(ctx, os.Stdout, os.Stderr, &opts)
 	if err != nil {
