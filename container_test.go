@@ -134,19 +134,22 @@ func TestResumeTailscale(t *testing.T) { //nolint:paralleltest // replaces the p
 		states   []string
 		apiKey   string
 		loginErr error
+		tags     []string
 		wantErr  string
 		wantKey  bool
 	}{
 		{name: "running", states: []string{"Starting", "Running"}, apiKey: apiKey},
 		{name: "node_removed", states: []string{"Starting", "NeedsLogin"}, apiKey: apiKey, wantKey: true},
+		{name: "node_removed_with_saved_tags", states: []string{"NeedsLogin"}, apiKey: apiKey, tags: []string{"tag:ci"}, wantKey: true},
 		{name: "node_removed_without_api_key", states: []string{"NeedsLogin"}, wantErr: "needs a Tailscale API key"},
 		{name: "login_fails", states: []string{"NeedsLogin"}, apiKey: apiKey, loginErr: errors.New("exit status 1"), wantErr: "tailscale login: exit status 1", wantKey: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var events []string
-			http.DefaultTransport = &authKeyTransport{events: &events}
+			var tags [][]string
+			http.DefaultTransport = &authKeyTransport{events: &events, tags: &tags}
 			r := &tailscaleResumeRuntime{states: tc.states, loginErr: tc.loginErr}
-			c := &Container{Client: &Client{Runtime: r}, Logger: slog.New(slog.DiscardHandler), Name: "md-test", Tailscale: true, State: "running"}
+			c := &Container{Client: &Client{Runtime: r}, Logger: slog.New(slog.DiscardHandler), Name: "md-test", Tailscale: true, TailscaleTags: tc.tags, State: "running"}
 			err := c.resumeTailscale(t.Context(), io.Discard, io.Discard, tc.apiKey)
 			if tc.wantErr == "" && err != nil || tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
 				t.Fatalf("resumeTailscale() = %v; want error containing %q", err, tc.wantErr)
@@ -154,12 +157,44 @@ func TestResumeTailscale(t *testing.T) { //nolint:paralleltest // replaces the p
 			if minted := slices.Contains(events, "key"); minted != tc.wantKey {
 				t.Fatalf("minted auth key = %t; want %t", minted, tc.wantKey)
 			}
+			wantTags := tc.tags
+			if wantTags == nil {
+				wantTags = []string{DefaultTailscaleTag}
+			}
+			if tc.wantKey && (len(tags) != 1 || !slices.Equal(tags[0], wantTags)) {
+				t.Fatalf("auth key tags = %q; want %q", tags, wantTags)
+			}
 			want := []string(nil)
 			if tc.wantKey {
 				want = []string{"exec", "--user", "0:0", "-e", "TAILSCALE_AUTHKEY=test-key", "md-test", "/root/tailscale-up.sh"}
 			}
 			if !slices.Equal(r.login, want) {
 				t.Fatalf("login command = %v; want %v", r.login, want)
+			}
+		})
+	}
+}
+
+func TestLaunchContainerTailscaleTags(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		tags []string
+		want string
+	}{
+		{name: "default", want: "md.tailscale_tags=tag:md"},
+		{name: "configured", tags: []string{"tag:ci", "tag:agents"}, want: "md.tailscale_tags=tag:ci tag:agents"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := &cpuLimitRuntime{cpus: 8, memTotal: 16 << 30}
+			c := &Container{Client: &Client{Runtime: r}, Name: "md-test"}
+			opts := &StartOpts{TailscaleAPIKey: "tskey-api-test", TailscaleTags: tc.tags, tailscaleAuthKey: "tskey-auth-test"} //nolint:gosec // G101: fake tokens
+			if err := c.createContainer(t.Context(), io.Discard, io.Discard, opts, "test-image"); err == nil {
+				t.Fatal("expected recording runtime to stop launch")
+			}
+			if !slices.Contains(r.args, tc.want) {
+				t.Fatalf("launch args = %v; want label %s", r.args, tc.want)
 			}
 		})
 	}
@@ -5297,10 +5332,13 @@ func TestUnmarshalContainer(t *testing.T) {
 		t.Parallel()
 		reposData, _ := json.Marshal([]Repo{{GitRoot: "/home/user/repo", Branches: []string{"main"}}})
 		reposB64 := base64.StdEncoding.EncodeToString(reposData)
-		raw := `{"Names":"md-repo-main","State":"running","CreatedAt":"2025-06-15 10:30:00 +0000 UTC","Labels":"md.repos=` + reposB64 + `,other=ignored"}`
+		raw := `{"Names":"md-repo-main","State":"running","CreatedAt":"2025-06-15 10:30:00 +0000 UTC","Labels":"md.repos=` + reposB64 + `,md.tailscale_tags=tag:md tag:ci-2,other=ignored"}`
 		ct, err := unmarshalContainer(t.Context(), testClient(t), []byte(raw))
 		if err != nil {
 			t.Fatal(err)
+		}
+		if want := []string{"tag:md", "tag:ci-2"}; !slices.Equal(ct.TailscaleTags, want) {
+			t.Errorf("TailscaleTags = %q, want %q", ct.TailscaleTags, want)
 		}
 		if len(ct.Repos) != 1 {
 			t.Fatalf("len(Repos) = %d, want 1", len(ct.Repos))
@@ -5592,6 +5630,7 @@ func TestFillFromInspect(t *testing.T) {
     "Labels": {
       "md.display": "1",
       "md.tailscale": "1",
+      "md.tailscale_tags": "tag:ci",
       "md.usb": "1",
       "md.sudo": "1",
       "custom": "value"
@@ -5617,6 +5656,9 @@ func TestFillFromInspect(t *testing.T) {
 	}
 	if !ct.Display || !ct.Tailscale || !ct.USB || !ct.Sudo {
 		t.Errorf("expected all flags true, got Display=%v Tailscale=%v USB=%v Sudo=%v", ct.Display, ct.Tailscale, ct.USB, ct.Sudo)
+	}
+	if !slices.Equal(ct.TailscaleTags, []string{"tag:ci"}) {
+		t.Errorf("TailscaleTags = %q, want [tag:ci]", ct.TailscaleTags)
 	}
 	if ct.Labels["custom"] != "value" {
 		t.Errorf("custom label = %q, want value", ct.Labels["custom"])

@@ -1247,3 +1247,16 @@ func TestShellSplitSlice(t *testing.T) {
 		})
 	}
 }
+
+func TestRequireTailscaleAPIKey(t *testing.T) {
+	t.Setenv("TAILSCALE_API_KEY", "tskey-api-test")
+	if key, err := requireTailscaleAPIKey(true, []string{"tag:ci"}); err != nil || key != "tskey-api-test" {
+		t.Errorf("requested with a tag = %q, %v", key, err)
+	}
+	if _, err := requireTailscaleAPIKey(false, []string{"tag:ci"}); err == nil {
+		t.Error("a tag without Tailscale must fail")
+	}
+	if _, err := requireTailscaleAPIKey(true, []string{"ci"}); err == nil {
+		t.Error("an invalid tag must fail")
+	}
+}

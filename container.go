@@ -1056,12 +1056,15 @@ type StartOpts struct {
 	Display bool
 	// TailscaleAPIKey enables Tailscale networking inside the container when set. It is a Tailscale API
 	// access token: Launch mints a one-time ephemeral pre-authorized auth key with it right before creating
-	// the container, so the node leaves the tailnet on its own once the container is gone. The tailnet policy
-	// must allow "tag:md".
+	// the container, so the node leaves the tailnet on its own once the container is gone.
 	//
 	// https://tailscale.com/docs/reference/tailscale-api and
 	// https://tailscale.com/docs/features/ephemeral-nodes
 	TailscaleAPIKey string
+	// TailscaleTags are the tags of the container's node; empty means
+	// DefaultTailscaleTag. The API key's owner must own each tag in the tailnet
+	// policy. Revive reuses them.
+	TailscaleTags []string
 	// USB enables USB device passthrough (Linux only).
 	USB bool
 	// Sudo enables password-based sudo for the user account. A random
@@ -1101,6 +1104,14 @@ type StartOpts struct {
 // tailscale reports whether the container joins a tailnet.
 func (opts *StartOpts) tailscale() bool {
 	return opts.TailscaleAPIKey != ""
+}
+
+// tailscaleTags returns the node's tags, or nil without Tailscale.
+func (opts *StartOpts) tailscaleTags() []string {
+	if !opts.tailscale() {
+		return nil
+	}
+	return tailscaleTagsOrDefault(opts.TailscaleTags)
 }
 
 // StartResult contains Tailscale information from Connect. Port information
@@ -1159,6 +1170,9 @@ type ForkOpts struct {
 	// TailscaleAPIKey enables Tailscale networking on the forked container when set. See
 	// StartOpts.TailscaleAPIKey.
 	TailscaleAPIKey string
+	// TailscaleTags are the tags of the forked container's node. See
+	// StartOpts.TailscaleTags.
+	TailscaleTags []string
 	// USB enables USB device passthrough on the forked container.
 	USB bool
 	// Sudo enables root access via sudo on the forked container.
@@ -1196,6 +1210,7 @@ func (opts *ForkOpts) startOptions(sourceMemory uint64) *StartOpts {
 		Mounts:          opts.Mounts,
 		Display:         opts.Display,
 		TailscaleAPIKey: opts.TailscaleAPIKey,
+		TailscaleTags:   opts.TailscaleTags,
 		USB:             opts.USB,
 		Sudo:            opts.Sudo,
 		MaxCPUs:         opts.MaxCPUs,
@@ -1426,6 +1441,11 @@ type Container struct {
 	// Tailscale indicates the container was started with Tailscale networking.
 	// Label: md.tailscale
 	Tailscale bool
+	// TailscaleTags are the tags of the container's node. Empty for a
+	// container created before md recorded them, whose node has
+	// DefaultTailscaleTag.
+	// Label: md.tailscale_tags
+	TailscaleTags []string
 	// USB indicates the container was started with USB passthrough.
 	// Label: md.usb
 	USB bool
@@ -1487,6 +1507,8 @@ func unmarshalContainer(ctx context.Context, client *Client, data []byte) (Conta
 			ct.Display = v == "1"
 		case "md.tailscale":
 			ct.Tailscale = v == "1"
+		case "md.tailscale_tags":
+			ct.TailscaleTags = strings.Fields(v)
 		case "md.usb":
 			ct.USB = v == "1"
 		case "md.sudo":
@@ -1754,6 +1776,7 @@ func (c *Container) Connect(ctx context.Context, stdout, stderr io.Writer, opts 
 	}
 	if opts.tailscale() {
 		c.Tailscale = true
+		c.TailscaleTags = opts.tailscaleTags()
 		c.State = "running"
 		result.TailscaleFQDN = c.TailscaleNode(ctx).FQDN
 	}
@@ -2595,6 +2618,7 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 	startOpts := opts.startOptions(sourceInfo.MemoryLimit)
 	fork.Display = startOpts.Display
 	fork.Tailscale = startOpts.tailscale()
+	fork.TailscaleTags = startOpts.tailscaleTags()
 	fork.USB = startOpts.USB
 	fork.Sudo = startOpts.Sudo
 	// Protect the snapshot from its creation until its container exists.
@@ -3803,6 +3827,8 @@ func (c *Container) loadMDLabels(ctx context.Context, labels map[string]string) 
 			c.Display = v == "1"
 		case "md.tailscale":
 			c.Tailscale = v == "1"
+		case "md.tailscale_tags":
+			c.TailscaleTags = strings.Fields(v)
 		case "md.usb":
 			c.USB = v == "1"
 		case "md.sudo":
@@ -4140,7 +4166,7 @@ func prepareTailscaleAuthKey(ctx context.Context, opts *StartOpts) error {
 	if !opts.tailscale() {
 		return nil
 	}
-	key, err := generateTailscaleAuthKey(ctx, opts.TailscaleAPIKey)
+	key, err := generateTailscaleAuthKey(ctx, opts.TailscaleAPIKey, opts.tailscaleTags())
 	if err != nil {
 		return fmt.Errorf("tailscale auth key: %w", err)
 	}
@@ -4477,7 +4503,7 @@ func (c *Container) resumeTailscale(ctx context.Context, stdout, stderr io.Write
 			if apiKey == "" {
 				return errors.New("the tailnet removed the stopped container's Tailscale node; logging in again needs a Tailscale API key")
 			}
-			key, err := generateTailscaleAuthKey(ctx, apiKey)
+			key, err := generateTailscaleAuthKey(ctx, apiKey, tailscaleTagsOrDefault(c.TailscaleTags))
 			if err != nil {
 				return fmt.Errorf("tailscale auth key: %w", err)
 			}
@@ -4951,7 +4977,8 @@ func (c *Container) createContainer(ctx context.Context, stdout, stderr io.Write
 		runArgs = append(runArgs, "--label", "md.display=1")
 	}
 	if opts.tailscale() {
-		runArgs = append(runArgs, "--label", "md.tailscale=1")
+		// Space-separated: list output joins labels with commas.
+		runArgs = append(runArgs, "--label", "md.tailscale=1", "--label", "md.tailscale_tags="+strings.Join(opts.tailscaleTags(), " "))
 	}
 	if opts.USB {
 		runArgs = append(runArgs, "--label", "md.usb=1")

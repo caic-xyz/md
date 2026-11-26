@@ -9,6 +9,7 @@ package md
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -990,6 +991,8 @@ func (r *authOrderRuntime) RunOut(ctx context.Context, dir string, stdout, stder
 
 type authKeyTransport struct {
 	events *[]string
+	// tags, when set, receives the tags of each requested key.
+	tags *[][]string
 }
 
 func (r *authKeyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -997,7 +1000,27 @@ func (r *authKeyTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 		return nil, fmt.Errorf("unexpected request: %s %s", req.Method, req.URL)
 	}
 	*r.events = append(*r.events, "key")
-	return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"key":"test-key"}`)), Header: make(http.Header)}, nil
+	var want tailscaleKey
+	dec := json.NewDecoder(req.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&want); err != nil {
+		return nil, err
+	}
+	if want.Capabilities == nil {
+		return nil, errors.New("auth key request without capabilities")
+	}
+	if r.tags != nil {
+		*r.tags = append(*r.tags, want.Capabilities.Devices.Create.Tags)
+	}
+	created := want
+	created.ID = "kTEST1CNTRL"
+	created.Key = "test-key"
+	created.KeyType = "auth"
+	body, err := json.Marshal(&created)
+	if err != nil {
+		return nil, err
+	}
+	return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(body)), Header: make(http.Header)}, nil
 }
 
 func TestContainerAuthKeyOrdering(t *testing.T) { //nolint:paralleltest // replaces the process-wide default HTTP transport.

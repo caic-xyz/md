@@ -629,6 +629,8 @@ func (a *app) cmdStart(ctx context.Context, args []string) error {
 	display := fs.Bool("display", false, "Enable X11/VNC display")
 	fs.BoolVar(display, "d", false, "Enable X11/VNC display")
 	tailscale := fs.Bool("tailscale", false, "Enable Tailscale networking")
+	tailscaleTags := &stringSlice{}
+	fs.Var(tailscaleTags, "tailscale-tag", "Tailscale tag of the container's node (default: "+md.DefaultTailscaleTag+"); may be repeated")
 	usb := fs.Bool("usb", false, "Pass through USB devices and attached serial adapters")
 	sudoFlag := fs.Bool("sudo", false, "Enable root access via sudo (random per-container password)")
 	cf := addContainerFlags(fs, true)
@@ -698,7 +700,7 @@ func (a *app) cmdStart(ctx context.Context, args []string) error {
 	if githubToken != "" {
 		extraEnv = append(extraEnv, "GITHUB_TOKEN="+githubToken)
 	}
-	tailscaleAPIKey, err := requireTailscaleAPIKey(*tailscale)
+	tailscaleAPIKey, err := requireTailscaleAPIKey(*tailscale, tailscaleTags.values)
 	if err != nil {
 		return err
 	}
@@ -710,6 +712,7 @@ func (a *app) cmdStart(ctx context.Context, args []string) error {
 		USB:                   *usb,
 		Sudo:                  *sudoFlag,
 		TailscaleAPIKey:       tailscaleAPIKey,
+		TailscaleTags:         tailscaleTags.values,
 		Caches:                caches,
 		Mounts:                mounts,
 		Labels:                labels.values,
@@ -994,10 +997,17 @@ func runTemporaryCommand(ctx context.Context, c *md.Container, stdout, stderr io
 	return 0, nil
 }
 
-// requireTailscaleAPIKey returns TAILSCALE_API_KEY when Tailscale is requested.
-func requireTailscaleAPIKey(requested bool) (string, error) {
+// requireTailscaleAPIKey returns TAILSCALE_API_KEY when Tailscale is
+// requested, and checks the -tailscale-tag values.
+func requireTailscaleAPIKey(requested bool, tags []string) (string, error) {
 	if !requested {
+		if len(tags) != 0 {
+			return "", errors.New("-tailscale-tag requires Tailscale")
+		}
 		return "", nil
+	}
+	if err := md.ValidateTailscaleTags(tags); err != nil {
+		return "", err
 	}
 	key := os.Getenv("TAILSCALE_API_KEY")
 	if key == "" {
@@ -1569,6 +1579,8 @@ func (a *app) cmdFork(ctx context.Context, args []string) error {
 	fs.Var(&display, "display", "Set X11/VNC display on fork (default: inherit; use -display=false to disable)")
 	var tailscale tristateBool
 	fs.Var(&tailscale, "tailscale", "Set Tailscale networking on fork (default: inherit; use -tailscale=false to disable)")
+	tailscaleTags := &stringSlice{}
+	fs.Var(tailscaleTags, "tailscale-tag", "Tailscale tag of the fork's node (default: inherit); may be repeated")
 	var usb tristateBool
 	fs.Var(&usb, "usb", "Set USB passthrough on fork (default: inherit; use -usb=false to disable)")
 	var sudoFlag tristateBool
@@ -1667,14 +1679,18 @@ func (a *app) cmdFork(ctx context.Context, args []string) error {
 			DestPrimary:    dest,
 		})
 	}
-	tailscaleAPIKey, err := requireTailscaleAPIKey(tailscale.resolveForkCapability(sourceCt.Tailscale))
+	tailscaleAPIKey, err := requireTailscaleAPIKey(tailscale.resolveForkCapability(sourceCt.Tailscale), tailscaleTags.values)
 	if err != nil {
 		return err
+	}
+	if len(tailscaleTags.values) == 0 {
+		tailscaleTags.values = sourceCt.TailscaleTags
 	}
 	opts := md.ForkOpts{
 		Repos:           forkRepos,
 		Display:         display.resolveForkCapability(sourceCt.Display),
 		TailscaleAPIKey: tailscaleAPIKey,
+		TailscaleTags:   tailscaleTags.values,
 		USB:             usb.resolveForkCapability(sourceCt.USB),
 		Sudo:            sudoFlag.resolveForkCapability(sourceCt.Sudo),
 		Labels:          labels.values,
