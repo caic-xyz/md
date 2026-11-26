@@ -1059,8 +1059,8 @@ type StartOpts struct {
 	Display bool
 	// Tailscale enables Tailscale networking inside the container.
 	//
-	// It is recommended to set Client.TailscaleAPIKey to enable ephemeral nodes. If Client.TailscaleAPIKey is
-	// not set, the node will not be ephemeral. Instead, an authentication URL will be printed back by md.
+	// It requires TailscaleAuthKey or a Client.TailscaleAPIKey that can mint an ephemeral pre-authorized auth
+	// key; otherwise Launch and Fork fail rather than fall back to browser authentication.
 	Tailscale bool
 	// TailscaleAuthKey is a pre-authorized Tailscale auth key.
 	//
@@ -1114,6 +1114,8 @@ type StartResult struct {
 	// TailscaleFQDN is the Tailscale FQDN assigned to the container, if any.
 	TailscaleFQDN string
 	// TailscaleAuthURL is the Tailscale auth URL when no pre-auth key was provided.
+	//
+	// TODO: Always empty; see tryReadTailscaleAuthURL.
 	TailscaleAuthURL string
 }
 
@@ -1736,7 +1738,9 @@ func (c *Container) Launch(ctx context.Context, stdout, stderr io.Writer, opts *
 			return err
 		}
 		// The auth key expires in five minutes; generate it after building.
-		c.prepareTailscaleAuthKey(ctx, stdout, opts)
+		if err := c.prepareTailscaleAuthKey(ctx, opts); err != nil {
+			return err
+		}
 		return c.createContainer(ctx, stdout, stderr, opts, id)
 	}()
 	if err != nil {
@@ -2626,7 +2630,9 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 		}
 		attempt.snapshotCreated = true
 		// Generate the short-lived key after lock contention and snapshotting.
-		fork.prepareTailscaleAuthKey(ctx, stdout, startOpts)
+		if err := fork.prepareTailscaleAuthKey(ctx, startOpts); err != nil {
+			return err
+		}
 		return fork.createContainer(ctx, stdout, stderr, startOpts, snapshotImage)
 	}()
 	if err != nil {
@@ -2648,6 +2654,7 @@ func (c *Container) Fork(ctx context.Context, stdout, stderr io.Writer, opts *Fo
 	}
 	attempt.snapshotCreated = false
 
+	// TODO: Unreachable; see tryReadTailscaleAuthURL.
 	if startOpts.Tailscale && startOpts.TailscaleAuthKey == "" {
 		if _, err := fork.tryReadTailscaleAuthURL(ctx, stdout); err != nil {
 			return nil, fmt.Errorf("reading Tailscale auth URL: %w", err)
@@ -4147,19 +4154,20 @@ func (c *Container) recordFetchedBranchSyncPoints(ctx context.Context, r *Repo, 
 	return nil
 }
 
-func (c *Container) prepareTailscaleAuthKey(ctx context.Context, stdout io.Writer, opts *StartOpts) {
+// prepareTailscaleAuthKey mints an ephemeral pre-authorized auth key when
+// Tailscale is requested without one. It fails instead of leaving the node to
+// browser authentication.
+func (c *Container) prepareTailscaleAuthKey(ctx context.Context, opts *StartOpts) error {
 	if !opts.Tailscale || opts.TailscaleAuthKey != "" {
-		return
+		return nil
 	}
 	key, err := generateTailscaleAuthKey(ctx, c.TailscaleAPIKey)
 	if err != nil {
-		if !opts.Quiet {
-			_, _ = fmt.Fprintf(stdout, "- Could not generate Tailscale auth key (%v), will use browser auth\n", err)
-		}
-		return
+		return fmt.Errorf("tailscale auth key: %w", err)
 	}
 	opts.TailscaleAuthKey = key
 	c.tailscaleEphemeral = true
+	return nil
 }
 
 func (c *Container) tailscaleDeviceID(ctx context.Context) (string, error) {
@@ -5121,6 +5129,18 @@ func waitForTCP(ctx context.Context, addr string, deadline time.Time) error {
 // A single docker exec runs a polling loop: jq validates the JSON file and
 // prints it compactly; if invalid or empty, sleep and retry. Go parses the
 // result with tailscaleUpStatus for validation.
+//
+// TODO: This browser authentication path is dead code. prepareTailscaleAuthKey
+// fails Launch and Fork when it cannot mint a pre-authorized auth key, so every
+// Tailscale container this md version creates carries TAILSCALE_AUTHKEY.
+// provisionContainer and Fork therefore never call this reader, and
+// StartResult.TailscaleAuthURL stays empty. Only the browser authentication
+// branch of start_tailscale in rsc/specialized/root/start.sh can still run:
+// when reviving a container that an older md created without an auth key.
+// Delete this reader, its two call sites, tailscaleUpStatus,
+// StartResult.TailscaleAuthURL, the md CLI "Tailscale auth" line, and that
+// start.sh branch with /run/md/tailscale_auth_url.json together.
+// caic reads StartResult.TailscaleAuthURL, so drop its use when bumping md.
 func (c *Container) tryReadTailscaleAuthURL(ctx context.Context, stdout io.Writer) (string, error) {
 	readCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
@@ -5158,6 +5178,7 @@ func (c *Container) provisionContainer(ctx context.Context, stdout, stderr io.Wr
 
 	// Try to read the Tailscale auth URL via docker exec before SSH is up,
 	// so the user can authenticate even if SSHD is slow to start.
+	// TODO: Unreachable; see tryReadTailscaleAuthURL.
 	if opts.Tailscale && opts.TailscaleAuthKey == "" {
 		authURL, err := c.tryReadTailscaleAuthURL(ctx, stdout)
 		if err != nil {

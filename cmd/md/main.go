@@ -782,6 +782,7 @@ func printContainerSummary(ctx context.Context, ct *md.Container, r *md.StartRes
 		if r.TailscaleFQDN != "" {
 			fmt.Printf("  >  Tailscale FQDN: %s\n", r.TailscaleFQDN)
 		}
+		// TODO: Never printed; see md.Container.tryReadTailscaleAuthURL.
 		if r.TailscaleAuthURL != "" {
 			fmt.Printf("  >  Tailscale auth: %s\n", r.TailscaleAuthURL)
 		}

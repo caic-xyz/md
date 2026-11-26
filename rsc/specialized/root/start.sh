@@ -393,6 +393,11 @@ start_tailscale() {
       log "Tailscale connected: $ts_fqdn"
     fi
   else
+    # TODO: Dead for containers the current md creates: md fails Launch and
+    # Fork without a pre-authorized auth key, so TAILSCALE_AUTHKEY is always
+    # set. Only reviving a container an older md created without one reaches
+    # this browser authentication branch. See tryReadTailscaleAuthURL in
+    # container.go for everything to delete with it.
     # Redirect stdout+stderr to the well-known file. tailscale up --json
     # flushes each JSON line immediately, so the file is readable as soon
     # as inotify fires on the first write.

@@ -1479,6 +1479,32 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			t.Fatalf("Launch with invalid Git object copy threshold = %v", err)
 		}
 	})
+	t.Run("prepareTailscaleAuthKey", func(t *testing.T) {
+		t.Parallel()
+		t.Run("valid", func(t *testing.T) {
+			t.Parallel()
+			for _, opts := range []StartOpts{{}, {Tailscale: true, TailscaleAuthKey: "tskey-auth-provided"}} {
+				c := &Container{Client: &Client{}}
+				want := opts.TailscaleAuthKey
+				if err := c.prepareTailscaleAuthKey(t.Context(), &opts); err != nil {
+					t.Fatalf("prepareTailscaleAuthKey(%+v) = %v", opts, err)
+				}
+				if opts.TailscaleAuthKey != want || c.tailscaleEphemeral {
+					t.Fatalf("prepareTailscaleAuthKey changed the key to %q, ephemeral=%v", opts.TailscaleAuthKey, c.tailscaleEphemeral)
+				}
+			}
+		})
+		t.Run("error", func(t *testing.T) {
+			t.Parallel()
+			// Without an API key there is no pre-authorized key; md must not
+			// leave the node to browser authentication.
+			c := &Container{Client: &Client{}}
+			opts := StartOpts{Tailscale: true}
+			if err := c.prepareTailscaleAuthKey(t.Context(), &opts); err == nil {
+				t.Fatal("prepareTailscaleAuthKey without an API key succeeded")
+			}
+		})
+	})
 	t.Run("purge_stopped_tailscale_container_before_authentication", func(t *testing.T) {
 		t.Parallel()
 		executable, err := os.Executable()
