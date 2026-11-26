@@ -1001,7 +1001,7 @@ func requireTailscaleAPIKey(requested bool) (string, error) {
 	}
 	key := os.Getenv("TAILSCALE_API_KEY")
 	if key == "" {
-		return "", errors.New("-tailscale requires TAILSCALE_API_KEY, create an API access token at https://login.tailscale.com/admin/settings/keys")
+		return "", errors.New("-tailscale requires TAILSCALE_API_KEY, create an API access token at https://console.tailscale.com/admin/settings/keys")
 	}
 	return key, nil
 }

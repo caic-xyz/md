@@ -61,7 +61,7 @@ func generateTailscaleAuthKey(ctx context.Context, apiKey string) (string, error
 	if resp.StatusCode != http.StatusOK {
 		s := string(respBody)
 		if strings.Contains(s, "tags") && strings.Contains(s, "invalid") {
-			return "", errors.New("tag:md not allowed, add it at https://login.tailscale.com/admin/acls/visual/tags")
+			return "", errors.New("tag:md not allowed, add it at https://console.tailscale.com/admin/acls/visual/tags")
 		}
 		return "", fmt.Errorf("API error %d: %s", resp.StatusCode, s)
 	}
