@@ -1935,6 +1935,9 @@ func (c *Container) Purge(ctx context.Context, stdout, stderr io.Writer) error {
 	}
 
 	for i := range c.Repos {
+		if err := c.repairSubmoduleStores(ctx, c.Repos[i].GitRoot); err != nil {
+			retErr = errors.Join(retErr, err)
+		}
 		if err := c.removeSubmoduleRemotes(ctx, &c.Repos[i]); err != nil {
 			retErr = errors.Join(retErr, err)
 		}
@@ -1986,22 +1989,10 @@ func (c *Container) FetchRecursive(ctx context.Context, stdout, stderr io.Writer
 	if err := c.checkContainerState(ctx, containerMustBeRunning); err != nil {
 		return FetchedRepository{}, err
 	}
-	tree, err := c.DiscoverSubmodules(ctx, repoIdx)
-	if err != nil {
+	if err := c.repairSubmoduleStores(ctx, c.Repos[repoIdx].GitRoot); err != nil {
 		return FetchedRepository{}, err
 	}
-	if err := c.fetchSubmoduleTree(ctx, stdout, stderr, tree, opts); err != nil {
-		return FetchedRepository{}, err
-	}
-	branches, err := c.fetchWithSubmoduleTree(ctx, stdout, stderr, &c.Repos[repoIdx], opts, &tree)
-	if err != nil {
-		return FetchedRepository{}, err
-	}
-	result := FetchedRepository{Branches: branches, Submodules: tree}
-	if err := c.retainFetchedGitlinks(ctx, stdout, stderr, &c.Repos[repoIdx], &result); err != nil {
-		return FetchedRepository{}, err
-	}
-	return result, nil
+	return c.fetchRecursive(ctx, stdout, stderr, &c.Repos[repoIdx], opts)
 }
 
 // RepoTarget selects a configured repository or one of its initialized
@@ -2119,7 +2110,11 @@ func (c *Container) Fetch(ctx context.Context, stdout, stderr io.Writer, repoIdx
 }
 
 // Pull fetches changes from the container and integrates the target branches
-// into the local repository.
+// into the local repository. Like [Container.FetchRecursive], it commits and
+// fetches initialized descendants first and retains the commits that the
+// fetched branches pin. When a mapped branch is checked out, it then checks out
+// those submodules at the new pins, leaving host submodules with local work in
+// place.
 //
 // opts controls AI commit message generation. Pass nil to use a default message.
 func (c *Container) Pull(ctx context.Context, stdout, stderr io.Writer, target RepoTarget, opts *PullOpts) error {
@@ -2173,7 +2168,7 @@ func (c *Container) Pull(ctx context.Context, stdout, stderr io.Writer, target R
 	if err := c.prepareRepoTarget(ctx, r); err != nil {
 		return err
 	}
-	fetched, err := c.fetchWithSubmoduleTree(ctx, stdout, stderr, r, &FetchOpts{Provider: opts.Provider, ContextTokens: opts.ContextTokens, Commit: true, NoVerify: opts.NoVerify}, nil)
+	result, err := c.fetchRecursive(ctx, stdout, stderr, r, &FetchOpts{Provider: opts.Provider, ContextTokens: opts.ContextTokens, Commit: true, NoVerify: opts.NoVerify})
 	if err != nil {
 		return err
 	}
@@ -2183,6 +2178,15 @@ func (c *Container) Pull(ctx context.Context, stdout, stderr io.Writer, target R
 		origCommit, err = g.RevParse(ctx, "HEAD")
 		if err != nil {
 			return fmt.Errorf("reading detached HEAD: %w", err)
+		}
+	}
+	// Integration moves the host worktree only when a mapped branch is checked
+	// out, and the submodule checkouts follow it.
+	checkoutSubmodules := slices.Contains(r.Branches, currentBranch)
+	oldHead := ""
+	if checkoutSubmodules {
+		if oldHead, err = g.RevParse(ctx, "HEAD"); err != nil {
+			return fmt.Errorf("reading HEAD: %w", err)
 		}
 	}
 	integrationErr := c.pullBranches(ctx, stdout, stderr, g, r.Branches, previousTips)
@@ -2195,8 +2199,11 @@ func (c *Container) Pull(ctx context.Context, stdout, stderr io.Writer, target R
 	restoreErr := c.restorePullCheckout(context.WithoutCancel(ctx), stdout, stderr, g, currentBranch, origCommit)
 	syncCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
-	syncErr := c.recordFetchedBranchSyncPoints(syncCtx, r, fetched)
-	return errors.Join(syncErr, restoreErr)
+	syncErr := c.recordFetchedBranchSyncPoints(syncCtx, r, result.Branches)
+	if restoreErr != nil || !checkoutSubmodules {
+		return errors.Join(syncErr, restoreErr)
+	}
+	return errors.Join(syncErr, c.checkoutPulledSubmodules(ctx, stdout, stderr, r.GitRoot, oldHead, result.Submodules))
 }
 
 // Diff writes the target checkout's changes, including untracked files,
@@ -2950,6 +2957,11 @@ func (c *Container) resolveRepoTarget(ctx context.Context, target RepoTarget) (*
 		return nil, fmt.Errorf("repo index %d out of range [0, %d)", target.RepoIndex, len(c.Repos))
 	}
 	mapping := &c.Repos[target.RepoIndex]
+	// Every target operation runs host Git commands that recurse into
+	// submodule worktrees.
+	if err := c.repairSubmoduleStores(ctx, mapping.GitRoot); err != nil {
+		return nil, err
+	}
 	if target.Submodule == "" {
 		if target.Branch != "" {
 			return nil, errors.New("a branch override requires a submodule target")
@@ -3159,11 +3171,17 @@ func (c *Container) initializeSubmoduleStore(ctx context.Context, stdout, stderr
 	if err := c.runCmdOut(ctx, "", []string{"git", "init", "-q", "--bare", tmp}, stdout, stderr); err != nil {
 		return err
 	}
+	// git submodule update sets core.worktree on an existing module gitdir and
+	// refuses to check out when core.bare is also true. The object store
+	// commands below force bare mode on their own.
+	store := c.objectStore(tmp)
+	if _, err := store.RunGit(ctx, "config", "--unset", "core.bare"); err != nil {
+		return err
+	}
 	config, err := c.runCmd(ctx, "", c.SSHCommand(nil, "git -C "+shellQuote(s.ContainerPath)+" config --null --list"))
 	if err != nil {
 		return err
 	}
-	store := c.objectStore(tmp)
 	for entry := range strings.SplitSeq(config, "\x00") {
 		key, value, ok := strings.Cut(entry, "\n")
 		if !ok || !strings.HasPrefix(key, "remote.") {
@@ -3205,6 +3223,25 @@ func (c *Container) initializeSubmoduleStore(ctx context.Context, stdout, stderr
 		}
 	}
 	return os.Rename(tmp, s.GitDir)
+}
+
+func (c *Container) fetchRecursive(ctx context.Context, stdout, stderr io.Writer, r *Repo, opts *FetchOpts) (FetchedRepository, error) {
+	tree, err := c.discoverSubmodules(ctx, r)
+	if err != nil {
+		return FetchedRepository{}, err
+	}
+	if err := c.fetchSubmoduleTree(ctx, stdout, stderr, tree, opts); err != nil {
+		return FetchedRepository{}, err
+	}
+	branches, err := c.fetchWithSubmoduleTree(ctx, stdout, stderr, r, opts, &tree)
+	if err != nil {
+		return FetchedRepository{}, err
+	}
+	result := FetchedRepository{Branches: branches, Submodules: tree}
+	if err := c.retainFetchedGitlinks(ctx, stdout, stderr, r, &result); err != nil {
+		return FetchedRepository{}, err
+	}
+	return result, nil
 }
 
 func (c *Container) fetchWithSubmoduleTree(ctx context.Context, stdout, stderr io.Writer, r *Repo, opts *FetchOpts, tree *SubmoduleTree) ([]FetchedBranch, error) {
@@ -3322,6 +3359,76 @@ func (c *Container) fetchSubmodule(ctx context.Context, stdout, stderr io.Writer
 		return err
 	}
 	s.CommitHash = commit
+	return nil
+}
+
+// checkoutPulledSubmodules gives each transferred submodule the checkout
+// that git submodule update --init would give after the checkout at root moved
+// from oldHead to its current HEAD. It leaves a submodule whose worktree has
+// local changes or whose HEAD is not the previous pin in place and reports it.
+// Submodules not initialized in the container are never transferred, so this
+// never clones from their remotes.
+func (c *Container) checkoutPulledSubmodules(ctx context.Context, stdout, stderr io.Writer, root, oldHead string, tree SubmoduleTree) error {
+	if len(tree) == 0 {
+		return nil
+	}
+	g := &git.Checkout{Root: root, Logger: c.Logger}
+	gitDir, err := g.RunGit(ctx, "rev-parse", "--absolute-git-dir")
+	if err != nil {
+		return err
+	}
+	newHead, err := g.RevParse(ctx, "HEAD")
+	if err != nil {
+		return err
+	}
+	store := c.objectStore(gitDir)
+	pins, err := readFetchedGitlinks(ctx, store, newHead, tree)
+	if err != nil {
+		return err
+	}
+	oldPins := map[string]string{}
+	if oldHead != "" {
+		if oldPins, err = readFetchedGitlinks(ctx, store, oldHead, tree); err != nil {
+			return err
+		}
+	}
+	for _, s := range tree {
+		pin, ok := pins[s.GitlinkPath]
+		if !ok {
+			continue
+		}
+		head := ""
+		if _, err := os.Stat(filepath.Join(s.GitRoot, ".git")); err == nil {
+			sub := &git.Checkout{Root: s.GitRoot, Logger: c.Logger}
+			if head, err = sub.RevParse(ctx, "HEAD"); err != nil {
+				return fmt.Errorf("reading submodule %s HEAD: %w", s.GitRoot, err)
+			}
+			if head != pin {
+				if head != oldPins[s.GitlinkPath] {
+					_, _ = fmt.Fprintf(stderr, "Leaving submodule %s at %s: it is not at the previous pin; run git submodule update to check out %s\n", s.GitRoot, head, pin)
+					continue
+				}
+				status, err := sub.RunGit(ctx, "status", "--porcelain", "--untracked-files=no")
+				if err != nil {
+					return fmt.Errorf("checking submodule %s changes: %w", s.GitRoot, err)
+				}
+				if status != "" {
+					_, _ = fmt.Fprintf(stderr, "Leaving submodule %s at %s: it has local changes; run git submodule update to check out %s\n", s.GitRoot, head, pin)
+					continue
+				}
+			}
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+		if head != pin {
+			if err := c.runCmdOut(ctx, root, []string{"git", "submodule", "update", "--init", "--no-fetch", "--", s.GitlinkPath}, stdout, stderr); err != nil {
+				return fmt.Errorf("checking out submodule %s: %w", s.GitRoot, err)
+			}
+		}
+		if err := c.checkoutPulledSubmodules(ctx, stdout, stderr, s.GitRoot, head, s.Children); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -3466,6 +3573,35 @@ func walkSubmodules(t SubmoduleTree, prefix string, childFirst bool, yield func(
 	return true
 }
 
+// walkSubmoduleStores visits every module store below gitDir, including nested
+// stores and stores with no host worktree.
+func walkSubmoduleStores(gitDir string, visit func(dir string) error) error {
+	modulesDir := filepath.Join(gitDir, "modules")
+	return filepath.WalkDir(modulesDir, func(dir string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			if dir == modulesDir && errors.Is(walkErr, fs.ErrNotExist) {
+				return nil
+			}
+			return walkErr
+		}
+		if !entry.IsDir() {
+			return nil
+		}
+		if _, err := os.Stat(filepath.Join(dir, "HEAD")); errors.Is(err, fs.ErrNotExist) {
+			return nil
+		} else if err != nil {
+			return err
+		}
+		if err := visit(dir); err != nil {
+			return err
+		}
+		if err := walkSubmoduleStores(dir, visit); err != nil {
+			return err
+		}
+		return fs.SkipDir
+	})
+}
+
 func localModulePath(p string) bool {
 	return path.Clean(p) == p && p != "." && filepath.IsLocal(filepath.FromSlash(p))
 }
@@ -3560,44 +3696,67 @@ func (c *Container) removeSubmoduleFetchRefs(ctx context.Context, root string) e
 	if err != nil {
 		return err
 	}
-	var clean func(string) error
-	clean = func(modulesDir string) error {
-		return filepath.WalkDir(modulesDir, func(dir string, entry fs.DirEntry, walkErr error) error {
-			if walkErr != nil {
-				if dir == modulesDir && errors.Is(walkErr, fs.ErrNotExist) {
-					return nil
-				}
-				return walkErr
-			}
-			if !entry.IsDir() {
-				return nil
-			}
-			if _, err := os.Stat(filepath.Join(dir, "HEAD")); errors.Is(err, fs.ErrNotExist) {
-				return nil
-			} else if err != nil {
-				return err
-			}
-			store := c.objectStore(dir)
-			refs, err := store.RunGit(ctx, "for-each-ref", "--format=%(refname)", c.submoduleFetchRef(""))
-			if err != nil {
-				return err
-			}
-			if refs != "" {
-				var updates strings.Builder
-				for ref := range strings.SplitSeq(refs, "\n") {
-					fmt.Fprintf(&updates, "delete %s\n", ref)
-				}
-				if err := updateStoreRefs(ctx, store, updates.String()); err != nil {
-					return err
-				}
-			}
-			if err := clean(filepath.Join(dir, "modules")); err != nil {
-				return err
-			}
-			return fs.SkipDir
-		})
+	return walkSubmoduleStores(gd, func(dir string) error {
+		store := c.objectStore(dir)
+		refs, err := store.RunGit(ctx, "for-each-ref", "--format=%(refname)", c.submoduleFetchRef(""))
+		if err != nil || refs == "" {
+			return err
+		}
+		var updates strings.Builder
+		for ref := range strings.SplitSeq(refs, "\n") {
+			fmt.Fprintf(&updates, "delete %s\n", ref)
+		}
+		return updateStoreRefs(ctx, store, updates.String())
+	})
+}
+
+// repairSubmoduleStores makes every host module store usable as a submodule
+// gitdir. Earlier md versions created stores bare. git submodule update then
+// adds core.worktree, after which every host command that recurses into
+// submodules fails. A store without an index never had a checkout, so a
+// worktree holding only a gitfile is the leftover of that failed update;
+// removing it lets the next update check out the pinned commit.
+func (c *Container) repairSubmoduleStores(ctx context.Context, root string) error {
+	g := &git.Checkout{Root: root, Logger: c.Logger}
+	gd, err := g.RunGit(ctx, "rev-parse", "--absolute-git-dir")
+	if err != nil {
+		return err
 	}
-	return clean(filepath.Join(gd, "modules"))
+	return walkSubmoduleStores(gd, func(dir string) error {
+		config := filepath.ToSlash(filepath.Join(dir, "config"))
+		bare, err := g.RunGit(ctx, "config", "--file", config, "--type=bool", "--default=false", "--get", "core.bare")
+		if err != nil || bare != "true" {
+			return err
+		}
+		c.Logger.InfoContext(ctx, "repairing bare submodule store", "dir", dir)
+		if _, err := g.RunGit(ctx, "config", "--file", config, "--unset", "core.bare"); err != nil {
+			return err
+		}
+		worktree, err := g.RunGit(ctx, "config", "--file", config, "--default=", "--get", "core.worktree")
+		if err != nil || worktree == "" {
+			return err
+		}
+		if _, err := os.Stat(filepath.Join(dir, "index")); !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+		if !filepath.IsAbs(worktree) {
+			worktree = filepath.Join(dir, worktree)
+		}
+		entries, err := os.ReadDir(worktree)
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		} else if err != nil {
+			return err
+		}
+		if len(entries) != 1 || entries[0].Name() != ".git" || !entries[0].Type().IsRegular() {
+			return nil
+		}
+		if err := os.Remove(filepath.Join(worktree, ".git")); err != nil {
+			return err
+		}
+		_, err = g.RunGit(ctx, "config", "--file", config, "--unset", "core.worktree")
+		return err
+	})
 }
 
 // removeSubmoduleRemotes removes only transports owned by this container,

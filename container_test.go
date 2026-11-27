@@ -22,6 +22,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"runtime"
 	"slices"
 	"strconv"
@@ -3789,6 +3790,172 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 				t.Fatalf("scratch.txt = %q, want preserved untracked contents", got)
 			}
 		})
+		t.Run("retains_container_only_submodule_commits", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
+			// newSource returns a repository that never receives the container's
+			// submodule commits, so a host checkout can only find them in what
+			// Pull transferred.
+			newSource := func(t *testing.T) string {
+				ctx := t.Context()
+				source := t.TempDir()
+				runTestGit(t, ctx, source, "init", "-q", "--initial-branch=main")
+				runTestGit(t, ctx, source, "commit", "-q", "--allow-empty", "-m", "source")
+				return source
+			}
+			addModule := func(t *testing.T, parent, link string) string {
+				ctx := t.Context()
+				runTestGit(t, ctx, parent, "-c", "protocol.file.allow=always", "submodule", "add", "-q", newSource(t), link)
+				dir := filepath.Join(parent, link)
+				runTestGit(t, ctx, dir, "config", "user.name", "Test")
+				runTestGit(t, ctx, dir, "config", "user.email", "test@test")
+				return dir
+			}
+			// commitAll commits content in dir and the new Gitlinks in each
+			// superproject up to the container root, then returns dir's HEAD.
+			commitAll := func(t *testing.T, content string, dirs ...string) string {
+				ctx := t.Context()
+				writeTestFile(t, filepath.Join(dirs[0], "work.txt"), content)
+				for _, dir := range dirs {
+					runTestGit(t, ctx, dir, "add", ".")
+					runTestGit(t, ctx, dir, "commit", "-q", "-m", "container only")
+				}
+				return runTestGit(t, ctx, dirs[0], "rev-parse", "HEAD")
+			}
+			setup := func(t *testing.T) (ct *Container, hostDir string, pin func(content string) string) {
+				ct, hostDir, containerDir := setupPullTest(t)
+				dep := addModule(t, containerDir, "dep")
+				return ct, hostDir, func(content string) string { return commitAll(t, content, dep, containerDir) }
+			}
+			pull := func(t *testing.T, ct *Container) string {
+				var stderr bytes.Buffer
+				if err := ct.Pull(t.Context(), io.Discard, &stderr, RepoTarget{}, nil); err != nil {
+					t.Fatalf("Pull: %v\n%s", err, stderr.String())
+				}
+				return stderr.String()
+			}
+			// assertCheckout verifies that the host pins and checks out commit at
+			// the submodule path, as git submodule update --init would.
+			assertCheckout := func(t *testing.T, hostDir, link, commit string) {
+				ctx := t.Context()
+				if got := runTestGit(t, ctx, hostDir, "rev-parse", "main:"+link); got != commit {
+					t.Fatalf("host gitlink %s = %s, want %s", link, got, commit)
+				}
+				if got := runTestGit(t, ctx, filepath.Join(hostDir, filepath.FromSlash(link)), "rev-parse", "HEAD"); got != commit {
+					t.Fatalf("host submodule %s HEAD = %s, want %s", link, got, commit)
+				}
+				if got := runTestGit(t, ctx, hostDir, "status", "--porcelain", "--untracked-files=no"); got != "" {
+					t.Fatalf("host status after checkout = %q", got)
+				}
+			}
+			// legacyStore integrates the pinning superproject commit without md and
+			// adds the bare store that earlier md versions created, without the pin.
+			legacyStore := func(t *testing.T, hostDir string) {
+				ctx := t.Context()
+				runTestGit(t, ctx, hostDir, "pull", "-q", "--ff-only", "md-test", "main")
+				store := filepath.Join(hostDir, ".git", "modules", "dep")
+				runTestGit(t, ctx, "", "init", "-q", "--bare", store)
+				source := runTestGit(t, ctx, hostDir, "config", "--file", ".gitmodules", "submodule.dep.url")
+				runTestGit(t, ctx, "", "--git-dir="+store, "fetch", "-q", source, "+refs/heads/*:refs/remotes/origin/*")
+			}
+			t.Run("fresh_host", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
+				ct, hostDir, pin := setup(t)
+				// The host has never initialized the submodule.
+				first := pin("first\n")
+				pull(t, ct)
+				assertCheckout(t, hostDir, "dep", first)
+				// The host store exists and already holds the pin.
+				pull(t, ct)
+				assertCheckout(t, hostDir, "dep", first)
+				// The host store exists and lacks the new pin.
+				second := pin("second\n")
+				pull(t, ct)
+				assertCheckout(t, hostDir, "dep", second)
+			})
+			t.Run("nested", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
+				ct, hostDir, containerDir := setupPullTest(t)
+				dep := addModule(t, containerDir, "dep")
+				leaf := addModule(t, dep, "leaf")
+				first := commitAll(t, "first\n", leaf, dep, containerDir)
+				pull(t, ct)
+				depPin := runTestGit(t, t.Context(), dep, "rev-parse", "HEAD")
+				assertCheckout(t, hostDir, "dep", depPin)
+				if got := runTestGit(t, t.Context(), filepath.Join(hostDir, "dep", "leaf"), "rev-parse", "HEAD"); got != first {
+					t.Fatalf("host nested submodule HEAD = %s, want %s", got, first)
+				}
+				second := commitAll(t, "second\n", leaf, dep, containerDir)
+				pull(t, ct)
+				if got := runTestGit(t, t.Context(), filepath.Join(hostDir, "dep", "leaf"), "rev-parse", "HEAD"); got != second {
+					t.Fatalf("host nested submodule HEAD = %s, want %s", got, second)
+				}
+			})
+			t.Run("unmapped_checkout", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
+				ctx := t.Context()
+				ct, hostDir, pin := setup(t)
+				// Pull then updates only refs, so it leaves the worktree alone.
+				runTestGit(t, ctx, hostDir, "switch", "-q", "-c", "other")
+				first := pin("first\n")
+				pull(t, ct)
+				if got := runTestGit(t, ctx, hostDir, "rev-parse", "main:dep"); got != first {
+					t.Fatalf("host gitlink = %s, want %s", got, first)
+				}
+				if _, err := os.Stat(filepath.Join(hostDir, "dep", ".git")); !errors.Is(err, fs.ErrNotExist) {
+					t.Fatalf("submodule checked out on an unmapped branch: %v", err)
+				}
+			})
+			t.Run("leaves_local_work", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
+				ctx := t.Context()
+				ct, hostDir, pin := setup(t)
+				first := pin("first\n")
+				pull(t, ct)
+				hostDep := filepath.Join(hostDir, "dep")
+				// Pull refuses a dirty host tree unless the submodule is ignored.
+				runTestGit(t, ctx, hostDir, "config", "submodule.dep.ignore", "all")
+				runTestGit(t, ctx, hostDep, "config", "user.name", "Test")
+				runTestGit(t, ctx, hostDep, "config", "user.email", "test@test")
+				writeTestFile(t, filepath.Join(hostDep, "work.txt"), "host change\n")
+				pin("second\n")
+				if got := pull(t, ct); !strings.Contains(got, "has local changes") {
+					t.Fatalf("Pull stderr = %q, want a local changes notice", got)
+				}
+				if got := runTestGit(t, ctx, hostDep, "rev-parse", "HEAD"); got != first {
+					t.Fatalf("dirty host submodule moved to %s", got)
+				}
+				runTestGit(t, ctx, hostDep, "commit", "-q", "-am", "host commit")
+				moved := runTestGit(t, ctx, hostDep, "rev-parse", "HEAD")
+				pin("third\n")
+				if got := pull(t, ct); !strings.Contains(got, "not at the previous pin") {
+					t.Fatalf("Pull stderr = %q, want a moved HEAD notice", got)
+				}
+				if got := runTestGit(t, ctx, hostDep, "rev-parse", "HEAD"); got != moved {
+					t.Fatalf("moved host submodule changed to %s, want %s", got, moved)
+				}
+			})
+			t.Run("legacy_bare_store", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
+				ct, hostDir, pin := setup(t)
+				first := pin("first\n")
+				legacyStore(t, hostDir)
+				pull(t, ct)
+				assertCheckout(t, hostDir, "dep", first)
+			})
+			t.Run("legacy_bare_store_after_failed_update", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
+				ctx := t.Context()
+				ct, hostDir, pin := setup(t)
+				first := pin("first\n")
+				legacyStore(t, hostDir)
+				runTestGit(t, ctx, hostDir, "submodule", "init")
+				// The update fails on the bare store after adding core.worktree to
+				// it, which breaks every host command that recurses into dep.
+				update := exec.CommandContext(ctx, "git", "-c", "protocol.file.allow=always", "submodule", "update")
+				status := exec.CommandContext(ctx, "git", "status", "--porcelain")
+				for _, cmd := range []*exec.Cmd{update, status} {
+					cmd.Dir = hostDir
+					if out, err := cmd.CombinedOutput(); err == nil || !strings.Contains(string(out), "core.bare and core.worktree do not make sense") {
+						t.Fatalf("%q = %v, %s; want the bare store failure", cmd.Args, err, out)
+					}
+				}
+				pull(t, ct)
+				assertCheckout(t, hostDir, "dep", first)
+			})
+		})
 		t.Run("uses_fully_qualified_remote_tracking_ref", func(t *testing.T) { //nolint:paralleltest // fakeSSH uses t.Setenv.
 			ctx := t.Context()
 			ct, hostDir, containerDir := setupPullTest(t)
@@ -4209,11 +4376,12 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 			if err := ct.Pull(ctx, &stdout, &stderr, RepoTarget{}, nil); err != nil {
 				t.Fatalf("Pull: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 			}
-			if got := strings.Count(log.String(), `cmd="[git fetch -q md-test`); got != 1 {
-				t.Fatalf("container fetch invocations = %d, want 1\n%s", got, log.String())
+			fetches := regexp.MustCompile(`cmd="\[git fetch -q [^\]]*\bmd-test (\+refs/heads/[^\]]*)\]"`).FindAllStringSubmatch(log.String(), -1)
+			if len(fetches) != 1 {
+				t.Fatalf("container fetch invocations = %d, want 1\n%s", len(fetches), log.String())
 			}
-			if !strings.Contains(log.String(), `cmd="[git fetch -q md-test +refs/heads/main:refs/remotes/md-test/main +refs/heads/feature:refs/remotes/md-test/feature]"`) {
-				t.Fatalf("missing batched mapped-branch fetch\n%s", log.String())
+			if got := regexp.MustCompile(`\+refs/heads/(\S+):`).FindAllStringSubmatch(fetches[0][1], -1); len(got) != 2 || got[0][1] != "main" || got[1][1] != "feature" {
+				t.Fatalf("batched mapped-branch fetch = %q, want main and feature", fetches[0][1])
 			}
 			if got := runTestGit(t, ctx, hostDir, "show", "main:main-container.txt"); got != "main container" {
 				t.Fatalf("main branch container file = %q, want main container", got)

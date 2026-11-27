@@ -176,6 +176,35 @@ failed integration leaves them unchanged, so unapplied work remains visible.
 It also updates the container's remote configuration and cached remote refs,
 and commits pending container work before integrating it.
 
+`md pull` also transfers the submodule commits that the pulled branches pin,
+including commits that exist only in the container. It commits pending work in
+each submodule initialized in the container, from the leaves up, so each
+superproject commit records the new Gitlink. It then fetches every pinned
+commit into the host's submodule store under
+`refs/md/containers/<container>/submodule/pins/<commit>`, creating the store
+when the host has not initialized the submodule yet. `md purge` deletes these
+refs.
+
+When a mapped branch is checked out on the host, the integration moves the host
+worktree, and `md pull` then checks out those submodules, nested ones included,
+as `git submodule update --init --no-fetch` would: each at the commit that the
+new superproject checkout pins, on a detached HEAD. It initializes a submodule
+the host has not initialized yet. It leaves a host submodule in place and says
+so when its worktree has local changes or its HEAD is not the commit that the
+previous superproject checkout pinned; the start-of-pull check for local
+changes already refuses both unless the submodule is configured as ignored.
+With any other branch, or a detached HEAD, checked out, `md pull` updates only
+refs and checks out no submodule. Submodules not initialized in the container
+are not transferred and not checked out. `md pull` moves no host submodule
+branch; push a pinned commit from the host submodule to publish it.
+
+Earlier md versions created that store as a bare repository, which `git
+submodule update` cannot check out and which then breaks every host Git
+command that recurses into submodules. `md diff`, `md pull`, `md push` and
+`md purge` repair such a store before running Git on the host. When a failed
+update left only a `.git` file in the submodule worktree, md removes it, so the
+submodule can be checked out again.
+
 Because that container commit runs in the repository checkout, it triggers the
 repository's own `pre-commit` and `commit-msg` hooks. Pass `-no-verify` to
 commit with `git commit --no-verify` instead, skipping both hooks. The flag
@@ -247,8 +276,8 @@ advances the submodule's integration point independently of its superproject.
 Purging the container removes its submodule transport remotes too.
 Commit the changed gitlink in the superproject separately when needed.
 
-`-all` operates on the container's explicitly mapped repositories. It does not
-recursively synchronize their submodules.
+`-all` operates on the container's explicitly mapped repositories. It
+integrates no submodule branches; it only transfers their pinned commits.
 
 Library callers can select an initialized descendant with
 [`RepoTarget`](../container.go). Its integration point belongs to the selected
