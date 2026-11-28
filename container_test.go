@@ -2913,6 +2913,51 @@ func TestContainer(t *testing.T) { //nolint:tparallel // Pull uses fakeSSH with 
 		}
 	})
 	t.Run("pushSubmodules", func(t *testing.T) {
+		t.Run("remote_fallback", func(t *testing.T) {
+			ctx := t.Context()
+			fakeSSH(t)
+			t.Setenv("GIT_ALLOW_PROTOCOL", "file:ssh")
+			ct := &Container{Client: testClient(t), Logger: testLogger(t), Name: "md-test"}
+			host, child, dst := canonicalTempDir(t), canonicalTempDir(t), canonicalTempDir(t)
+			leaf := canonicalTempDir(t)
+			for _, dir := range []string{host, child, leaf} {
+				runTestGit(t, ctx, dir, "init", "-q", "--initial-branch=main")
+				runTestGit(t, ctx, dir, "config", "user.name", "Test")
+				runTestGit(t, ctx, dir, "config", "user.email", "test@example.invalid")
+			}
+			runTestGit(t, ctx, leaf, "commit", "-qm", "leaf", "--allow-empty")
+			runTestGit(t, ctx, child, "submodule", "add", "-q", leaf, "nested")
+			runTestGit(t, ctx, child, "config", "--file", ".gitmodules", "submodule.nested.url", "../leaf.git")
+			runTestGit(t, ctx, child, "add", ".gitmodules")
+			runTestGit(t, ctx, child, "commit", "-qm", "pin nested module")
+			runTestGit(t, ctx, host, "submodule", "add", "-q", "--name", "library", child, "lib with space")
+			runTestGit(t, ctx, host, "config", "--file", ".gitmodules", "submodule.library.url", "git@example.invalid:org/child.git")
+			runTestGit(t, ctx, host, "add", ".gitmodules")
+			runTestGit(t, ctx, host, "commit", "-qm", "pin child module")
+			hostChild := filepath.Join(host, "lib with space")
+			runTestGit(t, ctx, hostChild, "config", "--local", "submodule.nested.url", leaf)
+			runTestGit(t, ctx, hostChild, "submodule", "update", "--init")
+			for _, dir := range []string{hostChild, filepath.Join(hostChild, "nested")} {
+				runTestGit(t, ctx, dir, "remote", "remove", "origin")
+			}
+			runTestGit(t, ctx, "", "clone", "-q", host, dst)
+			var stderr bytes.Buffer
+			if err := ct.pushSubmodules(ctx, io.Discard, &stderr, filepath.ToSlash(dst), host, "", true); err != nil {
+				t.Fatalf("pushSubmodules: %v: %s", err, stderr.String())
+			}
+			for _, sub := range []struct{ path, url string }{
+				{"lib with space", "https://example.invalid/org/child.git"},
+				{"lib with space/nested", "https://example.invalid/org/leaf.git"},
+			} {
+				dir := filepath.Join(dst, filepath.FromSlash(sub.path))
+				if got := runTestGit(t, ctx, dir, "remote", "get-url", "origin"); got != sub.url {
+					t.Errorf("%s origin = %q, want %q", sub.path, got, sub.url)
+				}
+				if got := runTestGit(t, ctx, dir, "config", "--get", "remote.origin.fetch"); got != "+refs/heads/*:refs/remotes/origin/*" {
+					t.Errorf("%s origin fetch refspec = %q", sub.path, got)
+				}
+			}
+		})
 		for _, tc := range []struct {
 			name      string
 			shallow   bool

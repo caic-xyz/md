@@ -4813,8 +4813,10 @@ func (c *Container) submoduleGitConfigCommands(ctx context.Context, root string,
 
 // pushSubmodules transfers submodule bare repos from hostGitRoot into the
 // container at containerRepoPath and initializes them at all nesting depths
-// without requiring network access. containerRepoPath is the absolute path
-// inside the container (e.g. /home/user/src/myrepo).
+// without requiring network access. Modules without a mirrored remote get
+// an origin from the parent repository's initialized submodule URL, using
+// the same HTTPS conversion as mirrored remotes. containerRepoPath is the
+// absolute path inside the container (e.g. /home/user/src/myrepo).
 //
 // Returns nil when no submodules are declared or when submodules are declared
 // but not yet cloned on the host (uninitialized).
@@ -4905,7 +4907,12 @@ func (c *Container) pushSubmodules(ctx context.Context, stdout, stderr io.Writer
 	// Only declared modules whose object stores were transferred are initialized;
 	// a missing object or a failed nested checkout must fail provisioning.
 	script := "cd " + shellQuote(containerRepoPath) + ` && __md_sm_fix() {
-  local gd line name val names
+  local gd line name val names remotes url
+  local -a remote_config=()
+  # A parent fallback is available during checkout before md installs it.
+  if [ -n "${1:-}" ]; then
+    remote_config=(-c "remote.origin.url=$1")
+  fi
   gd=$(git rev-parse --git-dir)
   [ -d "$gd/modules" ] || return 0
 
@@ -4925,7 +4932,7 @@ func (c *Container) pushSubmodules(ctx context.Context, stdout, stderr io.Writer
   # Initialize the selected declarations, retaining their actual URLs.
   for name in "${names[@]}"; do
     val=$(git config --file .gitmodules "submodule.$name.path")
-    git submodule init -q -- "$val" || return $?
+    git "${remote_config[@]}" submodule init -q -- "$val" || return $?
   done
 
   # Phase 2: remove stale directories left by previous failed checkouts,
@@ -4937,21 +4944,54 @@ func (c *Container) pushSubmodules(ctx context.Context, stdout, stderr io.Writer
   done
 
   # Phase 3: clone from local module dirs and checkout (instant, no network).
-  git -c advice.detachedHead=false submodule update --no-fetch || return $?
+  git -c advice.detachedHead=false submodule update --no-fetch >&2 || return $?
 
-  # Phase 4: recurse into checked-out submodules.
+  # Report fallback URLs for md to configure, and pass them to child init
+  # so Git can resolve nested relative URLs.
   for name in "${names[@]}"; do
     val=$(git config --file .gitmodules "submodule.$name.path")
     if [ -f "$val/.git" ]; then
+      remotes=$(git -C "$val" remote) || return $?
+      url=
+      if [ -z "$remotes" ]; then
+        url=$(git config --local --get "submodule.$name.url") || return $?
+        printf '%s\0%s\0' "$PWD/$val" "$url" || return $?
+      fi
       git -C "$val" update-ref ` + shellQuote(containerSyncRefPrefix+"HEAD") + ` HEAD || return $?
-      (cd "$val" && __md_sm_fix) || return $?
+      (cd "$val" && __md_sm_fix "$url") || return $?
     fi
     true
   done
 }
 export -f __md_sm_fix && __md_sm_fix`
-	if err := c.runCmdOut(ctx, "", c.SSHCommand(nil, script), stdout, stderr); err != nil {
+	var fallbacks bytes.Buffer
+	if err := c.runCmdOut(ctx, "", c.SSHCommand(nil, script), &fallbacks, stderr); err != nil {
 		return fmt.Errorf("submodule update: %w", err)
+	}
+	var origins strings.Builder
+	for records := fallbacks.String(); records != ""; {
+		dir, rest, hasDir := strings.Cut(records, "\x00")
+		rawURL, rest, hasURL := strings.Cut(rest, "\x00")
+		if !hasDir || !hasURL {
+			return errors.New("invalid submodule remote configuration response")
+		}
+		origin := convertGitURLToHTTPS(rawURL)
+		if origin == "" {
+			return fmt.Errorf("invalid origin URL for submodule %s", dir)
+		}
+		fmt.Fprintf(&origins, "%s\x00%s\x00", dir, origin)
+		records = rest
+	}
+	if origins.Len() != 0 {
+		args := c.SSHCommand(nil, `while IFS= read -r -d '' dir && IFS= read -r -d '' url; do
+  git -C "$dir" remote add -- origin "$url" || exit
+done`)
+		cmd := exec.CommandContext(ctx, args[0], args[1:]...) //nolint:gosec // md-owned SSH command
+		cmd.Env = c.commandEnv("LANG=C")
+		cmd.Stdin = strings.NewReader(origins.String())
+		if err := c.runCommandOut(ctx, cmd, stdout, stderr); err != nil {
+			return fmt.Errorf("configure submodule origins: %w", err)
+		}
 	}
 	return nil
 }
