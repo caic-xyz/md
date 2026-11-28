@@ -3716,6 +3716,13 @@ func (c *Container) removeSubmoduleFetchRefs(ctx context.Context, root string) e
 // submodules fails. A store without an index never had a checkout, so a
 // worktree holding only a gitfile is the leftover of that failed update;
 // removing it lets the next update check out the pinned commit.
+//
+// TODO: Serialize this repair per host module store. Tasks on different
+// branches can share the same .git/modules store. If both read core.bare=true,
+// the second unset can exit with status 5 after the first removes the key.
+// A task can also observe core.bare already unset while the first task is
+// still cleaning up the gitfile and core.worktree. A repair error propagates
+// through FetchRecursive and can fail a turn snapshot.
 func (c *Container) repairSubmoduleStores(ctx context.Context, root string) error {
 	g := &git.Checkout{Root: root, Logger: c.Logger}
 	gd, err := g.RunGit(ctx, "rev-parse", "--absolute-git-dir")
